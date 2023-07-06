@@ -1,0 +1,12 @@
+apiVersion: policy.k8s.aws.nodeagent/v1
+kind: PolicyEndpoints
+metadata:
+  labels:
+    app.kubernetes.io/name: policyendpoints
+    app.kubernetes.io/instance: policyendpoints-sample
+    app.kubernetes.io/part-of: nodeagent
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: nodeagent
+  name: policyendpoints-sample
+spec:
+  # TODO(user): Add fields here
