@@ -21,18 +21,6 @@ RUN apt-get update && \
     apt-get install -y zlib1g-dev
 
 COPY . ./
-# Copy the go source
-#COPY main.go main.go
-#COPY api/ api/
-#COPY pkg/ pkg/
-#COPY controllers/ controllers/
-
-# Build
-# the GOARCH has not a default value to allow the binary be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-#RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager main.go
 
 RUN make build-linux
 
@@ -51,10 +39,6 @@ RUN make build-bpf
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-#FROM gcr.io/distroless/static:nonroot
-#WORKDIR /
-#COPY --from=builder /workspace/manager .
-#USER 65532:65532
 FROM public.ecr.aws/amazonlinux/amazonlinux:2
 RUN yum update -y && \
     yum install -y iptables iproute jq && \
@@ -66,14 +50,11 @@ WORKDIR /
 COPY --from=builder /workspace/controller .
 COPY --from=builder /workspace/aws-eks-na-cli .
 COPY --from=builder /workspace/aws-eks-na-cli-v6 .
-#COPY --from=builder /workspace/cmd .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.ingress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.egress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6ingress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6egress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/events.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/v6events.bpf.o .
-#USER 65532:65532
 
 ENTRYPOINT ["/controller"]
-#ENTRYPOINT ["/manager"]
