@@ -4,6 +4,12 @@ IMAGE ?= amazon/aws-network-policy-agent
 VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME = $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 
+UNAME_ARCH = $(shell uname -m)
+ARCH = $(lastword $(subst :, ,$(filter $(UNAME_ARCH):%,x86_64:amd64 aarch64:arm64)))
+# This is only applied to the arm64 container image by default. Override to
+# provide an alternate suffix or to omit.
+IMAGE_ARCH_SUFFIX = $(addprefix -,$(filter $(ARCH),arm64))
+
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.25.0
 
