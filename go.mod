@@ -1,6 +1,6 @@
-module github.com/achevuru/aws-network-policy-agent
+module github.com/aws/aws-network-policy-agent
 
-go 1.18
+go 1.20
 
 require (
 	github.com/aws/aws-sdk-go v1.44.228
