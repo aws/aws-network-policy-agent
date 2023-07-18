@@ -70,7 +70,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	//ctrl.SetLogger(getLoggerWithLogLevel(ctrlConfig.LogLevel))
 	ctrlLogger, err := getLoggerWithLogLevel(ctrlConfig.LogLevel, ctrlConfig.LogFile)
 	if err != nil {
 		initLogger.Error(err, "unable to setup logger")
