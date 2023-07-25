@@ -186,7 +186,7 @@ func IsCatchAllIPEntry(ipAddr string) bool {
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
-	if ipSplit[1] != "32" && ipSplit[1] != "0" {
+	if ipSplit[1] != "32" && ipSplit[1] != "128" && ipSplit[1] != "0" {
 		return true
 	}
 	return false

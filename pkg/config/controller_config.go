@@ -22,11 +22,11 @@ type ControllerConfig struct {
 	LogFile string
 	// MaxConcurrentReconciles specifies the max number of reconcile loops
 	MaxConcurrentReconciles int
-	//Enable Policy decision logs streaming to CloudWatch
+	// Enable Policy decision logs streaming to CloudWatch
 	EnableCloudWatchLogs bool
-	//Enable IPv6 mode
+	// Enable IPv6 mode
 	EnableIPv6 bool
-	//Enable Network Policy
+	// Enable Network Policy
 	EnableNetworkPolicy bool
 	// Configurations for the Controller Runtime
 	RuntimeConfig RuntimeConfig

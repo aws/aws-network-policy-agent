@@ -16,7 +16,6 @@ const (
 	flagKubeconfig          = "kubeconfig"
 	flagMetricsBindAddr     = "metrics-bind-addr"
 	flagHealthProbeBindAddr = "health-probe-bind-addr"
-	flagWatchNamespace      = "watch-namespace"
 
 	defaultKubeconfig             = ""
 	defaultWatchNamespace         = corev1.NamespaceAll
@@ -32,7 +31,6 @@ type RuntimeConfig struct {
 	KubeConfig             string
 	MetricsBindAddress     string
 	HealthProbeBindAddress string
-	WatchNamespace         string
 	SyncPeriod             time.Duration
 }
 
@@ -43,8 +41,6 @@ func (c *RuntimeConfig) BindFlags(fs *pflag.FlagSet) {
 		"The address the metric endpoint binds to.")
 	fs.StringVar(&c.HealthProbeBindAddress, flagHealthProbeBindAddr, defaultHealthProbeBindAddress,
 		"The address the health probes binds to.")
-	fs.StringVar(&c.WatchNamespace, flagWatchNamespace, defaultWatchNamespace,
-		"Namespace the controller watches for updates to Kubernetes objects, If empty, all namespaces are watched.")
 }
 
 // BuildRestConfig builds the REST config for the controller runtime
@@ -71,6 +67,5 @@ func BuildRuntimeOptions(rtCfg RuntimeConfig, scheme *runtime.Scheme) ctrl.Optio
 		Scheme:                 scheme,
 		MetricsBindAddress:     rtCfg.MetricsBindAddress,
 		HealthProbeBindAddress: rtCfg.HealthProbeBindAddress,
-		Namespace:              rtCfg.WatchNamespace,
 	}
 }
