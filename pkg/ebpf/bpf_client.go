@@ -11,11 +11,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
-	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf/conntrack"
-	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf/events"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils/cp"
+	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	goebpfmaps "github.com/jayanthvn/pure-gobpf/pkg/ebpf_maps"

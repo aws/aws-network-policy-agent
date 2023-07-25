@@ -24,10 +24,10 @@ import (
 	"sync"
 	"time"
 
-	policyk8sawsv1 "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
-	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils/imds"
+	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/prometheus/client_golang/prometheus"
 	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -119,9 +119,8 @@ type PolicyEndpointsReconciler struct {
 	ebpfClient ebpf.BpfClient
 }
 
-//+kubebuilder:rbac:groups=policy.k8s.aws.nodeagent,resources=policyendpoints,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=policy.k8s.aws.nodeagent,resources=policyendpoints/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=policy.k8s.aws.nodeagent,resources=policyendpoints/finalizers,verbs=update
+//+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
+//+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints/status,verbs=get
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.Log.Info("Received a new reconcile request", "req", req)
