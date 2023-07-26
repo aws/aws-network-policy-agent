@@ -62,6 +62,8 @@ var (
 	prometheusRegistered = false
 )
 
+var mutex sync.Mutex
+
 func msSince(start time.Time) float64 {
 	return float64(time.Since(start) / time.Millisecond)
 }
@@ -206,7 +208,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 
 	for podIdentifier, _ := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
-		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, policyEndpoint, podIdentifier,
+		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace)
 		if err != nil {
 			r.Log.Error(err, "Error Parsing policy Endpoint resource", "name:", policyEndpoint.Name)
@@ -284,7 +286,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
 	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, nil, podIdentifier, targetPod.Namespace)
+		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace)
 		if err != nil {
 			r.Log.Error(err, "Error Parsing policy Endpoint resource", "name ", policyEndpoint)
 			return err
@@ -334,7 +336,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 }
 
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, podIdentifier string, resourceNamespace string) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
+	podIdentifier string, resourceNamespace string) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
 	var ingressRules, egressRules []ebpf.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
@@ -476,8 +478,10 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 
 func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Context, podIdentifier string,
 	policyEndpointName string) {
-	var policyEndpoints []string
+	mutex.Lock()
+	defer mutex.Unlock()
 
+	var policyEndpoints []string
 	if currentPESet, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		policyEndpoints = currentPESet.([]string)
 		for _, pe := range currentPESet.([]string) {
@@ -494,6 +498,9 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
 	policyEndpoint string) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
 	var currentPEList []string
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		for _, policyEndpointName := range policyEndpointList.([]string) {

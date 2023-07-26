@@ -412,12 +412,12 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool) error {
 	start := time.Now()
-	duration := msSince(start)
 	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
 	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 	if ingress {
 		err := l.detachIngressBPFProbe(hostVethName)
+		duration := msSince(start)
 		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 		if err != nil {
 			l.logger.Info("Failed to Detach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
@@ -425,6 +425,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 		}
 		l.logger.Info("Successfully detached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 		err = l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
+		duration = msSince(start)
 		sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
 		if err != nil {
 			l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
@@ -434,6 +435,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 
 	if egress {
 		err := l.detachEgressBPFProbe(hostVethName)
+		duration := msSince(start)
 		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 		if err != nil {
 			l.logger.Info("Failed to Detach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
@@ -441,6 +443,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 		}
 		l.logger.Info("Successfully detached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 		err = l.deleteBPFProgramAndMaps(podIdentifier, "egress")
+		duration = msSince(start)
 		sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
 		if err != nil {
 			l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
