@@ -19,7 +19,7 @@ package main
 import (
 	"os"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/version"
+	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
@@ -37,10 +37,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	policyk8sawsv1 "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
-	"github.com/achevuru/aws-network-policy-agent/controllers"
-	"github.com/achevuru/aws-network-policy-agent/pkg/config"
-	"github.com/achevuru/aws-network-policy-agent/pkg/metrics"
+	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/controllers"
+	"github.com/aws/aws-network-policy-agent/pkg/config"
+	"github.com/aws/aws-network-policy-agent/pkg/metrics"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -92,7 +92,7 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnableCloudWatchLogs,
-		ctrlConfig.EnableIPv6)
+		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy)
 	if err != nil {
 		setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
 		os.Exit(1)

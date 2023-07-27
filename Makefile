@@ -113,16 +113,16 @@ ARCH := $(shell uname -m | sed 's/x86_64/amd64/g; s/aarch64/arm64/g')
 BPF_VCPU = v2
 # Build BPF
 CLANG_INCLUDE := -I../../.
-EBPF_SOURCE_INGRESS_TC := ./pkg/ebpf/c/tc.ingress.bpf.c
-EBPF_BINARY_INGRESS_TC := ./pkg/ebpf/c/tc.ingress.bpf.o
-EBPF_SOURCE_EGRESS_TC := ./pkg/ebpf/c/tc.egress.bpf.c
-EBPF_BINARY_EGRESS_TC := ./pkg/ebpf/c/tc.egress.bpf.o
+EBPF_SOURCE_INGRESS_TC := ./pkg/ebpf/c/tc.v4ingress.bpf.c
+EBPF_BINARY_INGRESS_TC := ./pkg/ebpf/c/tc.v4ingress.bpf.o
+EBPF_SOURCE_EGRESS_TC := ./pkg/ebpf/c/tc.v4egress.bpf.c
+EBPF_BINARY_EGRESS_TC := ./pkg/ebpf/c/tc.v4egress.bpf.o
 EBPF_SOURCE_V6_INGRESS_TC := ./pkg/ebpf/c/tc.v6ingress.bpf.c
 EBPF_BINARY_V6_INGRESS_TC := ./pkg/ebpf/c/tc.v6ingress.bpf.o
 EBPF_SOURCE_V6_EGRESS_TC := ./pkg/ebpf/c/tc.v6egress.bpf.c
 EBPF_BINARY_V6_EGRESS_TC := ./pkg/ebpf/c/tc.v6egress.bpf.o
-EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/events.bpf.c
-EBPF_EVENTS_BINARY_TC := ./pkg/ebpf/c/events.bpf.o
+EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v4events.bpf.c
+EBPF_EVENTS_BINARY_TC := ./pkg/ebpf/c/v4events.bpf.o
 EBPF_V6_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v6events.bpf.c
 EBPF_V6_EVENTS_BINARY_TC := ./pkg/ebpf/c/v6events.bpf.o
 

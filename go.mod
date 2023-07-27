@@ -9,7 +9,6 @@ require (
 	github.com/jayanthvn/pure-gobpf v0.0.0-20230703033611-ca9f0f989d27
 	github.com/onsi/ginkgo/v2 v2.8.3
 	github.com/onsi/gomega v1.27.1
-	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.6.1
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/sys v0.8.0

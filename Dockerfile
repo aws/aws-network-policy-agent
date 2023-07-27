@@ -47,11 +47,11 @@ WORKDIR /
 COPY --from=builder /workspace/controller .
 COPY --from=builder /workspace/aws-eks-na-cli .
 COPY --from=builder /workspace/aws-eks-na-cli-v6 .
-COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.ingress.bpf.o .
-COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.egress.bpf.o .
+COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v4ingress.bpf.o .
+COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v4egress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6ingress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6egress.bpf.o .
-COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/events.bpf.o .
+COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/v4events.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/v6events.bpf.o .
 
 ENTRYPOINT ["/controller"]
