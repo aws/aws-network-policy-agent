@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
-	goebpfevents "github.com/jayanthvn/pure-gobpf/pkg/ebpf_events"
+	goebpfevents "github.com/jayanthvn/pure-gobpf/pkg/events"
 	"github.com/spf13/pflag"
 )
 
