@@ -19,7 +19,7 @@ package main
 import (
 	"os"
 
-	"github.com/aws/aws-network-policy-agent/pkg/version"
+	"github.com/achevuru/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
@@ -37,10 +37,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/aws/aws-network-policy-agent/controllers"
-	"github.com/aws/aws-network-policy-agent/pkg/config"
-	"github.com/aws/aws-network-policy-agent/pkg/metrics"
+	policyk8sawsv1 "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
+	"github.com/achevuru/aws-network-policy-agent/controllers"
+	"github.com/achevuru/aws-network-policy-agent/pkg/config"
+	"github.com/achevuru/aws-network-policy-agent/pkg/metrics"
 	//+kubebuilder:scaffold:imports
 )
 

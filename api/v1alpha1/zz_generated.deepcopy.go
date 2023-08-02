@@ -22,7 +22,9 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -132,13 +134,13 @@ func (in *PolicyEndpointSpec) DeepCopyInto(out *PolicyEndpointSpec) {
 	*out = *in
 	if in.PodSelector != nil {
 		in, out := &in.PodSelector, &out.PodSelector
-		*out = new(v1.LabelSelector)
+		*out = new(metav1.LabelSelector)
 		(*in).DeepCopyInto(*out)
 	}
 	out.PolicyRef = in.PolicyRef
 	if in.PodIsolation != nil {
 		in, out := &in.PodIsolation, &out.PodIsolation
-		*out = make([]TrafficDirection, len(*in))
+		*out = make([]networkingv1.PolicyType, len(*in))
 		copy(*out, *in)
 	}
 	if in.PodSelectorEndpoints != nil {
@@ -207,7 +209,7 @@ func (in *Port) DeepCopyInto(out *Port) {
 	*out = *in
 	if in.Protocol != nil {
 		in, out := &in.Protocol, &out.Protocol
-		*out = new(Protocol)
+		*out = new(v1.Protocol)
 		**out = **in
 	}
 	if in.Port != nil {

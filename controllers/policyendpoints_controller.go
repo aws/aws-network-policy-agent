@@ -24,12 +24,11 @@ import (
 	"sync"
 	"time"
 
-	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
+	policyk8sawsv1 "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
+	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf"
+	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
+	"github.com/achevuru/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/prometheus/client_golang/prometheus"
-	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/go-logr/logr"
+	networking "k8s.io/api/networking/v1"
 )
 
 const (

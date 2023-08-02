@@ -59,14 +59,16 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 		return fmt.Errorf("Invalid Ringbuffer FD: %d", mapFD)
 	}
 
-	eventChan, err := goebpfevents.InitRingBuffer(int(mapFD))
+	var mapFDList []int
+	mapFDList = append(mapFDList, mapFD)
+	eventChanList, err := goebpfevents.InitRingBuffer(mapFDList)
 	if err != nil {
 		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
 	} else {
 		logger.Info("Configure Event loop ... ")
 		p := EvProgram{wg: sync.WaitGroup{}}
-		p.capturePolicyEvents(eventChan, logger, enableCloudWatchLogs, enableIPv6)
+		p.capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 		if enableCloudWatchLogs {
 			logger.Info("Cloudwatch log support is enabled")
 			err = setupCW(logger)

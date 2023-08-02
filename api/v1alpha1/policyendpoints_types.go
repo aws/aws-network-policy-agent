@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -25,30 +27,16 @@ type PolicyReference struct {
 	// Name is the name of the Policy
 	Name string `json:"name"`
 
-	// Port is the port of the ServicePort.
+	// Namespace is the namespace of the Policy
 	Namespace string `json:"namespace"`
 }
 
-// +kubebuilder:validation:Enum=TCP;UDP;SCTP
-type Protocol string
-
 type NetworkAddress string
-
-// +kubebuilder: validation: Enum=Ingress;Egress
-type TrafficDirection string
-
-const (
-	ProtocolTCP             Protocol         = "TCP"
-	ProtocolUDP             Protocol         = "UDP"
-	ProtocolSCTP            Protocol         = "SCTP"
-	TrafficDirectionIngress TrafficDirection = "Ingress"
-	TrafficDirectionEgress  TrafficDirection = "Egress"
-)
 
 // Port contains information about the transport port/protocol
 type Port struct {
 	// Protocol specifies the transport protocol, default TCP
-	Protocol *Protocol `json:"protocol,omitempty"`
+	Protocol *corev1.Protocol `json:"protocol,omitempty"`
 
 	// Port specifies the numerical port for the protocol. If empty applies to all ports
 	Port *int32 `json:"port,omitempty"`
@@ -58,7 +46,7 @@ type Port struct {
 	EndPort *int32 `json:"endPort,omitempty"`
 }
 
-// EndpointInfo defines the network endpoint information for the policy
+// EndpointInfo defines the network endpoint information for the policy ingress/egress
 type EndpointInfo struct {
 	// CIDR is the network address(s) of the endpoint
 	CIDR NetworkAddress `json:"cidr"`
@@ -70,7 +58,7 @@ type EndpointInfo struct {
 	Ports []Port `json:"ports,omitempty"`
 }
 
-// PodEndpoint defines the pod endpoint information
+// PodEndpoint defines the summary information for the pods
 type PodEndpoint struct {
 	// HostIP is the IP address of the host the pod is currently running on
 	HostIP NetworkAddress `json:"hostIP"`
@@ -85,7 +73,7 @@ type PodEndpoint struct {
 // PolicyEndpointSpec defines the desired state of PolicyEndpoint
 type PolicyEndpointSpec struct {
 	// PodSelector is the podSelector from the policy resource
-	PodSelector *metav1.LabelSelector `json:"podSelector"`
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 
 	// PolicyRef is a reference to the Kubernetes NetworkPolicy resource.
 	PolicyRef PolicyReference `json:"policyRef"`
@@ -93,8 +81,8 @@ type PolicyEndpointSpec struct {
 	// PodIsolation specifies whether the pod needs to be isolated for a
 	// particular traffic direction Ingress or Egress, or both. If default isolation is not
 	// specified, and there are no ingress/egress rules, then the pod is not isolated
-	// from the point of view of this policy.
-	PodIsolation []TrafficDirection `json:"podIsolation,omitempty"`
+	// from the point of view of this policy. This follows the NetworkPolicy spec.PolicyTypes.
+	PodIsolation []networking.PolicyType `json:"podIsolation,omitempty"`
 
 	// PodSelectorEndpoints contains information about the pods
 	// matching the podSelector
