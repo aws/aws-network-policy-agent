@@ -8,9 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
-	goebpfmaps "github.com/jayanthvn/pure-gobpf/pkg/ebpf_maps"
-	goebpfpgms "github.com/jayanthvn/pure-gobpf/pkg/ebpf_progs"
+	constdef "github.com/jayanthvn/pure-gobpf/pkg/constants"
 	goelf "github.com/jayanthvn/pure-gobpf/pkg/elfparser"
+	goebpfmaps "github.com/jayanthvn/pure-gobpf/pkg/maps"
+	goebpfpgms "github.com/jayanthvn/pure-gobpf/pkg/progs"
 	goebpfutils "github.com/jayanthvn/pure-gobpf/pkg/utils"
 )
 
@@ -155,11 +156,11 @@ func MapWalk(mapID int) error {
 	}
 	unix.Close(mapFD)
 
-	if mapInfo.Type != goebpfutils.BPF_MAP_TYPE_LPM_TRIE && mapInfo.Type != goebpfutils.BPF_MAP_TYPE_LRU_HASH {
+	if mapInfo.Type != constdef.BPF_MAP_TYPE_LPM_TRIE.Index() && mapInfo.Type != constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		return fmt.Errorf("Unsupported map type, should be - LPM trie (egress/ingress maps) or LRU hash (Conntrack table)")
 	}
 
-	if mapInfo.Type == goebpfutils.BPF_MAP_TYPE_LPM_TRIE {
+	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
 		iterKey := BPFTrieKey{}
 		iterNextKey := BPFTrieKey{}
 
@@ -197,7 +198,7 @@ func MapWalk(mapID int) error {
 		}
 	}
 
-	if mapInfo.Type == goebpfutils.BPF_MAP_TYPE_LRU_HASH {
+	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		iterKey := ConntrackKey{}
 		iterNextKey := ConntrackKey{}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
@@ -250,12 +251,11 @@ func MapWalkv6(mapID int) error {
 		return err
 	}
 	unix.Close(mapFD)
-
-	if mapInfo.Type != goebpfutils.BPF_MAP_TYPE_LPM_TRIE && mapInfo.Type != goebpfutils.BPF_MAP_TYPE_LRU_HASH {
+	if mapInfo.Type != constdef.BPF_MAP_TYPE_LPM_TRIE.Index() && mapInfo.Type != constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		return fmt.Errorf("Unsupported map type, should be - LPM trie (egress/ingress maps) or LRU hash (Conntrack table)")
 	}
 
-	if mapInfo.Type == goebpfutils.BPF_MAP_TYPE_LPM_TRIE {
+	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
 		iterKey := BPFTrieKeyV6{}
 		iterNextKey := BPFTrieKeyV6{}
 
@@ -298,7 +298,7 @@ func MapWalkv6(mapID int) error {
 		}
 	}
 
-	if mapInfo.Type == goebpfutils.BPF_MAP_TYPE_LRU_HASH {
+	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		iterKey := ConntrackKeyV6{}
 		iterNextKey := ConntrackKeyV6{}
 

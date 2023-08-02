@@ -37,12 +37,12 @@ type ConntrackClient interface {
 var _ ConntrackClient = (*conntrackClient)(nil)
 
 type conntrackClient struct {
-	conntrackMap goebpfmaps.BPFMap
+	conntrackMap goebpfmaps.BpfMap
 	enableIPv6   bool
 	logger       logr.Logger
 }
 
-func NewConntrackClient(conntrackMap goebpfmaps.BPFMap, enableIPv6 bool, logger logr.Logger) *conntrackClient {
+func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool, logger logr.Logger) *conntrackClient {
 	return &conntrackClient{
 		conntrackMap: conntrackMap,
 		enableIPv6:   enableIPv6,
@@ -51,8 +51,8 @@ func NewConntrackClient(conntrackMap goebpfmaps.BPFMap, enableIPv6 bool, logger 
 }
 
 func (c *conntrackClient) CleanupConntrackMap() {
-	bpfMapApi := &goebpfmaps.BPFMap{}
-	mapInfo, err := bpfMapApi.BpfGetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
+	bpfMapApi := &goebpfmaps.BpfMap{}
+	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
 		c.logger.Info("Failed to get mapInfo for conntrack pinpath")
 		return
@@ -132,8 +132,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 }
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
-	bpfMapApi := &goebpfmaps.BPFMap{}
-	mapInfo, err := bpfMapApi.BpfGetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
+	bpfMapApi := &goebpfmaps.BpfMap{}
+	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
 		c.logger.Info("Failed to get mapInfo for conntrack pinpath")
 		return

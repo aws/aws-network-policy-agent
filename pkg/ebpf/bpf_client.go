@@ -11,11 +11,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
-	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
+	"github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
+	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf/conntrack"
+	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf/events"
+	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
+	"github.com/achevuru/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	goelf "github.com/jayanthvn/pure-gobpf/pkg/elfparser"
@@ -93,9 +93,9 @@ type EvProgram struct {
 }
 
 type BPFContext struct {
-	ingressPgmInfo   goelf.BPFdata
-	egressPgmInfo    goelf.BPFdata
-	conntrackMapInfo goebpfmaps.BPFMap
+	ingressPgmInfo   goelf.BpfData
+	egressPgmInfo    goelf.BpfData
+	conntrackMapInfo goebpfmaps.BpfMap
 }
 
 type EbpfFirewallRules struct {
@@ -106,7 +106,7 @@ type EbpfFirewallRules struct {
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL time.Duration) (*bpfClient, error) {
-	var conntrackMap goebpfmaps.BPFMap
+	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
 		policyEndpointeBPFContext: policyEndpointeBPFContext,
@@ -191,7 +191,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	if isConntrackMapPresent {
 		recoveredConntrackMap, ok := ebpfClient.GlobalMaps.Load(CONNTRACK_MAP_PIN_PATH)
 		if ok {
-			conntrackMap = recoveredConntrackMap.(goebpfmaps.BPFMap)
+			conntrackMap = recoveredConntrackMap.(goebpfmaps.BpfMap)
 		} else {
 			ebpfClient.logger.Error(err, "Unable to get conntrackMap post recovery..")
 			sdkAPIErr.WithLabelValues("RecoveryFailed").Inc()
@@ -462,7 +462,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 
 	var progFD int
 	var err error
-	var ingressProgInfo map[string]goelf.BPFdata
+	var ingressProgInfo map[string]goelf.BpfData
 	var peBPFContext BPFContext
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if ok {
@@ -481,7 +481,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 	}
 
 	l.logger.Info("Attempting to do an Ingress Attach")
-	err = goebpf.TCEgressAttach(hostVethName, progFD)
+	err = goebpf.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
 	if err != nil && utils.IsLinkNotFoundError(err.Error()) {
 		l.logger.Info("Ingress Attach failed:", "error", err)
 		return 0, err
@@ -496,7 +496,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 	var progFD int
 	var err error
-	var egressProgInfo map[string]goelf.BPFdata
+	var egressProgInfo map[string]goelf.BpfData
 	var peBPFContext BPFContext
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if ok {
@@ -515,7 +515,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	}
 
 	l.logger.Info("Attempting to do an Egress Attach")
-	err = goebpf.TCIngressAttach(hostVethName, progFD)
+	err = goebpf.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
 	if err != nil && utils.IsLinkNotFoundError(err.Error()) {
 		l.logger.Error(err, "Egress Attach failed")
 		return 0, err
@@ -580,7 +580,7 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 }
 
 func (l *bpfClient) loadBPFProgram(fileName string, direction string,
-	podIdentifier string) (map[string]goelf.BPFdata, int, error) {
+	podIdentifier string) (map[string]goelf.BpfData, int, error) {
 
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
@@ -611,7 +611,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 	egressFirewallRules []EbpfFirewallRules) error {
 
 	var ingressProgFD, egressProgFD int
-	var mapToUpdate goebpfmaps.BPFMap
+	var mapToUpdate goebpfmaps.BpfMap
 	start := time.Now()
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 
@@ -664,7 +664,7 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 	return ingress, egress
 }
 
-func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BPFMap, firewallRules []EbpfFirewallRules) error {
+func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []EbpfFirewallRules) error {
 	start := time.Now()
 	duration := msSince(start)
 	mapEntries, err := l.computeMapEntriesFromEndpointRules(firewallRules)
