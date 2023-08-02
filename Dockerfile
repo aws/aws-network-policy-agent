@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM golang:1.19 as builder
+FROM public.ecr.aws/eks-distro-build-tooling/golang:1.20.4-5-gcc-al2 as builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -13,12 +13,6 @@ COPY go.sum go.sum
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
-
-# For EBPF
-RUN apt-get update && \
-    apt-get install -y llvm clang make gcc && \
-    apt-get install -y libelf-dev && \
-    apt-get install -y zlib1g-dev
 
 COPY . ./
 

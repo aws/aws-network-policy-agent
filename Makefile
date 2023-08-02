@@ -3,6 +3,10 @@
 IMAGE ?= amazon/aws-network-policy-agent
 VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME = $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
+# TEST_IMAGE is the testing environment container image.
+TEST_IMAGE = aws-network-policy-agent-test
+TEST_IMAGE_NAME = $(TEST_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
+
 
 UNAME_ARCH = $(shell uname -m)
 ARCH = $(lastword $(subst :, ,$(filter $(UNAME_ARCH):%,x86_64:amd64 aarch64:arm64)))
@@ -80,7 +84,6 @@ run: manifests generate fmt vet ## Run a controller from your host.
 GO_ENV_EBPF =
 GO_ENV_EBPF += CGO_ENABLED=1
 GO_ENV_EBPF += GOOS=linux
-GO_ENV_EBPF += CC=$(CMD_CLANG)
 GO_ENV_EBPF += GOARCH=$(GO_ARCH)
 GO_ENV_EBPF += CGO_CFLAGS=$(CUSTOM_CGO_CFLAGS)
 GO_ENV_EBPF += CGO_LDFLAGS=$(CUSTOM_CGO_LDFLAGS)
@@ -146,6 +149,21 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push ${IMAGE_NAME}
+
+##@ Build and Run Unit Tests 
+# Build the unit test driver container image.
+build-docker-test:     ## Build the unit test driver container image.
+	docker build $(DOCKER_BUILD_FLAGS_CNI) \
+		-f Dockerfile.test \
+		-t $(TEST_IMAGE_NAME) \
+		.
+
+# Run unit tests inside of the testing container image.
+docker-unit-tests: build-docker-test     ## Run unit tests inside of the testing container image.
+	docker run $(DOCKER_RUN_ARGS) \
+		$(TEST_IMAGE_NAME) \
+		make test
+ 
 
 # PLATFORMS defines the target platforms for  the manager image be build to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
