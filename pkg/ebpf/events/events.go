@@ -25,9 +25,11 @@ import (
 var (
 	RING_BUFFER_PINPATH = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	cwl                 services.CloudWatchLogs
-	logGroupName        = "NetworkPolicyLogs"
 	logStreamName       = ""
+	logGroupName        = ""
 	sequenceToken       = ""
+	EKS_CW_PATH         = "/aws/eks/"
+	NON_EKS_CW_PATH     = "/aws/"
 )
 
 type Event_t struct {
@@ -94,11 +96,19 @@ func setupCW(logger logr.Logger) error {
 
 	cwl = cloud.CloudWatchLogs()
 
-	err = ensureLogGroupExists(logGroupName)
+	clusterName := cloud.ClusterName()
+
+	customlogGroupName := EKS_CW_PATH + clusterName + "/cluster"
+	if clusterName == utils.DEFAULT_CLUSTER_NAME {
+		customlogGroupName = NON_EKS_CW_PATH + clusterName + "/cluster"
+	}
+	logger.Info("Setup CW", "Setting loggroup Name", customlogGroupName)
+	err = ensureLogGroupExists(customlogGroupName)
 	if err != nil {
 		logger.Error(err, "unable to validate log group presence. Please check IAM permissions")
 		return err
 	}
+	logGroupName = customlogGroupName
 	return nil
 }
 
