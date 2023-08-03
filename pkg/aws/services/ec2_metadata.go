@@ -7,6 +7,7 @@ import (
 
 type EC2Metadata interface {
 	Region() (string, error)
+	GetInstanceIdentityDocument() (ec2metadata.EC2InstanceIdentityDocument, error)
 }
 
 // NewEC2Metadata constructs new EC2Metadata implementation.

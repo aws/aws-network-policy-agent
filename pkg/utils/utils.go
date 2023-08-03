@@ -25,7 +25,8 @@ var (
 	TRIE_V6_KEY_LENGTH          = 20
 	TRIE_VALUE_LENGTH           = 96
 
-	CATCH_ALL_PROTOCOL corev1.Protocol = "ANY_IP_PROTOCOL"
+	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
+	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
 )
 
 func GetPodNamespacedName(podName, podNamespace string) string {
@@ -168,9 +169,12 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 }
 
 func IsLinkNotFoundError(error string) bool {
-	errCode := strings.Split(error, ":")
-	if errCode[1] == "Link not found" {
-		return true
+	if strings.Contains(error, ":") {
+		errCode := strings.Split(error, ":")
+
+		if errCode[1] == "Link not found" {
+			return true
+		}
 	}
 	return false
 }
