@@ -34,6 +34,8 @@ var (
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
 	ErrFileExists                        = " file exists"
+	ErrInvalidFilterList                 = "failed to get filter list"
+	ErrMissingFilter                     = "no active filter to detach"
 )
 
 func GetPodNamespacedName(podName, podNamespace string) string {
@@ -178,6 +180,22 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 func IsFileExistsError(error string) bool {
 	errCode := strings.Split(error, ":")
 	if errCode[1] == ErrFileExists {
+		return true
+	}
+	return false
+}
+
+func IsInvalidFilterListError(error string) bool {
+	errCode := strings.Split(error, ":")
+	if errCode[0] == ErrInvalidFilterList {
+		return true
+	}
+	return false
+}
+
+func IsMissingFilterError(error string) bool {
+	errCode := strings.Split(error, "-")
+	if errCode[0] == ErrMissingFilter {
 		return true
 	}
 	return false

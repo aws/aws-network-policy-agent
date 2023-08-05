@@ -559,3 +559,69 @@ func TestIsFileExistsError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsInvalidFilterListError(t *testing.T) {
+	type args struct {
+		error string
+	}
+
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "invalid filter list error",
+			args: args{
+				error: "failed to get filter list: detach failed",
+			},
+			want: true,
+		},
+		{
+			name: "detach error",
+			args: args{
+				error: "failed to detach filter: detach failed",
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsInvalidFilterListError(tt.args.error)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsMissingFilterError(t *testing.T) {
+	type args struct {
+		error string
+	}
+
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "invalid filter list error",
+			args: args{
+				error: "no active filter to detach-eniabcdefg",
+			},
+			want: true,
+		},
+		{
+			name: "detach error",
+			args: args{
+				error: "failed to detach filter: eniabcdefg",
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsMissingFilterError(tt.args.error)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

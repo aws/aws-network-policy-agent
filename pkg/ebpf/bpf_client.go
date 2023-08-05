@@ -534,8 +534,10 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Ingress Detach")
-	err := goebpf.TCEgressDetach(hostVethName)
-	if err != nil {
+	var err error
+	err = goebpf.TCEgressDetach(hostVethName)
+	if err != nil && !utils.IsInvalidFilterListError(err.Error()) &&
+		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
 		return err
 	}
@@ -544,8 +546,10 @@ func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 
 func (l *bpfClient) detachEgressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Egress Detach")
-	err := goebpf.TCIngressDetach(hostVethName)
-	if err != nil {
+	var err error
+	err = goebpf.TCIngressDetach(hostVethName)
+	if err != nil && !utils.IsInvalidFilterListError(err.Error()) &&
+		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
 		return err
 	}
