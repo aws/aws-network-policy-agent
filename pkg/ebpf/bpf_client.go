@@ -144,6 +144,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		//Log the error and move on
 		ebpfClient.logger.Error(err, "Probe validation/update failed but will continue to load")
 	}
+	ebpfClient.logger.Info("Probe validation Done")
 
 	//Copy the latest binaries to /opt/cni/bin
 	err = cp.InstallBPFBinaries(bpfBinaries, hostBinaryPath)
@@ -151,6 +152,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		//Log the error and move on
 		ebpfClient.logger.Info("Failed to copy the eBPF binaries to host path....", "error", err)
 	}
+	ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 
 	eventBufferFD := 0
 	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(policyEndpointeBPFContext,
@@ -160,6 +162,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		ebpfClient.logger.Info("Failed to recover the BPF state: ", "error ", err)
 		sdkAPIErr.WithLabelValues("RecoverBPFState").Inc()
 	}
+	ebpfClient.logger.Info("Successfully recovered BPF state")
 
 	// Load the current events binary, if ..
 	// - Current events binary packaged with network policy agent is different than the one installed
@@ -177,6 +180,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
 			return nil, err
 		}
+		ebpfClient.logger.Info("Successfully loaded events probe")
 
 		for mapName, mapInfo := range globalMapInfo {
 			if mapName == AWS_CONNTRACK_MAP {
@@ -192,6 +196,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		recoveredConntrackMap, ok := ebpfClient.GlobalMaps.Load(CONNTRACK_MAP_PIN_PATH)
 		if ok {
 			conntrackMap = recoveredConntrackMap.(goebpfmaps.BpfMap)
+			ebpfClient.logger.Info("Derived existing ConntrackMap identifier")
 		} else {
 			ebpfClient.logger.Error(err, "Unable to get conntrackMap post recovery..")
 			sdkAPIErr.WithLabelValues("RecoveryFailed").Inc()
@@ -200,6 +205,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	}
 
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6, ebpfClient.logger)
+	ebpfClient.logger.Info("Initialized Conntrack client")
 
 	err = events.ConfigurePolicyEventsLogging(ebpfClient.logger, enableCloudWatchLogs, eventBufferFD, enableIPv6)
 	if err != nil {
@@ -207,6 +213,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
 		return nil, err
 	}
+	ebpfClient.logger.Info("Configured event logging")
 
 	// Start Conntrack routines
 	if enableIPv6 {
@@ -218,6 +225,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	// Initializes prometheus metrics
 	prometheusRegister()
 
+	ebpfClient.logger.Info("BPF Client initialization done")
 	return ebpfClient, nil
 }
 
@@ -482,7 +490,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 
 	l.logger.Info("Attempting to do an Ingress Attach")
 	err = goebpf.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
-	if err != nil && utils.IsLinkNotFoundError(err.Error()) {
+	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Info("Ingress Attach failed:", "error", err)
 		return 0, err
 	}
@@ -516,7 +524,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 	l.logger.Info("Attempting to do an Egress Attach")
 	err = goebpf.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
-	if err != nil && utils.IsLinkNotFoundError(err.Error()) {
+	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Error(err, "Egress Attach failed")
 		return 0, err
 	}

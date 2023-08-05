@@ -4,11 +4,10 @@ import (
 	"net"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
-
 	"github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
 	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	// "unsafe"
 )
@@ -73,8 +72,10 @@ func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			test_bpfClient := &bpfClient{
-				nodeIP: "10.1.1.1",
-				logger: test_bpfClientLogger,
+				nodeIP:     "10.1.1.1",
+				logger:     test_bpfClientLogger,
+				enableIPv6: false,
+				hostMask:   "/32",
 			}
 			got, err := test_bpfClient.computeMapEntriesFromEndpointRules(tt.args.firewallRules)
 			if tt.wantErr != nil {
