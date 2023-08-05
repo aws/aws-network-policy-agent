@@ -27,8 +27,6 @@ RUN yum update -y && \
     yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
     yum clean all
 
-WORKDIR /bpfbuilder
-
 COPY . ./
 RUN make build-bpf
 
