@@ -19,13 +19,15 @@ COPY . ./
 RUN make build-linux
 
 # Build BPF
-FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
+FROM public.ecr.aws/amazonlinux/amazonlinux:latest as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
     yum install -y llvm clang make gcc && \
-    yum install -y coreutils kernel-devel elfutils-libelf-devel zlib-devel bpftool libbpf-devel && \
+    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
     yum clean all
+
+WORKDIR /bpfbuilder
 
 COPY . ./
 RUN make build-bpf
@@ -34,7 +36,7 @@ FROM public.ecr.aws/amazonlinux/amazonlinux:2
 RUN yum update -y && \
     yum install -y iptables iproute jq && \
     yum install -y llvm clang make gcc && \
-    yum install -y coreutils kernel-devel elfutils-libelf-devel zlib-devel bpftool libbpf-devel && \
+    yum install -y coreutils kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel && \
     yum clean all
 
 WORKDIR /

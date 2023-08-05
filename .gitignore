@@ -1,2 +1,4 @@
 .idea/
 coverage.txt
+*.h
+*.o
