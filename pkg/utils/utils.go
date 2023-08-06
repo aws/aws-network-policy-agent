@@ -15,18 +15,27 @@ import (
 )
 
 var (
-	TCP_PROTOCOL_NUMBER         = 6
-	UDP_PROTOCOL_NUMBER         = 17
-	SCTP_PROTOCOL_NUMBER        = 132
-	ICMP_PROTOCOL_NUMBER        = 1
-	RESERVED_IP_PROTOCOL_NUMBER = 255 // 255 is a reserved protocol value in the IP header
-	ANY_IP_PROTOCOL             = 254
-	TRIE_KEY_LENGTH             = 8
-	TRIE_V6_KEY_LENGTH          = 20
-	TRIE_VALUE_LENGTH           = 96
+	TCP_PROTOCOL_NUMBER             = 6
+	UDP_PROTOCOL_NUMBER             = 17
+	SCTP_PROTOCOL_NUMBER            = 132
+	ICMP_PROTOCOL_NUMBER            = 1
+	RESERVED_IP_PROTOCOL_NUMBER     = 255 // 255 is a reserved protocol value in the IP header
+	ANY_IP_PROTOCOL                 = 254
+	TRIE_KEY_LENGTH                 = 8
+	TRIE_V6_KEY_LENGTH              = 20
+	TRIE_VALUE_LENGTH               = 96
+	BPF_PROGRAMS_PIN_PATH_DIRECTORY = "/sys/fs/bpf/globals/aws/programs/"
+	BPF_MAPS_PIN_PATH_DIRECTORY     = "/sys/fs/bpf/globals/aws/maps/"
+	TC_INGRESS_PROG                 = "handle_ingress"
+	TC_EGRESS_PROG                  = "handle_egress"
+	TC_INGRESS_MAP                  = "ingress_map"
+	TC_EGRESS_MAP                   = "egress_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
+	ErrFileExists                        = " file exists"
+	ErrInvalidFilterList                 = "failed to get filter list"
+	ErrMissingFilter                     = "no active filter to detach"
 )
 
 func GetPodNamespacedName(podName, podNamespace string) string {
@@ -50,25 +59,25 @@ func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
 }
 
 func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) string {
-	progName := "handle_ingress"
+	progName := TC_INGRESS_PROG
 	if direction == "egress" {
-		progName = "handle_egress"
+		progName = TC_EGRESS_PROG
 	}
-	pinPath := "/sys/fs/bpf/globals/aws/programs/" + podIdentifier + "_" + progName
+	pinPath := BPF_PROGRAMS_PIN_PATH_DIRECTORY + podIdentifier + "_" + progName
 	return pinPath
 }
 
 func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
-	progName := "ingress_map"
+	mapName := TC_INGRESS_MAP
 	if direction == "egress" {
-		progName = "egress_map"
+		mapName = TC_EGRESS_MAP
 	}
-	pinPath := "/sys/fs/bpf/globals/aws/maps/" + podIdentifier + "_" + progName
+	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
 	return pinPath
 }
 
-func GetPolicyEndpointIdentifier(name, namespace string) string {
-	return name + namespace
+func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
+	return policyName + policyNamespace
 }
 
 func GetHostVethName(podName, podNamespace string) string {
@@ -168,13 +177,26 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	return protocol
 }
 
-func IsLinkNotFoundError(error string) bool {
-	if strings.Contains(error, ":") {
-		errCode := strings.Split(error, ":")
+func IsFileExistsError(error string) bool {
+	errCode := strings.Split(error, ":")
+	if errCode[1] == ErrFileExists {
+		return true
+	}
+	return false
+}
 
-		if errCode[1] == "Link not found" {
-			return true
-		}
+func IsInvalidFilterListError(error string) bool {
+	errCode := strings.Split(error, ":")
+	if errCode[0] == ErrInvalidFilterList {
+		return true
+	}
+	return false
+}
+
+func IsMissingFilterError(error string) bool {
+	errCode := strings.Split(error, "-")
+	if errCode[0] == ErrMissingFilter {
+		return true
 	}
 	return false
 }

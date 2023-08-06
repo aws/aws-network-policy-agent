@@ -1,0 +1,18 @@
+FROM public.ecr.aws/eks-distro-build-tooling/golang:1.20.4-5-gcc-al2
+WORKDIR /go/src/github.com/aws/aws-network-policy-agent
+
+# Force the go compiler to use modules.
+ENV GO111MODULE=on
+ENV GOPROXY=direct
+
+# Add goimports
+RUN go install golang.org/x/tools/cmd/goimports@latest
+
+# go.mod and go.sum go into their own layers.
+COPY go.mod .
+COPY go.sum .
+
+# This ensures `go mod download` happens only when go.mod and go.sum change.
+RUN go mod download
+
+COPY . .
