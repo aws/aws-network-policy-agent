@@ -243,6 +243,10 @@ envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
+# Check formatting of source code files without modification.
+check-format: FORMAT_FLAGS = -l
+check-format: format
+
 format:       ## Format all Go source code files.
 	@command -v goimports >/dev/null || { echo "ERROR: goimports not installed"; exit 1; }
 	@exit $(shell find ./* \
