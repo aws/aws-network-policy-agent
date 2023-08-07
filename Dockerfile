@@ -19,7 +19,7 @@ COPY . ./
 RUN make build-linux
 
 # Build BPF
-FROM public.ecr.aws/amazonlinux/amazonlinux:latest as bpfbuilder
+FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest-al23 as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
@@ -30,7 +30,7 @@ RUN yum update -y && \
 COPY . ./
 RUN make build-bpf
 
-FROM public.ecr.aws/amazonlinux/amazonlinux:2
+FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest.2
 RUN yum update -y && \
     yum install -y iptables iproute jq && \
     yum install -y llvm clang make gcc && \
