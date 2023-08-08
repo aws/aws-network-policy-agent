@@ -154,7 +154,7 @@ docker-push: ## Push docker image with the manager.
 ##@ Build and Run Unit Tests 
 # Build the unit test driver container image.
 build-docker-test:     ## Build the unit test driver container image.
-	docker build $(DOCKER_BUILD_FLAGS_CNI) \
+	docker build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
 		-f Dockerfile.test \
 		-t $(TEST_IMAGE_NAME) \
 		.
@@ -172,14 +172,19 @@ docker-unit-tests: build-docker-test     ## Run unit tests inside of the testing
 # - have enable BuildKit, More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image for your registry (i.e. if you do not inform a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To properly provided solutions that supports more than one platform you should use this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
-docker-buildx: test ## Build and push docker image for the manager for cross-platform support
+docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- docker buildx create --name project-v3-builder
 	docker buildx use project-v3-builder
-	- docker buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	docker buildx build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
+		-f Dockerfile.cross \
+		--platform "$(PLATFORMS)"\
+		--cache-from=type=gha \
+		--cache-to=type=gha,mode=max \
+		.
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
 
