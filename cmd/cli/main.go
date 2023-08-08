@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	cli "github.com/achevuru/aws-network-policy-agent/cmd/cli/cli-selector"
+	cli "github.com/aws/aws-network-policy-agent/cmd/cli/cli-selector"
 )
 
 func main() {

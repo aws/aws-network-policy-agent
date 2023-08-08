@@ -7,12 +7,12 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
-	constdef "github.com/jayanthvn/pure-gobpf/pkg/constants"
-	goelf "github.com/jayanthvn/pure-gobpf/pkg/elfparser"
-	goebpfmaps "github.com/jayanthvn/pure-gobpf/pkg/maps"
-	goebpfpgms "github.com/jayanthvn/pure-gobpf/pkg/progs"
-	goebpfutils "github.com/jayanthvn/pure-gobpf/pkg/utils"
+	constdef "github.com/aws/aws-ebpf-sdk-go/pkg/constants"
+	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
+	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	goebpfpgms "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
+	goebpfutils "github.com/aws/aws-ebpf-sdk-go/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 )
 
 type BPFTrieKey struct {
