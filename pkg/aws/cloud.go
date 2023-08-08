@@ -3,8 +3,8 @@ package aws
 import (
 	"context"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/aws/services"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/endpoints"

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/clihelper"
+	"github.com/aws/aws-network-policy-agent/pkg/clihelper"
 	"github.com/spf13/cobra"
 )
 

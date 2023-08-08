@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	policyendpoint "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
-	mock_client "github.com/achevuru/aws-network-policy-agent/mocks/controller-runtime/client"
-	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf"
+	policyendpoint "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
