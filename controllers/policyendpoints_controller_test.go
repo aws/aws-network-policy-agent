@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"testing"
+
 	policyendpoint "github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
 	mock_client "github.com/achevuru/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/achevuru/aws-network-policy-agent/pkg/ebpf"
@@ -14,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"testing"
 )
 
 func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
