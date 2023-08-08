@@ -345,12 +345,13 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotIngressRules, gotEgressRules, gotIsIngressIsolated, gotIsEgressIsolated, _ := policyEndpointReconciler.deriveIngressAndEgressFirewallRules(context.Background(),
+			gotIngressRules, gotEgressRules, gotIsIngressIsolated, gotIsEgressIsolated, gotError := policyEndpointReconciler.deriveIngressAndEgressFirewallRules(context.Background(),
 				tt.podIdentifier, tt.resourceNamespace)
 			assert.Equal(t, tt.want.ingressRules, gotIngressRules)
 			assert.Equal(t, tt.want.egressRules, gotEgressRules)
 			assert.Equal(t, tt.want.isIngressIsolated, gotIsIngressIsolated)
 			assert.Equal(t, tt.want.isEgressIsolated, gotIsEgressIsolated)
+			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
 }
@@ -361,7 +362,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		podsToBeCleanedUp []types.NamespacedName
 	}
 
-	policyEndpoint_foo := policyendpoint.PolicyEndpoint{
+	samplePolicyEndpoint := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "foo",
 			Namespace: "bar",
@@ -405,7 +406,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		},
 	}
 
-	policyEndpoint_update := policyendpoint.PolicyEndpoint{
+	policyEndpointUpdate := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "foo",
 			Namespace: "bar",
@@ -442,7 +443,7 @@ func TestDeriveTargetPods(t *testing.T) {
 	}{
 		{
 			name:           "Matching Local pods",
-			policyendpoint: policyEndpoint_foo,
+			policyendpoint: samplePolicyEndpoint,
 			want: want{
 				activePods: []types.NamespacedName{
 					{
@@ -459,7 +460,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		},
 		{
 			name:           "Derive Old pods to be cleaned up",
-			policyendpoint: policyEndpoint_update,
+			policyendpoint: policyEndpointUpdate,
 			currentPods:    samplePods,
 			want: want{
 				activePods: []types.NamespacedName{
