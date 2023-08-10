@@ -1,8 +1,6 @@
 package aws
 
 import (
-	"context"
-
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-sdk-go/aws"
@@ -54,14 +52,6 @@ func NewCloud(cfg CloudConfig) (Cloud, error) {
 
 	awsCfg := aws.NewConfig().WithRegion(cfg.Region).WithSTSRegionalEndpoint(endpoints.RegionalSTSEndpoint)
 	sess = sess.Copy(awsCfg)
-	if len(cfg.AccountID) == 0 {
-		sts := services.NewSTS(sess)
-		accountID, err := sts.AccountID(context.Background())
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to introspect accountID from STS, specify --aws-account-id instead if STS is unavailable")
-		}
-		cfg.AccountID = accountID
-	}
 
 	instanceIdentityDocument, err := metadata.GetInstanceIdentityDocument()
 	if err != nil {
