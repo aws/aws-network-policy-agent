@@ -9,6 +9,13 @@ TEST_IMAGE_NAME = $(TEST_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 
 export GOPROXY = direct
 
+# aws-ebpf-sdk-go override in case we need to build against a custom version
+EBPF_SDK_OVERRIDE ?= "n"
+
+ifeq ($(EBPF_SDK_OVERRIDE), "y")
+VENDOR_OVERRIDE_FLAG = -mod=mod
+endif
+
 UNAME_ARCH = $(shell uname -m)
 ARCH = $(lastword $(subst :, ,$(filter $(UNAME_ARCH):%,x86_64:amd64 aarch64:arm64)))
 # This is only applied to the arm64 container image by default. Override to
@@ -65,7 +72,7 @@ fmt: ## Run go fmt against code.
 	go fmt ./...
 
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: setup-ebpf-sdk-override # Run go vet against code.
 	go vet ./...
 
 .PHONY: test
@@ -144,7 +151,7 @@ build-bpf: vmlinuxh ## Build BPF.
 .PHONY: docker-build
 #docker-build: test ## Build docker image with the manager.
 #	docker build -t ${IMAGE_NAME} .
-docker-build: ## Build docker image with the manager.
+docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
 	docker build -t ${IMAGE_NAME} .
 
 .PHONY: docker-push
@@ -174,7 +181,7 @@ docker-unit-tests: build-docker-test     ## Run unit tests inside of the testing
 # To properly provided solutions that supports more than one platform you should use this option.
 PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
+docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- docker buildx create --name project-v3-builder
@@ -258,3 +265,13 @@ format:       ## Format all Go source code files.
 	  -type f \
 	  -name '*.go' \
 	  -print0 | sort -z | xargs -0 -- goimports $(or $(FORMAT_FLAGS),-w) | wc -l | bc)
+
+setup-ebpf-sdk-override:
+	@if [ "$(EBPF_SDK_OVERRIDE)" = "y" ] ; then \
+	    ./scripts/ebpf_sdk_override/setup.sh ; \
+	fi
+
+cleanup-ebpf-sdk-override:
+	@if [ "$(EBPF_SDK_OVERRIDE)" = "y" ] ; then \
+	    ./scripts/ebpf_sdk_override/cleanup.sh ; \
+	fi
