@@ -9,16 +9,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/aws"
-	"github.com/achevuru/aws-network-policy-agent/pkg/aws/services"
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/aws"
+	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 
+	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
-	goebpfevents "github.com/jayanthvn/pure-gobpf/pkg/events"
 	"github.com/spf13/pflag"
 )
 

@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/achevuru/aws-network-policy-agent/pkg/utils"
+	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/go-logr/logr"
-	goebpfmaps "github.com/jayanthvn/pure-gobpf/pkg/maps"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 

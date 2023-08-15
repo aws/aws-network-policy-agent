@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/achevuru/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
