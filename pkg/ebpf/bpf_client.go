@@ -131,8 +131,9 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
+	bpfSDKclient := goelf.New()
 	//Set RLIMIT
-	err = goelf.IncreaseRlimit()
+	err = bpfSDKclient.IncreaseRlimit()
 	if err != nil {
 		//No need to error out from here. We should be good to proceed.
 		ebpfClient.logger.Info("Failed to increase RLIMIT on the node....but moving forward")
@@ -174,7 +175,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := goelf.LoadBpfFile(eventsProbe, "global")
+		_, globalMapInfo, err := bpfSDKclient.LoadBpfFile(eventsProbe, "global")
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
 			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
@@ -329,7 +330,8 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
-	recoveredGlobalMaps, err := goelf.RecoverGlobalMaps()
+	bpfSDKclient := goelf.New()
+	recoveredGlobalMaps, err := bpfSDKclient.RecoverGlobalMaps()
 	if err != nil {
 		log.Error(err, "failed to recover global maps..")
 		sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
@@ -353,7 +355,7 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 	// Recover BPF Programs and Maps from BPF_FS. We only aim to recover programs and maps
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
-		bpfState, err := goelf.RecoverAllBpfProgramsAndMaps()
+		bpfState, err := bpfSDKclient.RecoverAllBpfProgramsAndMaps()
 		var peBPFContext BPFContext
 		if err != nil {
 			//Log it and move on. We will overwrite and recreate the maps/programs
@@ -597,7 +599,8 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
 	// Load a new instance of the ingres program
-	progInfo, _, err := goelf.LoadBpfFile(fileName, podIdentifier)
+	bpfSDKclient := goelf.New()
+	progInfo, _, err := bpfSDKclient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {

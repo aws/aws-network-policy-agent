@@ -82,7 +82,8 @@ func convByteToConntrackV6(keyByte []byte) ConntrackKeyV6 {
 // Show - Displays all loaded AWS BPF Programs and their associated maps
 func Show() error {
 
-	bpfState, err := goelf.RecoverAllBpfProgramsAndMaps()
+	bpfSDKclient := goelf.New()
+	bpfState, err := bpfSDKclient.RecoverAllBpfProgramsAndMaps()
 	if err != nil {
 		return err
 	}
