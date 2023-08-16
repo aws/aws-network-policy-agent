@@ -131,9 +131,9 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
-	bpfSDKclient := goelf.New()
+	ebpfClient.bpfSDKClient = goelf.New()
 	//Set RLIMIT
-	err = bpfSDKclient.IncreaseRlimit()
+	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
 	if err != nil {
 		//No need to error out from here. We should be good to proceed.
 		ebpfClient.logger.Info("Failed to increase RLIMIT on the node....but moving forward")
@@ -156,7 +156,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 
 	eventBufferFD := 0
-	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(policyEndpointeBPFContext,
+	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
 		ebpfClient.GlobalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
 		//Log the error and move on
@@ -175,7 +175,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := bpfSDKclient.LoadBpfFile(eventsProbe, "global")
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
 			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
@@ -251,8 +251,10 @@ type bpfClient struct {
 	egressBinary string
 	// host IP Mask - will be initialized based on the IP family
 	hostMask string
-	// Coontrack client instance
+	// Conntrack client instance
 	conntrackClient conntrack.ConntrackClient
+	// eBPF SDK Client
+	bpfSDKClient *goelf.BpfSDKClient
 	// Logger instance
 	logger logr.Logger
 }
@@ -322,7 +324,7 @@ func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
-func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
+func recoverBPFState(eBPFSDKClient *goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
 	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, error) {
 	log := ctrl.Log.WithName("ebpf-client") //TODO reuse logger
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
@@ -330,8 +332,7 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
-	bpfSDKclient := goelf.New()
-	recoveredGlobalMaps, err := bpfSDKclient.RecoverGlobalMaps()
+	recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
 	if err != nil {
 		log.Error(err, "failed to recover global maps..")
 		sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
@@ -355,7 +356,7 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 	// Recover BPF Programs and Maps from BPF_FS. We only aim to recover programs and maps
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
-		bpfState, err := bpfSDKclient.RecoverAllBpfProgramsAndMaps()
+		bpfState, err := eBPFSDKClient.RecoverAllBpfProgramsAndMaps()
 		var peBPFContext BPFContext
 		if err != nil {
 			//Log it and move on. We will overwrite and recreate the maps/programs
@@ -599,8 +600,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
 	// Load a new instance of the ingres program
-	bpfSDKclient := goelf.New()
-	progInfo, _, err := bpfSDKclient.LoadBpfFile(fileName, podIdentifier)
+	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
