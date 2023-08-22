@@ -13,7 +13,7 @@ import (
 
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
-	goebpf "github.com/aws/aws-ebpf-sdk-go/pkg/tc"
+	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
@@ -48,6 +48,7 @@ var (
 	CONNTRACK_MAP_PIN_PATH                     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
+	POD_VETH_PREFIX                            = "eni"
 )
 
 var (
@@ -132,6 +133,8 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
+	ebpfClient.bpfTCClient = tc.New(POD_VETH_PREFIX)
+
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
 	if err != nil {
@@ -140,7 +143,8 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	}
 
 	//Compare BPF binaries
-	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(bpfBinaries)
+	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
+		bpfBinaries, hostBinaryPath)
 	if err != nil {
 		//Log the error and move on
 		ebpfClient.logger.Error(err, "Probe validation/update failed but will continue to load")
@@ -254,7 +258,9 @@ type bpfClient struct {
 	// Conntrack client instance
 	conntrackClient conntrack.ConntrackClient
 	// eBPF SDK Client
-	bpfSDKClient *goelf.BpfSDKClient
+	bpfSDKClient goelf.BpfSDKClient
+	// eBPF TC Client
+	bpfTCClient tc.BpfTc
 	// Logger instance
 	logger logr.Logger
 }
@@ -268,7 +274,7 @@ type Event_t struct {
 	Verdict    uint32
 }
 
-func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
+func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
 	log := ctrl.Log.WithName("ebpf-client-init") //TODO - reuse the logger
 	updateIngressProbe, updateEgressProbe, updateEventsProbe := false, false, false
 	var existingProbePath string
@@ -314,7 +320,7 @@ func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
 
 	//Clean up probes
 	if updateIngressProbe || updateEgressProbe {
-		err := goebpf.CleanupQdiscs("eni", updateIngressProbe, updateEgressProbe)
+		err := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
 		if err != nil {
 			log.Error(err, "Probe cleanup failed")
 			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
@@ -324,7 +330,7 @@ func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
-func recoverBPFState(eBPFSDKClient *goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
+func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
 	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, error) {
 	log := ctrl.Log.WithName("ebpf-client") //TODO reuse logger
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
@@ -492,7 +498,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 	}
 
 	l.logger.Info("Attempting to do an Ingress Attach")
-	err = goebpf.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
+	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
 	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Info("Ingress Attach failed:", "error", err)
 		return 0, err
@@ -526,7 +532,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	}
 
 	l.logger.Info("Attempting to do an Egress Attach")
-	err = goebpf.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
+	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
 	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Error(err, "Egress Attach failed")
 		return 0, err
@@ -538,7 +544,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Ingress Detach")
 	var err error
-	err = goebpf.TCEgressDetach(hostVethName)
+	err = l.bpfTCClient.TCEgressDetach(hostVethName)
 	if err != nil && !utils.IsInvalidFilterListError(err.Error()) &&
 		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
@@ -550,7 +556,7 @@ func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 func (l *bpfClient) detachEgressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Egress Detach")
 	var err error
-	err = goebpf.TCIngressDetach(hostVethName)
+	err = l.bpfTCClient.TCIngressDetach(hostVethName)
 	if err != nil && !utils.IsInvalidFilterListError(err.Error()) &&
 		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
