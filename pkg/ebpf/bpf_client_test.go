@@ -668,3 +668,109 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoverBPFState(t *testing.T) {
+	sampleConntrackMap := goebpfmaps.BpfMap{
+		MapFD: 2,
+	}
+	sampleEventsMap := goebpfmaps.BpfMap{
+		MapFD: 3,
+	}
+
+	ConntrackandEventMaps := map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:     sampleConntrackMap,
+		POLICY_EVENTS_MAP_PIN_PATH: sampleEventsMap,
+	}
+
+	OnlyConntrackMap := map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH: sampleConntrackMap,
+	}
+
+	OnlyEventsMap := map[string]goebpfmaps.BpfMap{
+		POLICY_EVENTS_MAP_PIN_PATH: sampleEventsMap,
+	}
+
+	type want struct {
+		isConntrackMapPresent    bool
+		isPolicyEventsMapPresent bool
+		eventsMapFD              int
+	}
+
+	tests := []struct {
+		name                      string
+		policyEndpointeBPFContext *sync.Map
+		currentGlobalMaps         map[string]goebpfmaps.BpfMap
+		updateIngressProbe        bool
+		updateEgressProbe         bool
+		updateEventsProbe         bool
+		want                      want
+		wantErr                   error
+	}{
+		{
+			name:               "Conntrack and Events map are already present",
+			updateIngressProbe: false,
+			updateEgressProbe:  false,
+			updateEventsProbe:  false,
+			currentGlobalMaps:  ConntrackandEventMaps,
+			want: want{
+				isPolicyEventsMapPresent: true,
+				isConntrackMapPresent:    true,
+				eventsMapFD:              3,
+			},
+			wantErr: nil,
+		},
+		{
+			name:               "Conntrack Map present while Events map is missing",
+			updateIngressProbe: false,
+			updateEgressProbe:  false,
+			updateEventsProbe:  false,
+			currentGlobalMaps:  OnlyConntrackMap,
+			want: want{
+				isPolicyEventsMapPresent: false,
+				isConntrackMapPresent:    true,
+				eventsMapFD:              0,
+			},
+			wantErr: nil,
+		},
+		{
+			name:               "Conntrack Map missing while Events map is present",
+			updateIngressProbe: false,
+			updateEgressProbe:  false,
+			updateEventsProbe:  false,
+			currentGlobalMaps:  OnlyEventsMap,
+			want: want{
+				isPolicyEventsMapPresent: true,
+				isConntrackMapPresent:    false,
+				eventsMapFD:              3,
+			},
+			wantErr: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+
+		mockBpfClient.EXPECT().RecoverGlobalMaps().DoAndReturn(
+			func() (map[string]goebpfmaps.BpfMap, error) {
+				return tt.currentGlobalMaps, nil
+			},
+		).AnyTimes()
+		mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().AnyTimes()
+
+		policyEndpointeBPFContext := new(sync.Map)
+		globapMaps := new(sync.Map)
+
+		t.Run(tt.name, func(t *testing.T) {
+			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, gotError := recoverBPFState(mockBpfClient, policyEndpointeBPFContext, globapMaps,
+				tt.updateIngressProbe, tt.updateEgressProbe, tt.updateEventsProbe)
+			assert.Equal(t, tt.want.isConntrackMapPresent, gotIsConntrackMapPresent)
+			assert.Equal(t, tt.want.isPolicyEventsMapPresent, gotIsPolicyEventsMapPresent)
+			assert.Equal(t, tt.want.eventsMapFD, gotEventsMapFD)
+			assert.Equal(t, tt.wantErr, gotError)
+		})
+	}
+
+}
