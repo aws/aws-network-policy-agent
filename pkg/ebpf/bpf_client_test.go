@@ -1,12 +1,13 @@
 package ebpf
 
 import (
-	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
-	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
-	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
 	"net"
 	"sync"
 	"testing"
+
+	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
+	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
 
 	mock_bpfclient "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser/mocks"
 	mock_bpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps/mocks"
