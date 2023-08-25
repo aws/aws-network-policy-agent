@@ -1,11 +1,11 @@
 # aws-network-policy-agent
-EKS Node agent is responsible for managing and enforcing configured Network policies on the cluster. Node agent relies on eBPF probes to enforce the policies.
+EKS Node Agent is responsible for managing and enforcing configured Network policies on the cluster. Network policy support is a feature of the [AWS VPC CNI](https://github.com/aws/amazon-vpc-cni-k8s). The node agent communicates with the VPC CNI, and relies on eBPF probes to enforce the policies. 
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+For EKS Customers, this node agent is automatically installed and configured. Review the instructions in the [EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html).
 
 ## Getting Started
-You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
+You’ll need a Kubernetes cluster version 1.25+ to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
+
 **Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
 
 ### Running on the cluster
@@ -42,7 +42,8 @@ make undeploy
 ```
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+See [CONTRIBUTING](CONTRIBUTING.md) for more information.
 
 ### How it works
 This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/).
@@ -91,4 +92,9 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+## Security Disclosures 
+
+If you think you’ve found a potential security issue, please do not post it in the Issues. Instead, please follow the
+instructions [here](https://aws.amazon.com/security/vulnerability-reporting/) or [email AWS security directly](mailto:aws-security@amazon.com).
 
