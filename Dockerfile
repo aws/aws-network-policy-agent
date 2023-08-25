@@ -16,7 +16,7 @@ RUN go mod download
 RUN make build-linux
 
 # Build BPF
-FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest-al23 as bpfbuilder
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \

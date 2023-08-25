@@ -31,7 +31,7 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
-type RingBufferDataV4_t struct {
+type ringBufferDataV4_t struct {
 	SourceIP   uint32
 	SourcePort uint32
 	DestIP     uint32
@@ -40,7 +40,7 @@ type RingBufferDataV4_t struct {
 	Verdict    uint32
 }
 
-type RingBufferDataV6_t struct {
+type ringBufferDataV6_t struct {
 	SourceIP   [16]byte
 	SourcePort uint32
 	DestIP     [16]byte
@@ -179,10 +179,10 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				var logQueue []*cloudwatchlogs.InputLogEvent
 				var message string
 				if enableIPv6 {
-					var rb RingBufferDataV6_t
+					var rb ringBufferDataV6_t
 					buf := bytes.NewBuffer(record)
 					if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-						log.Info("Read from Ring buf", "Failed ", err)
+						log.Info("Failed to read from Ring buf", err)
 						continue
 					}
 
@@ -195,10 +195,10 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 
 					message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 				} else {
-					var rb RingBufferDataV4_t
+					var rb ringBufferDataV4_t
 					buf := bytes.NewBuffer(record)
 					if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-						log.Info("Read from Ring buf", "Failed ", err)
+						log.Info("Failed to read from Ring buf", err)
 						continue
 					}
 					protocol := getProtocol(int(rb.Protocol))
