@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
@@ -32,7 +31,7 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
-type Event_t struct {
+type ringBufferDataV4_t struct {
 	SourceIP   uint32
 	SourcePort uint32
 	DestIP     uint32
@@ -41,17 +40,13 @@ type Event_t struct {
 	Verdict    uint32
 }
 
-type EventV6_t struct {
+type ringBufferDataV6_t struct {
 	SourceIP   [16]byte
 	SourcePort uint32
 	DestIP     [16]byte
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
-}
-
-type EvProgram struct {
-	wg sync.WaitGroup
 }
 
 func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
@@ -63,14 +58,14 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 
 	var mapFDList []int
 	mapFDList = append(mapFDList, mapFD)
-	eventChanList, err := goebpfevents.InitRingBuffer(mapFDList)
+	eventsClient := goebpfevents.New()
+	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
 	if err != nil {
 		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
 	} else {
 		logger.Info("Configure Event loop ... ")
-		p := EvProgram{wg: sync.WaitGroup{}}
-		p.capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
+		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 		if enableCloudWatchLogs {
 			logger.Info("Cloudwatch log support is enabled")
 			err = setupCW(logger)
@@ -112,182 +107,120 @@ func setupCW(logger logr.Logger) error {
 	return nil
 }
 
-func (p *EvProgram) capturePolicyV6Events(events <-chan []byte, log logr.Logger, enableCloudWatchLogs bool) {
-	nodeName := os.Getenv("MY_NODE_NAME")
-	go func(events <-chan []byte) {
-		defer p.wg.Done()
-
-		for {
-			if b, ok := <-events; ok {
-				var logQueue []*cloudwatchlogs.InputLogEvent
-
-				var ev EventV6_t
-				buf := bytes.NewBuffer(b)
-				if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
-					log.Info("Read Ring buf", "Failed ", err)
-					continue
-				}
-
-				protocol := "UNKNOWN"
-				if int(ev.Protocol) == utils.TCP_PROTOCOL_NUMBER {
-					protocol = "TCP"
-				} else if int(ev.Protocol) == utils.UDP_PROTOCOL_NUMBER {
-					protocol = "UDP"
-				} else if int(ev.Protocol) == utils.SCTP_PROTOCOL_NUMBER {
-					protocol = "SCTP"
-				} else if int(ev.Protocol) == utils.ICMP_PROTOCOL_NUMBER {
-					protocol = "ICMP"
-				}
-
-				verdict := "DENY"
-				if ev.Verdict == 1 {
-					verdict = "ACCEPT"
-				} else if ev.Verdict == 2 {
-					verdict = "EXPIRED/DELETED"
-				}
-
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(ev.SourceIP).String(), "Src Port", ev.SourcePort,
-					"Dest IP", utils.ConvByteToIPv6(ev.DestIP).String(), "Dest Port", ev.DestPort,
-					"Proto", protocol, "Verdict", verdict)
-
-				message := "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(ev.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(ev.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(ev.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(ev.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
-
-				if enableCloudWatchLogs {
-					logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
-						Message:   &message,
-						Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
-					})
-					if len(logQueue) > 0 {
-						log.Info("Sending CW")
-						input := cloudwatchlogs.PutLogEventsInput{
-							LogEvents:    logQueue,
-							LogGroupName: &logGroupName,
-						}
-
-						if sequenceToken == "" {
-							err := createLogStream()
-							if err != nil {
-								log.Info("Failed to create log stream")
-								panic(err)
-							}
-						} else {
-							input = *input.SetSequenceToken(sequenceToken)
-						}
-
-						input = *input.SetLogStreamName(logStreamName)
-
-						resp, err := cwl.PutLogEvents(&input)
-						if err != nil {
-							log.Info("Kprobe", "Failed ", err)
-						}
-
-						if resp != nil {
-							sequenceToken = *resp.NextSequenceToken
-						}
-
-						logQueue = []*cloudwatchlogs.InputLogEvent{}
-					} else {
-						break
-					}
-				}
-			}
-		}
-	}(events)
-
-}
-
-func (p *EvProgram) capturePolicyV4Events(events <-chan []byte, log logr.Logger, enableCloudWatchLogs bool) {
-	nodeName := os.Getenv("MY_NODE_NAME")
-	go func(events <-chan []byte) {
-		defer p.wg.Done()
-
-		for {
-			if b, ok := <-events; ok {
-				var logQueue []*cloudwatchlogs.InputLogEvent
-
-				var ev Event_t
-				buf := bytes.NewBuffer(b)
-				if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
-					log.Info("Read Ring buf", "Failed ", err)
-					continue
-				}
-
-				protocol := "UNKNOWN"
-				if int(ev.Protocol) == utils.TCP_PROTOCOL_NUMBER {
-					protocol = "TCP"
-				} else if int(ev.Protocol) == utils.UDP_PROTOCOL_NUMBER {
-					protocol = "UDP"
-				} else if int(ev.Protocol) == utils.SCTP_PROTOCOL_NUMBER {
-					protocol = "SCTP"
-				} else if int(ev.Protocol) == utils.ICMP_PROTOCOL_NUMBER {
-					protocol = "ICMP"
-				}
-
-				verdict := "DENY"
-				if ev.Verdict == 1 {
-					verdict = "ACCEPT"
-				} else if ev.Verdict == 2 {
-					verdict = "EXPIRED/DELETED"
-				}
-
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(ev.SourceIP), "Src Port", ev.SourcePort,
-					"Dest IP", utils.ConvByteArrayToIP(ev.DestIP), "Dest Port", ev.DestPort,
-					"Proto", protocol, "Verdict", verdict)
-
-				message := "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(ev.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(ev.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(ev.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(ev.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
-
-				if enableCloudWatchLogs {
-					logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
-						Message:   &message,
-						Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
-					})
-					if len(logQueue) > 0 {
-						log.Info("Sending CW")
-						input := cloudwatchlogs.PutLogEventsInput{
-							LogEvents:    logQueue,
-							LogGroupName: &logGroupName,
-						}
-
-						if sequenceToken == "" {
-							err := createLogStream()
-							if err != nil {
-								log.Info("Failed to create log stream")
-								panic(err)
-							}
-						} else {
-							input = *input.SetSequenceToken(sequenceToken)
-						}
-
-						input = *input.SetLogStreamName(logStreamName)
-
-						resp, err := cwl.PutLogEvents(&input)
-						if err != nil {
-							log.Info("Kprobe", "Failed ", err)
-						}
-
-						if resp != nil {
-							sequenceToken = *resp.NextSequenceToken
-						}
-
-						logQueue = []*cloudwatchlogs.InputLogEvent{}
-					} else {
-						break
-					}
-				}
-			}
-		}
-	}(events)
-}
-
-func (p *EvProgram) capturePolicyEvents(events <-chan []byte, log logr.Logger, enableCloudWatchLogs bool,
-	enableIPv6 bool) {
-	p.wg.Add(1)
-
-	if enableIPv6 {
-		p.capturePolicyV6Events(events, log, enableCloudWatchLogs)
-	} else {
-		p.capturePolicyV4Events(events, log, enableCloudWatchLogs)
+func getProtocol(protocolNum int) string {
+	protocolStr := "UNKNOWN"
+	if protocolNum == utils.TCP_PROTOCOL_NUMBER {
+		protocolStr = "TCP"
+	} else if protocolNum == utils.UDP_PROTOCOL_NUMBER {
+		protocolStr = "UDP"
+	} else if protocolNum == utils.SCTP_PROTOCOL_NUMBER {
+		protocolStr = "SCTP"
+	} else if protocolNum == utils.ICMP_PROTOCOL_NUMBER {
+		protocolStr = "ICMP"
 	}
+	return protocolStr
+}
+
+func getVerdict(verdict int) string {
+	verdictStr := "DENY"
+	if verdict == utils.ACCEPT.Index() {
+		verdictStr = "ACCEPT"
+	} else if verdict == utils.EXPIRED_DELETED.Index() {
+		verdictStr = "EXPIRED/DELETED"
+	}
+	return verdictStr
+}
+
+func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message string, log logr.Logger) bool {
+	logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
+		Message:   &message,
+		Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
+	})
+	if len(logQueue) > 0 {
+		log.Info("Sending logs to CW")
+		input := cloudwatchlogs.PutLogEventsInput{
+			LogEvents:    logQueue,
+			LogGroupName: &logGroupName,
+		}
+
+		if sequenceToken == "" {
+			err := createLogStream()
+			if err != nil {
+				log.Info("Failed to create log stream")
+				panic(err)
+			}
+		} else {
+			input = *input.SetSequenceToken(sequenceToken)
+		}
+
+		input = *input.SetLogStreamName(logStreamName)
+
+		resp, err := cwl.PutLogEvents(&input)
+		if err != nil {
+			log.Info("Push log events", "Failed ", err)
+		}
+
+		if resp != nil {
+			sequenceToken = *resp.NextSequenceToken
+		}
+
+		logQueue = []*cloudwatchlogs.InputLogEvent{}
+		return false
+	}
+	return true
+}
+
+func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCloudWatchLogs bool, enableIPv6 bool) {
+	nodeName := os.Getenv("MY_NODE_NAME")
+	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
+	go func(ringbufferdata <-chan []byte) {
+		done := false
+		for {
+			if record, ok := <-ringbufferdata; ok {
+				var logQueue []*cloudwatchlogs.InputLogEvent
+				var message string
+				if enableIPv6 {
+					var rb ringBufferDataV6_t
+					buf := bytes.NewBuffer(record)
+					if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
+						log.Info("Failed to read from Ring buf", err)
+						continue
+					}
+
+					protocol := getProtocol(int(rb.Protocol))
+					verdict := getVerdict(int(rb.Verdict))
+
+					log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
+						"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
+						"Proto", protocol, "Verdict", verdict)
+
+					message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				} else {
+					var rb ringBufferDataV4_t
+					buf := bytes.NewBuffer(record)
+					if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
+						log.Info("Failed to read from Ring buf", err)
+						continue
+					}
+					protocol := getProtocol(int(rb.Protocol))
+					verdict := getVerdict(int(rb.Verdict))
+
+					log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
+						"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
+						"Proto", protocol, "Verdict", verdict)
+
+					message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				}
+
+				if enableCloudWatchLogs {
+					done = publishDataToCloudwatch(logQueue, message, log)
+					if done {
+						break
+					}
+				}
+			}
+		}
+	}(ringbufferdata)
 }
 
 func ensureLogGroupExists(name string) error {
