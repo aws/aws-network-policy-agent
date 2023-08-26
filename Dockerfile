@@ -15,8 +15,19 @@ RUN go mod download
 
 RUN make build-linux
 
+# Vmlinux
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as vmlinuxbuilder
+WORKDIR /vmlinuxbuilder
+RUN yum update -y && \
+    yum install -y iproute procps-ng && \
+    yum install -y llvm clang make gcc && \
+    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
+    yum clean all
+COPY . ./
+RUN make vmlinuxh
+
 # Build BPF
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as bpfbuilder
+FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
@@ -25,6 +36,7 @@ RUN yum update -y && \
     yum clean all
 
 COPY . ./
+COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h .
 RUN make build-bpf
 
 FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest.2

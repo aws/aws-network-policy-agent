@@ -33,10 +33,22 @@ var (
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
-	ErrFileExists                        = " file exists"
+	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
+
+type VerdictType int
+
+const (
+	DENY VerdictType = iota
+	ACCEPT
+	EXPIRED_DELETED
+)
+
+func (verdictType VerdictType) Index() int {
+	return int(verdictType)
+}
 
 func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + podNamespace
@@ -53,7 +65,6 @@ func GetPodIdentifier(podName, podNamespace string) string {
 
 func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
 	pinPathName := strings.Split(pinPath, "/")
-	fmt.Println("pinPathName: ", pinPathName[7])
 	podIdentifier := strings.Split(pinPathName[7], "_")
 	return podIdentifier[0], podIdentifier[2]
 }
@@ -178,8 +189,7 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 }
 
 func IsFileExistsError(error string) bool {
-	errCode := strings.Split(error, ":")
-	if errCode[1] == ErrFileExists {
+	if error == ErrFileExists {
 		return true
 	}
 	return false

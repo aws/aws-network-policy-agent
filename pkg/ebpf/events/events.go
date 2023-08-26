@@ -58,7 +58,8 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 
 	var mapFDList []int
 	mapFDList = append(mapFDList, mapFD)
-	eventChanList, err := goebpfevents.InitRingBuffer(mapFDList)
+	eventsClient := goebpfevents.New()
+	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
 	if err != nil {
 		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
@@ -122,21 +123,21 @@ func getProtocol(protocolNum int) string {
 
 func getVerdict(verdict int) string {
 	verdictStr := "DENY"
-	if verdict == 1 {
+	if verdict == utils.ACCEPT.Index() {
 		verdictStr = "ACCEPT"
-	} else if verdict == 2 {
+	} else if verdict == utils.EXPIRED_DELETED.Index() {
 		verdictStr = "EXPIRED/DELETED"
 	}
 	return verdictStr
 }
 
-func publishData(logQueue []*cloudwatchlogs.InputLogEvent, message string, log logr.Logger) bool {
+func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message string, log logr.Logger) bool {
 	logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
 		Message:   &message,
 		Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
 	})
 	if len(logQueue) > 0 {
-		log.Info("Sending CW")
+		log.Info("Sending logs to CW")
 		input := cloudwatchlogs.PutLogEventsInput{
 			LogEvents:    logQueue,
 			LogGroupName: &logGroupName,
@@ -212,7 +213,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 
 				if enableCloudWatchLogs {
-					done = publishData(logQueue, message, log)
+					done = publishDataToCloudwatch(logQueue, message, log)
 					if done {
 						break
 					}
