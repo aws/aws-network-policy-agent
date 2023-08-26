@@ -2,7 +2,7 @@
 ## github.com/aws/aws-network-policy-agent ([Apache-2.0](https://github.com/aws/aws-network-policy-agent/blob/HEAD/README.md))
 
 ```# aws-network-policy-agent
-EKS Node agent is responsible for managing and enforcing configured Network policies on the cluster. Node agent relies on eBPF probes to enforce the policies.
+EKS Network Policy Agent is responsible for managing and enforcing configured Network policies on the cluster. Node agent relies on eBPF probes to enforce the policies.
 
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
@@ -28,13 +28,6 @@ make docker-build docker-push IMG=<some-registry>/nodeagent:tag
 
 ```sh
 make deploy IMAGE_NAME=<some-registry>/nodeagent:tag
-```
-
-### Uninstall CRDs
-To delete the CRDs from the cluster:
-
-```sh
-make uninstall
 ```
 
 ### Undeploy controller
