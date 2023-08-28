@@ -95,10 +95,11 @@ Available Commands:
 
 - Load all eBPF programs managed by Network Policy Agent
 
+```
    ./aws-eks-na-cli ebpf progs
 
 Example:
-```
+
 ./aws-eks-na-cli ebpf progs
 Programs currently loaded : 
 Type : 26 ID : 6 Associated maps count : 1
@@ -110,11 +111,12 @@ Type : 3 ID : 57 Associated maps count : 3
 ```
 
 - Load all eBPF maps managed by Network Policy Agent
-
+  
+```
    ./aws-eks-na-cli ebpf maps
 
 Example:
-```
+
 ./aws-eks-na-cli ebpf maps
 Maps currently loaded : 
 Type : 2 ID : 45
@@ -126,11 +128,12 @@ Keysize 16 Valuesize 1 MaxEntries 65536
 ```
 
 - Print Map contents by ID
-
+  
+```
    ./aws-eks-na-cli ebpf dump-maps <Map-ID>
   
 Example:
-```
+
 ./aws-eks-na-cli ebpf dump-maps 40
 Key : IP/Prefixlen - 192.168.61.236/32 
 Value : 
@@ -147,10 +150,11 @@ Endport -  0
 ```
 
 - Load all eBPF related programs and maps managed by Network Policy Agent
-
+  
+```
    ./aws-eks-na-cli ebpf loaded-ebpfdata
 
-```
+Example:
 ./aws-eks-na-cli ebpf loaded-ebpfdata
 pinPathName: busybox-deployment-77948c5466-default_handle_egress
 PinPath:  /sys/fs/bpf/globals/aws/programs/busybox-deployment-77948c5466-default_handle_egress
