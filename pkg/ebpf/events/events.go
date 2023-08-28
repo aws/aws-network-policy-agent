@@ -58,8 +58,7 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 
 	var mapFDList []int
 	mapFDList = append(mapFDList, mapFD)
-	eventsClient := goebpfevents.New()
-	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
+	eventChanList, err := goebpfevents.InitRingBuffer(mapFDList)
 	if err != nil {
 		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
