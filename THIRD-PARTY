@@ -2,7 +2,7 @@
 ## github.com/aws/aws-network-policy-agent ([Apache-2.0](https://github.com/aws/aws-network-policy-agent/blob/HEAD/README.md))
 
 ```# aws-network-policy-agent
-EKS Network Policy Agent is responsible for managing and enforcing configured Network policies on the cluster. Node agent relies on eBPF probes to enforce the policies.
+EKS Network Policy Agent is responsible for managing and enforcing configured Network policies on the cluster. Network Policy Agent relies on eBPF probes to enforce the policies.
 
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
