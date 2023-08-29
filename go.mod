@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.13.4
+	github.com/aws/aws-ebpf-sdk-go v0.2.1-0.20230829205305-8938dadde8df
 	github.com/aws/aws-sdk-go v1.44.318
 	github.com/go-logr/logr v1.2.4
 	github.com/go-logr/zapr v1.2.4
@@ -17,7 +18,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
 	go.uber.org/zap v1.25.0
-	golang.org/x/sys v0.8.0
+	golang.org/x/sys v0.11.0
 	k8s.io/api v0.27.2
 	k8s.io/apimachinery v0.27.2
 	k8s.io/client-go v0.27.2
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	github.com/aws/aws-ebpf-sdk-go v0.2.1-0.20230829205305-8938dadde8df // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
