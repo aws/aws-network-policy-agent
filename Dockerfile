@@ -36,7 +36,7 @@ RUN yum update -y && \
     yum clean all
 
 COPY . ./
-COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h .
+COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h ./pkg/ebpf/c/
 RUN make build-bpf
 
 FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest.2
