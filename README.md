@@ -1,69 +1,188 @@
 # aws-network-policy-agent
-EKS Node agent is responsible for managing and enforcing configured Network policies on the cluster. Node agent relies on eBPF probes to enforce the policies.
+Amazon EKS Network Policy Agent is a daemonset that is responsible for enforcing configured network policies on the cluster. Network policy support is a feature of the [Amazon VPC CNI](https://github.com/aws/amazon-vpc-cni-k8s). 
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+[Network Policy Controller](https://github.com/aws/amazon-network-policy-controller-k8s/) resolves the configured network policies and publishes the resolved endpoints via Custom CRD (`PolicyEndpoints`) resource. Network Policy agent derives the endpoints from PolicyEndpoint resources and enforces them via eBPF probes attached to pod's host Veth interface.
+
+Starting with Amazon VPC CNI v1.14.0, Network Policy agent will be automatically installed. Review the instructions in the [EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html).
 
 ## Getting Started
-You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
+You’ll need a Kubernetes cluster version 1.25+ to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
+
 **Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
 
-### Running on the cluster
-1. Install Instances of Custom Resources:
+## Prerequisites 
+ - You need to install [Network Policy Controller](https://github.com/aws/amazon-network-policy-controller-k8s/) in your cluster before you can enable the feature in VPC CNI. When you create a new Amazon EKS cluster, the controller will be automatically installed in EKS control plane.
+ - Network Policy Agent expects the BPF FS (`/sys/fs/bpf`) to be mounted. If you rely on EKS AMIs, all v1.27+ EKS AMIs will mount BPF FS by default. For v1.25 and v1.26 clusters, EKS AMIs above version https://github.com/awslabs/amazon-eks-ami/releases/tag/v20230703 will mount the BPF FS by default.
+ - PolicyEndpoint CRD needs to be installed in the cluster. Installing Network Policy Controller will automatically install the CRD.
 
-```sh
-kubectl apply -f config/samples/
+## Setup
+Download the latest version of the [yaml](https://github.com/aws/amazon-vpc-cni-k8s/tree/release-1.14/config) and apply it to the cluster.
+
+Please refer to [EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html) on how to enable the feature.
+
+### Network Policy Agent Configuration flags
+---
+
+#### `enable-network-policy`
+
+Type: Boolean
+
+Default: false
+
+Set this flag to `true` to enable the Network Policy feature support.
+
+#### `enable-cloudwatch-logs`
+
+Type: Boolean
+
+Default: false
+
+Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/run/aws-routed-eni/network-policy-agent.log`).
+
+This feature requires you to provide relevant Cloudwatch permissions to `aws-node` pod via the below policy.
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": [
+                "logs:DescribeLogGroups",
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
 ```
 
-2. Build and push your image to the location specified by `IMG`:
+#### `enable-ipv6`
 
-```sh
-make docker-build docker-push IMG=<some-registry>/nodeagent:tag
+Type: Boolean
+
+Default: false
+
+Network Policy agent can operate in either IPv4 or IPv6 mode. Setting this flag to `true` in the manifest will configure it in IPv6 mode.
+
+## Network Policy Agent CLI
+The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.
+
+**Note:**: To run this CLI, you can use any method to connect to the node. CLI binary is located at `/opt/cni/bin`.
+
+**Usage**:
+
+```
+./aws-eks-na-cli ebpf -h
+Dump all ebpf related data
+
+Usage:
+  aws-eks-na-cli ebpf [flags]
+  aws-eks-na-cli ebpf [command]
+
+Aliases:
+  ebpf, ebpf
+
+Available Commands:
+  dump-maps       Dump all ebpf maps related data
+  loaded-ebpfdata Dump all ebpf related data
+  maps            Dump all ebpf maps related data
+  progs           Dump all ebpf program related data
 ```
 
-3. Deploy the controller to the cluster with the image specified by `IMAGE_NAME`:
+- Load all eBPF programs managed by Network Policy Agent
 
-```sh
-make deploy IMAGE_NAME=<some-registry>/nodeagent:tag
+   ./aws-eks-na-cli ebpf progs
+
+Example:
+```
+./aws-eks-na-cli ebpf progs
+Programs currently loaded : 
+Type : 26 ID : 6 Associated maps count : 1
+========================================================================================
+Type : 26 ID : 8 Associated maps count : 1
+========================================================================================
+Type : 3 ID : 57 Associated maps count : 3
+========================================================================================
 ```
 
-### Uninstall CRDs
-To delete the CRDs from the cluster:
+- Load all eBPF maps managed by Network Policy Agent
 
-```sh
-make uninstall
+   ./aws-eks-na-cli ebpf maps
+
+Example:
+```
+./aws-eks-na-cli ebpf maps
+Maps currently loaded : 
+Type : 2 ID : 45
+Keysize 4 Valuesize 98 MaxEntries 1
+========================================================================================
+Type : 9 ID : 201
+Keysize 16 Valuesize 1 MaxEntries 65536
+========================================================================================
 ```
 
-### Undeploy controller
-UnDeploy the controller from the cluster:
+- Print Map contents by ID
 
-```sh
-make undeploy
+   ./aws-eks-na-cli ebpf dump-maps <Map-ID>
+  
+Example:
+```
+./aws-eks-na-cli ebpf dump-maps 40
+Key : IP/Prefixlen - 192.168.61.236/32 
+Value : 
+Protocol -  254
+StartPort -  0
+Endport -  0
+*******************************
+Key : IP/Prefixlen - 0.0.0.0/0 
+Value : 
+Protocol -  254
+StartPort -  0
+Endport -  0
+*******************************
+```
+
+- Load all eBPF related programs and maps managed by Network Policy Agent
+
+   ./aws-eks-na-cli ebpf loaded-ebpfdata
+
+```
+./aws-eks-na-cli ebpf loaded-ebpfdata
+pinPathName: busybox-deployment-77948c5466-default_handle_egress
+PinPath:  /sys/fs/bpf/globals/aws/programs/busybox-deployment-77948c5466-default_handle_egress
+Pod Identifier : busybox-deployment-77948c5466-default  Direction : egress 
+Prog FD:  9
+Associated Maps -> 
+Map Name:  
+Map ID:  224
+Map Name:  egress_map
+Map ID:  225
+========================================================================================
+pinPathName:  busybox-deployment-77948c5466-default_handle_ingress
+PinPath:  /sys/fs/bpf/globals/aws/programs/busybox-deployment-77948c5466-default_handle_ingress
+Pod Identifier : busybox-deployment-77948c5466-default  Direction : ingress 
+Prog FD:  13
+Associated Maps -> 
+Map Name:  
+Map ID:  224
+Map Name:  ingress_map
+Map ID:  226
+========================================================================================
 ```
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+See [CONTRIBUTING](CONTRIBUTING.md) for more information.
 
 ### How it works
 This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/).
 
 It uses [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/),
 which provide a reconcile function responsible for synchronizing resources until the desired state is reached on the cluster.
-
-### Test It Out
-1. Install the CRDs into the cluster:
-
-```sh
-make install
-```
-
-2. Run your controller (this will run in the foreground, so switch to a new terminal if you want to leave it running):
-
-```sh
-make run
-```
-
-**NOTE:** You can also run this in one step by running: `make install run`
 
 ### Modifying the API definitions
 If you are editing the API definitions, generate the manifests such as CRs or CRDs using:
@@ -91,4 +210,9 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+## Security Disclosures 
+
+If you think you’ve found a potential security issue, please do not post it in the Issues. Instead, please follow the
+instructions [here](https://aws.amazon.com/security/vulnerability-reporting/) or [email AWS security directly](mailto:aws-security@amazon.com).
 
