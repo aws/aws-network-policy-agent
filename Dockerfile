@@ -32,11 +32,11 @@ WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
     yum install -y llvm clang make gcc && \
-    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
+    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel && \
     yum clean all
 
 COPY . ./
-COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h .
+COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h ./pkg/ebpf/c/
 RUN make build-bpf
 
 FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest.2
