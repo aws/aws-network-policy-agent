@@ -490,9 +490,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 }
 
 func TestCheckAndUpdateBPFBinaries(t *testing.T) {
-	currentBinaryPath := "./test_files/"
 	testBpfBinaries := []string{TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY}
-	//testBpfBinaries := []string{"test.c", "TC_EGRESS_BINARY", "EVENTS_BINARY"}
 
 	type want struct {
 		updateIngressProbe bool
@@ -536,8 +534,7 @@ func TestCheckAndUpdateBPFBinaries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bpfTCClient := tc.New(POD_VETH_PREFIX)
-			gotUpdateIngressProbe, gotUpdateEgressProbe, gotUpdateEventsProbe, gotError := checkAndUpdateBPFBinaries(bpfTCClient, tt.bpfBinaries, tt.hostBinaryPath,
-				currentBinaryPath)
+			gotUpdateIngressProbe, gotUpdateEgressProbe, gotUpdateEventsProbe, gotError := checkAndUpdateBPFBinaries(bpfTCClient, tt.bpfBinaries, tt.hostBinaryPath)
 			assert.Equal(t, tt.want.updateIngressProbe, gotUpdateIngressProbe)
 			assert.Equal(t, tt.want.updateEgressProbe, gotUpdateEgressProbe)
 			assert.Equal(t, tt.want.updateEventsProbe, gotUpdateEventsProbe)
