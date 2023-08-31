@@ -11,7 +11,6 @@ function set_cluster_defaults(){
     : "${KUBERNETES_VERSION:=1.27}"
     : "${IP_FAMILY:=IPv4}"
     : "${CNI_ADDON_VERSION:=v1.14.0-eksbuild.3}"
-    : "${CNI_ADDON_CONFIGURATION:=""}"
     : "${CW_NAMESPACE:=amazon-cloudwatch}"
     : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
     : "${NETWORK_POLICY_NS:=netpol-test}"
@@ -27,7 +26,7 @@ function create_cluster(){
     addons:
       - name: vpc-cni
         version: ${CNI_ADDON_VERSION}
-        configurationValues: ${CNI_ADDON_CONFIGURATION}
+        configurationValues: "{\"enableNetworkPolicy\": \"true\"}"
       - name: coredns
       - name: kube-proxy
     kind: ClusterConfig

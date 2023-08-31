@@ -32,10 +32,9 @@ jobs:
         env:
           RUN_PERFORMANCE_TESTS: true
           KUBERNETES_VERSION: 1.27
-          NODES_CAPACITY: 10
+          NODES_CAPACITY: 3
           INSTANCE_TYPE: c5.xlarge
-          CNI_ADDON_VERSION: v1.13.3-eksbuild.1
-          CNI_ADDON_CONFIGURATION: ""
+          CNI_ADDON_VERSION: v1.14.0-eksbuild.3
           IP_FAMILY: ${{ matrix.ip-family }}
         run: |
           ./scripts/run-tests.sh

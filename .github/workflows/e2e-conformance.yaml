@@ -33,7 +33,6 @@ jobs:
           RUN_CONFORMANCE_TESTS: true
           KUBERNETES_VERSION: 1.27
           CNI_ADDON_VERSION: v1.14.0-eksbuild.3
-          CNI_ADDON_CONFIGURATION: '{"enableNetworkPolicy": "true"}'
           IP_FAMILY: ${{ matrix.ip-family }}
         run: |
           ./scripts/run-tests.sh
