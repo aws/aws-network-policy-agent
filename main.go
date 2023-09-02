@@ -91,7 +91,7 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
-		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnableCloudWatchLogs,
+		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy)
 	if err != nil {
 		setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
