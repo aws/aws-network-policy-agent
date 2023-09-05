@@ -31,6 +31,16 @@ Default: false
 
 Set this flag to `true` to enable the Network Policy feature support.
 
+#### `enable-policy-event-logs`
+
+Type: Boolean
+
+Default: false
+
+Set this flag to `true` to enable the collection & logging of policy decision logs.
+
+> Notice: Enabling this feature requires one CPU core per node.
+
 #### `enable-cloudwatch-logs`
 
 Type: Boolean
@@ -38,6 +48,8 @@ Type: Boolean
 Default: false
 
 Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/run/aws-routed-eni/network-policy-agent.log`).
+
+This feature requires to also enable the `enable-policy-event-logs` flag.
 
 This feature requires you to provide relevant Cloudwatch permissions to `aws-node` pod via the below policy.
 
