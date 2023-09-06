@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.13.4
-	github.com/aws/aws-ebpf-sdk-go v0.2.0
+	github.com/aws/aws-ebpf-sdk-go v1.0.1
 	github.com/aws/aws-sdk-go v1.44.318
 	github.com/go-logr/logr v1.2.4
 	github.com/go-logr/zapr v1.2.4

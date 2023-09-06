@@ -5,8 +5,8 @@ github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAE
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
 github.com/aws/amazon-vpc-cni-k8s v1.13.4 h1:LC3AX3TRagZN1PUJRgx1Y1CnAvzala5xAFCrWLVthr8=
 github.com/aws/amazon-vpc-cni-k8s v1.13.4/go.mod h1:eVzV7+2QctvKc+yyr3kLNHFwb9xZQRKl0C8ki4ObzDw=
-github.com/aws/aws-ebpf-sdk-go v0.2.0 h1:I/LRQIrmjRZhfqbGVCbROmWuuLi6iMpUtUCqpNQKOmY=
-github.com/aws/aws-ebpf-sdk-go v0.2.0/go.mod h1:qpKcRfSdThPtSsqep2jqRTgut97AWU30YmLH2DblrkM=
+github.com/aws/aws-ebpf-sdk-go v1.0.1 h1:TJzlq+wS4bjXgTFiRyox7FBds1WtYUdIPUUrHqB6imo=
+github.com/aws/aws-ebpf-sdk-go v1.0.1/go.mod h1:qpKcRfSdThPtSsqep2jqRTgut97AWU30YmLH2DblrkM=
 github.com/aws/aws-sdk-go v1.44.318 h1:Yl66rpbQHFUbxe9JBKLcvOvRivhVgP6+zH0b9KzARX8=
 github.com/aws/aws-sdk-go v1.44.318/go.mod h1:aVsgQcEevwlmQ7qHE9I3h+dtQgpqhFB+i8Phjh7fkwI=
 github.com/benbjohnson/clock v1.1.0/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
