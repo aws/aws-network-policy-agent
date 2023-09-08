@@ -20,7 +20,7 @@ const (
 	defaultKubeconfig             = ""
 	defaultWatchNamespace         = corev1.NamespaceAll
 	defaultMetricsAddr            = ":8162"
-	defaultHealthProbeBindAddress = ":8081"
+	defaultHealthProbeBindAddress = ":8163"
 	defaultQPS                    = 20
 	defaultBurst                  = 100
 )
