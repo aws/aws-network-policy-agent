@@ -12,6 +12,7 @@ source ${DIR}/lib/tests.sh
 
 : "${RUN_PERFORMANCE_TESTS:=false}"
 : "${RUN_CONFORMANCE_TESTS:=false}"
+TEST_FAILED="false"
 
 cleanup() {
 
@@ -24,8 +25,11 @@ cleanup() {
 
 trap cleanup EXIT
 
-set_cluster_defaults
+load_default_values
 create_cluster
+
+load_addon_details
+install_network_policy_mao $LATEST_ADDON_VERSION
 
 if [[ $RUN_PERFORMANCE_TESTS == "true" ]]; then
   echo "Runnning Performance tests"
@@ -37,3 +41,8 @@ elif [[ $RUN_CONFORMANCE_TESTS == "true" ]]; then
 fi
 
 check_path_cleanup
+
+if [[ $TEST_FAILED == "true" ]]; then
+  echo "Test run failed, check failures"
+  exit 1
+fi

@@ -1,6 +1,6 @@
 
 
-function set_cluster_defaults(){
+function load_default_values(){
 
     CLUSTER_NAME=network-policy-${RANDOM}
     : "${AWS_REGION:=us-west-2}"
@@ -8,13 +8,11 @@ function set_cluster_defaults(){
     : "${NODEGROUP_TYPE:=linux}"
     : "${NODES_CAPACITY:=3}"
     : "${INSTANCE_TYPE:=t3.large}"
-    : "${KUBERNETES_VERSION:=1.27}"
+    : "${K8S_VERSION:=1.27}"
     : "${IP_FAMILY:=IPv4}"
-    : "${CNI_ADDON_VERSION:=v1.14.0-eksbuild.3}"
     : "${CW_NAMESPACE:=amazon-cloudwatch}"
     : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
-    : "${NETWORK_POLICY_NS:=netpol-test}"
-    : "${ENDPOINT_URL:=""}"
+    : "${ENDPOINT_FLAG:=""}"
 }
 
 function create_cluster(){
@@ -25,8 +23,6 @@ function create_cluster(){
         withOIDC: true
     addons:
       - name: vpc-cni
-        version: ${CNI_ADDON_VERSION}
-        configurationValues: "{\"enableNetworkPolicy\": \"true\"}"
       - name: coredns
       - name: kube-proxy
     kind: ClusterConfig
@@ -48,7 +44,7 @@ function create_cluster(){
     metadata:
         name: ${CLUSTER_NAME}
         region: ${AWS_REGION}
-        version: "${KUBERNETES_VERSION}"
+        version: "${K8S_VERSION}"
 EOF
 
     eksctl create cluster -f ./eks-cluster.yaml
@@ -56,7 +52,7 @@ EOF
 
 function delete_cluster(){
 
-    eksctl delete cluster -f ./eks-cluster.yaml
-    rm -rf ./eks-cluster.yaml
+    eksctl delete cluster -f ./eks-cluster.yaml || echo "Cluster Delete failed"
+    rm -rf ./eks-cluster.yaml || echo "Cluster config file not found"
 }
 
