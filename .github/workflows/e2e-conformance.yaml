@@ -31,8 +31,7 @@ jobs:
       - name: Run e2e conformance test
         env:
           RUN_CONFORMANCE_TESTS: true
-          KUBERNETES_VERSION: 1.27
-          CNI_ADDON_VERSION: v1.14.0-eksbuild.3
+          K8S_VERSION: 1.27
           IP_FAMILY: ${{ matrix.ip-family }}
         run: |
           ./scripts/run-tests.sh
