@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -431,8 +432,9 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 	currentPods, podsPresent := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier)
 	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
 	// by the Host IP value.
+	nodeIP := net.ParseIP(r.nodeIP)
 	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
-		if r.nodeIP == string(pod.HostIP) {
+		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			r.log.Info("Found a matching Pod: ", "name: ", pod.Name, "namespace: ", pod.Namespace)
 			targetPods = append(targetPods, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace})
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)

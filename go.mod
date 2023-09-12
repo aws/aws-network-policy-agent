@@ -4,7 +4,6 @@ go 1.20
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.13.4
-	github.com/aws/aws-ebpf-sdk-go v0.2.0
 	github.com/aws/aws-sdk-go v1.44.318
 	github.com/go-logr/logr v1.2.4
 	github.com/go-logr/zapr v1.2.4
@@ -26,6 +25,7 @@ require (
 )
 
 require (
+	github.com/aws/aws-ebpf-sdk-go v0.2.1-0.20230829205305-8938dadde8df // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
