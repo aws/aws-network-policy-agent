@@ -540,14 +540,14 @@ func TestIsFileExistsError(t *testing.T) {
 		{
 			name: "file exists error string",
 			args: args{
-				error: "while loading egress program handle egress on fd 15: file exists",
+				error: "file exists",
 			},
 			want: true,
 		},
 		{
 			name: "Link Not Found error string",
 			args: args{
-				error: "while loading egress program handle ingress on fd 15: link not found",
+				error: "link not found",
 			},
 			want: false,
 		},
