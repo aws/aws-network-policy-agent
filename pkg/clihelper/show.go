@@ -167,6 +167,10 @@ func MapWalk(mapID int) error {
 
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				fmt.Println("No Entries found, Empty map")
+				return nil
+			}
 			return fmt.Errorf("Unable to get First key: %v", err)
 		} else {
 			for {
@@ -204,6 +208,10 @@ func MapWalk(mapID int) error {
 		iterNextKey := ConntrackKey{}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				fmt.Println("No Entries found, Empty map")
+				return nil
+			}
 			return fmt.Errorf("Unable to get First key: %v", err)
 		} else {
 			for {
