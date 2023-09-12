@@ -734,43 +734,41 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
 		}
-		//TODO - Just Purge both the entries and avoid these calls for every CIDR
-		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
-			continue
-		}
 
-		if len(firewallRule.L4Info) == 0 {
-			l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
-			l.addCatchAllL4Entry(&firewallRule)
-			l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
-		}
-		if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
-			if existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]; ok {
-				firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+		if !isCatchAllIPEntryPresent {
+			if len(firewallRule.L4Info) == 0 {
+				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
+				l.addCatchAllL4Entry(&firewallRule)
+				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
 			}
-			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-		} else {
-			if existingL4Info, ok := ipCIDRs[string(firewallRule.IPCidr)]; ok {
-				firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+			if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
+				if existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]; ok {
+					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+				}
+				nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
+			} else {
+				if existingL4Info, ok := ipCIDRs[string(firewallRule.IPCidr)]; ok {
+					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+				}
+				// Check if the /32 entry is part of any non host CIDRs that we've encountered so far
+				// If found, we need to include the port and protocol combination against the current entry as well since
+				// we use LPM TRIE map and the /32 will always win out.
+				cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
+				if len(cidrL4Info) > 0 {
+					firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
+				}
+				ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
 			}
-			// Check if the /32 entry is part of any non host CIDRs that we've encountered so far
-			// If found, we need to include the port and protocol combination against the current entry as well since
-			// we use LPM TRIE map and the /32 will always win out.
-			cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
-			if len(cidrL4Info) > 0 {
-				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
-			}
-			ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-		}
-		//Include port and protocol combination paired with catch all entries
-		firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
+			//Include port and protocol combination paired with catch all entries
+			firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
 
-		l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
-		_, mapKey, _ = net.ParseCIDR(string(firewallRule.IPCidr))
-		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-		key = utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-		value = utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
-		mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
+			l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
+			_, mapKey, _ = net.ParseCIDR(string(firewallRule.IPCidr))
+			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
+			key = utils.ComputeTrieKey(*mapKey, l.enableIPv6)
+			value = utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
+			mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
+		}
 		if firewallRule.Except != nil {
 			for _, exceptCIDR := range firewallRule.Except {
 				_, mapKey, _ = net.ParseCIDR(string(exceptCIDR))
