@@ -1,43 +1,75 @@
 
-function install_network_policy_mao(){
+function load_addon_details() {
 
-    local options=" --no-cli-pager"
-    if [[ ! -z $ENDPOINT_URL ]]; then
-        options+=" --endpoint-url $ENDPOINT_URL"
-    fi
+  ADDON_NAME="vpc-cni"
+  echo "loading $ADDON_NAME addon details"
+  LATEST_ADDON_VERSION=$(aws eks describe-addon-versions $ENDPOINT_FLAG --addon-name $ADDON_NAME --kubernetes-version $K8S_VERSION | jq '.addons[0].addonVersions[0].addonVersion' -r)
+  EXISTING_SERVICE_ACCOUNT_ROLE_ARN=$(kubectl get serviceaccount -n kube-system aws-node -o json | jq '.metadata.annotations."eks.amazonaws.com/role-arn"' -r)
+}
 
-    if [[ ! -z $CNI_ADDON_CONFIGURATION ]]; then
-        options+=" --configuration $CNI_ADDON_CONFIGURATION"
-    fi
-
-    aws eks create-addon \
-        --addon-name vpc-cni \
-        --addon-version $CNI_ADDON_VERSION \
-        --resolve-conflicts overwrite \
-        --cluster-name ${CLUSTER_NAME} $options
-
-    local status=""
-    local retries=30
-    local try=0
-    while [[ $status != "ACTIVE" && $try -lt $retries ]]
-    do
-        status=$(aws eks describe-addon \
-            --addon-name vpc-cni \
-            --cluster-name ${CLUSTER_NAME} $options | jq -r '.addon.status')
-        echo "Addon status - $status" 
-        try=$((try+1))
-        sleep 10
-    done
-
-    if [[ $status != "ACTIVE" ]]; then
-        local err_message=$(aws eks describe-addon \
-            --addon-name vpc-cni \
-            --cluster-name ${CLUSTER_NAME} $options | jq -r '.addon.health')
-        echo $err_message
+function wait_for_addon_status() {
+  local expected_status=$1
+  local retry_attempt=0
+  if [ "$expected_status" = "DELETED" ]; then
+    while $(aws eks describe-addon $ENDPOINT_FLAG --cluster-name $CLUSTER_NAME --addon-name $ADDON_NAME --region $REGION >> /dev/null); do
+      if [ $retry_attempt -ge 30 ]; then
+        echo "failed to delete addon, qutting after too many attempts"
         exit 1
+      fi
+      echo "addon is still not deleted"
+      sleep 5
+      ((retry_attempt=retry_attempt+1))
+    done
+    echo "addon deleted"
+
+    sleep 10
+    return
+  fi
+
+  retry_attempt=0
+  while true
+  do
+    STATUS=$(aws eks describe-addon $ENDPOINT_FLAG --cluster-name "$CLUSTER_NAME" --addon-name $ADDON_NAME --region "$REGION" | jq -r '.addon.status')
+    if [ "$STATUS" = "$expected_status" ]; then
+      echo "addon status matches expected status"
+      return
     fi
 
-    echo "Addon installed Successfully"
+    if [ $retry_attempt -ge 30 ]; then
+      echo "failed to get desired add-on status: $STATUS, qutting after too many attempts"
+      exit 1
+    fi
+    echo "addon status is not equal to $expected_status"
+    sleep 10
+    ((retry_attempt=retry_attempt+1))
+  done
+}
+
+function install_network_policy_mao() {
+
+  local addon_version=$1
+  if DESCRIBE_ADDON=$(aws eks describe-addon $ENDPOINT_FLAG --cluster-name $CLUSTER_NAME --addon-name $ADDON_NAME --region $REGION); then
+    local current_addon_version=$(echo "$DESCRIBE_ADDON" | jq '.addon.addonVersion' -r)
+    echo "deleting the $current_addon_version"
+    aws eks delete-addon $ENDPOINT_FLAG --cluster-name $CLUSTER_NAME --addon-name $ADDON_NAME --region $REGION
+    wait_for_addon_status "DELETED"
+  fi
+
+  echo "Installing addon $addon_version with network policy enabled"
+
+  if [ "$EXISTING_SERVICE_ACCOUNT_ROLE_ARN" != "null" ]; then
+     SA_ROLE_ARN_ARG="--service-account-role-arn $EXISTING_SERVICE_ACCOUNT_ROLE_ARN"
+  fi
+
+  aws eks create-addon \
+    --cluster-name $CLUSTER_NAME \
+    --addon-name $ADDON_NAME \
+    --configuration-value '{"enableNetworkPolicy": "true"}' \
+    --resolve-conflicts OVERWRITE \
+    --addon-version $addon_version \
+    --region $REGION $ENDPOINT_FLAG $SA_ROLE_ARN_ARG
+
+  wait_for_addon_status "ACTIVE"
 }
 
 function install_network_policy_helm(){
