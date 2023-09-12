@@ -1,0 +1,37 @@
+name: e2e-conformance-tests
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 0 * * *" # Run Everyday at Midnight
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  e2e-conformance-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        ip-family: [ IPv4, IPv6 ]
+        # kubernetes-versions: ["1.25", "1.26", "1.27"]
+    if: github.repository == 'aws/aws-network-policy-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout latest commit in the PR
+        uses: actions/checkout@v3
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          role-duration-seconds: 18000 # 5 hours
+      - name: Run e2e conformance test
+        env:
+          RUN_CONFORMANCE_TESTS: true
+          K8S_VERSION: 1.27
+          IP_FAMILY: ${{ matrix.ip-family }}
+        run: |
+          ./scripts/run-tests.sh

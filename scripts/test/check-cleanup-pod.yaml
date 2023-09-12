@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+    name: $NODE
+spec:
+    restartPolicy: Never
+    nodeName: $NODE
+    containers:
+      - image: public.ecr.aws/r7y6e9p2/test-agent:latest
+        name: check-bpf-cleanup
+        command: ["./check-bpf-cleanup-agent"]
+        volumeMounts:
+          - mountPath: /tmp/sys/
+            name: bpf-volume
+    volumes:
+      - name: bpf-volume
+        hostPath:
+            path: /sys/
+            type: DirectoryOrCreate

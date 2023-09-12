@@ -1,0 +1,19 @@
+name: InstallDependencies
+description: 'Installs Go, Docker, Ginkgo, EKSCTL binaries'
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-go@v4
+      with:
+        go-version-file: go.mod
+        check-latest: true
+    - name: Set up ginkgo
+      shell: bash
+      run: |
+        # Install ginkgo version from go.mod
+        go install -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+    - name: Set up eksctl
+      shell: bash
+      run: |
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        sudo mv /tmp/eksctl /usr/local/bin/
