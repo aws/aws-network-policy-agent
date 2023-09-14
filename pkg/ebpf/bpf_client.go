@@ -734,8 +734,9 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
 		}
-		//TODO - Just Purge both the entries and avoid these calls for every CIDR
-		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
+
+		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) ||
+			utils.IsNodeIP(l.nodeIP, string(firewallRule.IPCidr)) {
 			continue
 		}
 

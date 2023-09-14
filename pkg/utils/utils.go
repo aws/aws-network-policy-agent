@@ -219,6 +219,14 @@ func IsCatchAllIPEntry(ipAddr string) bool {
 	return false
 }
 
+func IsNodeIP(nodeIP string, ipCidr string) bool {
+	ipAddr, _, _ := net.ParseCIDR(ipCidr)
+	if net.ParseIP(nodeIP).Equal(ipAddr) {
+		return true
+	}
+	return false
+}
+
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
