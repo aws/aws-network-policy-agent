@@ -77,7 +77,7 @@ func prometheusRegister() {
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
-	enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool) (*PolicyEndpointsReconciler, error) {
+	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool) (*PolicyEndpointsReconciler, error) {
 	r := &PolicyEndpointsReconciler{
 		k8sClient: k8sClient,
 		log:       log,
@@ -92,7 +92,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	var err error
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
-			enableCloudWatchLogs, enableIPv6, conntrackTTL)
+			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL)
 
 		// Start prometheus
 		prometheusRegister()
