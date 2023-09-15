@@ -9,6 +9,7 @@ const (
 	defaultLogLevel                = "info"
 	defaultLogFile                 = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultMaxConcurrentReconciles = 3
+	flagEnablePolicyEventLogs      = "enable-policy-event-logs"
 	flagEnableCloudWatchLogs       = "enable-cloudwatch-logs"
 	flagEnableIPv6                 = "enable-ipv6"
 	flagEnableNetworkPolicy        = "enable-network-policy"
@@ -22,6 +23,8 @@ type ControllerConfig struct {
 	LogFile string
 	// MaxConcurrentReconciles specifies the max number of reconcile loops
 	MaxConcurrentReconciles int
+	// Enable Policy decision logs
+	EnablePolicyEventLogs bool
 	// Enable Policy decision logs streaming to CloudWatch
 	EnableCloudWatchLogs bool
 	// Enable IPv6 mode
@@ -39,7 +42,8 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Set the controller log file - if not specified logs are written to stdout")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
 		"Maximum number of concurrent reconcile loops")
-	fs.BoolVar(&cfg.EnableCloudWatchLogs, flagEnableCloudWatchLogs, false, "If enabled, policy decision logs will be streamed to CloudWatch")
+	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")
+	fs.BoolVar(&cfg.EnableCloudWatchLogs, flagEnableCloudWatchLogs, false, "If enabled, policy decision logs will be streamed to CloudWatch, requires \"enable-policy-event-logs=true\"")
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
 	fs.BoolVar(&cfg.EnableNetworkPolicy, flagEnableNetworkPolicy, false, "If enabled, Network Policy agent will initialize BPF maps and start reconciler")
 

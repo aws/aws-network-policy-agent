@@ -105,7 +105,7 @@ type EbpfFirewallRules struct {
 	L4Info []v1alpha1.Port
 }
 
-func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableCloudWatchLogs bool,
+func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL time.Duration) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
@@ -212,13 +212,17 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6, ebpfClient.logger)
 	ebpfClient.logger.Info("Initialized Conntrack client")
 
-	err = events.ConfigurePolicyEventsLogging(ebpfClient.logger, enableCloudWatchLogs, eventBufferFD, enableIPv6)
-	if err != nil {
-		ebpfClient.logger.Error(err, "unable to initialize event buffer for Policy events, exiting..")
-		sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
-		return nil, err
+	if enablePolicyEventLogs {
+		err = events.ConfigurePolicyEventsLogging(ebpfClient.logger, enableCloudWatchLogs, eventBufferFD, enableIPv6)
+		if err != nil {
+			ebpfClient.logger.Error(err, "unable to initialize event buffer for Policy events, exiting..")
+			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
+			return nil, err
+		}
+		ebpfClient.logger.Info("Configured event logging")
+	} else {
+		ebpfClient.logger.Info("Disabled event logging")
 	}
-	ebpfClient.logger.Info("Configured event logging")
 
 	// Start Conntrack routines
 	if enableIPv6 {
@@ -734,8 +738,9 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
 		}
-		//TODO - Just Purge both the entries and avoid these calls for every CIDR
-		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
+
+		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) ||
+			utils.IsNodeIP(l.nodeIP, string(firewallRule.IPCidr)) {
 			continue
 		}
 
