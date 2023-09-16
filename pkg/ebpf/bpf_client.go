@@ -743,7 +743,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			continue
 		}
 
-		if !isCatchAllIPEntryPresent {
+		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
 			if len(firewallRule.L4Info) == 0 {
 				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
 				l.addCatchAllL4Entry(&firewallRule)
