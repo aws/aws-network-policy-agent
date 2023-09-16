@@ -280,9 +280,18 @@ cleanup-ebpf-sdk-override:
 	fi
 
 .PHONY: run-cyclonus-test
-run-cyclonus-test: ## Runs cyclonus tests on an existing cluster. Call with CLUSTER_NAME=<name of your cluster> to execute cyclonus test
+run-cyclonus-test: ## Runs cyclonus tests on an existing cluster. Call with CLUSTER_NAME=<name of your cluster>, SKIP_ADDON_INSTALLATION=<true/false> to execute cyclonus test
 ifdef CLUSTER_NAME
 	CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=$(SKIP_ADDON_INSTALLATION) ./scripts/run-cyclonus-tests.sh
 else
 	@echo 'Pass CLUSTER_NAME parameter'
 endif
+
+./PHONY: update-node-agent-image
+update-node-agent-image: ## Updates node agent image on an existing cluster. Optionally call with AWS_EKS_NODEAGENT=<Image URI>
+	./scripts/update-node-agent-image.sh AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
+
+./PHONY: update-image-and-test
+update-image-and-test: ## Updates node agent image on existing cluster and runs cyclonus tests. Call with CLUSTER_NAME=<name of the cluster> and AWS_EKS_NODEAGENT=<Image URI> 
+	$(MAKE) update-node-agent-image AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
+	$(MAKE) run-cyclonus-test CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=true
