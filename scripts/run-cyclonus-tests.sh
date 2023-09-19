@@ -28,7 +28,7 @@ if [[ ! -z $ENDPOINT ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
 fi
 
-if [[ -z K8S_VERSION ]]; then
+if [[ -z $K8S_VERSION ]]; then
     K8S_VERSION=$(aws eks describe-cluster $ENDPOINT_FLAG --name $CLUSTER_NAME --region $REGION | jq -r '.cluster.version')
 fi
 

@@ -56,7 +56,8 @@ function install_network_policy_mao() {
   fi
 
   echo "Installing addon $addon_version with network policy enabled"
-
+  
+  SA_ROLE_ARN_ARG=""
   if [ "$EXISTING_SERVICE_ACCOUNT_ROLE_ARN" != "null" ]; then
      SA_ROLE_ARN_ARG="--service-account-role-arn $EXISTING_SERVICE_ACCOUNT_ROLE_ARN"
   fi
