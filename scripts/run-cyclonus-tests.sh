@@ -3,7 +3,7 @@
 # The script runs Network Policy Cyclonus tests on a existing cluster
 # Parameters:
 # CLUSTER_NAME: name of the cluster
-# KUBECONFIG: path to the kubeconfig file, default ~/.kube/config
+# KUBECONFIG: Set the variable to the cluster kubeconfig file path
 # REGION: defaults to us-west-2
 # IP_FAMILY: defaults to IPv4
 # ADDON_VERSION: Optional, defaults to the latest version
@@ -35,7 +35,6 @@ fi
 TEST_FAILED="false"
 
 echo "Running Cyclonus e2e tests with the following variables
-KUBECONFIG: $KUBECONFIG
 CLUSTER_NAME: $CLUSTER_NAME
 REGION: $REGION
 IP_FAMILY: $IP_FAMILY
