@@ -56,7 +56,8 @@ function install_network_policy_mao() {
   fi
 
   echo "Installing addon $addon_version with network policy enabled"
-
+  
+  SA_ROLE_ARN_ARG=""
   if [ "$EXISTING_SERVICE_ACCOUNT_ROLE_ARN" != "null" ]; then
      SA_ROLE_ARN_ARG="--service-account-role-arn $EXISTING_SERVICE_ACCOUNT_ROLE_ARN"
   fi
@@ -74,7 +75,6 @@ function install_network_policy_mao() {
 
 function install_network_policy_helm(){
 
-    echo "Installing Network Policy using VPC-CNI helm chart"
     helm repo add eks https://aws.github.io/eks-charts
 
     if [[ $IP_FAMILY == "IPv4" ]]; then
@@ -87,7 +87,16 @@ function install_network_policy_helm(){
         ENABLE_PREFIX_DELEGATION=true
     fi
 
-    helm upgrade --install aws-vpc-cni eks/aws-vpc-cni --wait --timeout 300 \
+    echo "Updating annotations and labels on existing resources"
+    for kind in daemonSet clusterRole clusterRoleBinding serviceAccount; do
+      echo "setting annotations and labels on $kind/aws-node"
+      kubectl -n kube-system annotate --overwrite $kind aws-node meta.helm.sh/release-name=aws-vpc-cni || echo "Unable to annotate $kind/aws-node"
+      kubectl -n kube-system annotate --overwrite $kind aws-node meta.helm.sh/release-namespace=kube-system || echo "Unable to annotate $kind/aws-node"
+      kubectl -n kube-system label --overwrite $kind aws-node app.kubernetes.io/managed-by=Helm || echo "Unable to label $kind/aws-node"
+    done
+
+    echo "Installing/Updating the aws-vpc-cni helm chart with `enableNetworkPolicy=true`"
+    helm upgrade --install aws-vpc-cni eks/aws-vpc-cni --wait --timeout 300s \
         --namespace kube-system \
         --set enableNetworkPolicy=true \
         --set originalMatchLabels=true \
@@ -95,6 +104,6 @@ function install_network_policy_helm(){
         --set image.env.ENABLE_IPv6=$ENABLE_IPv6 \
         --set nodeAgent.enableIpv6=$ENABLE_IPv6 \
         --set image.env.ENABLE_PREFIX_DELEGATION=$ENABLE_PREFIX_DELEGATION \
-        --set image.env.ENABLE_IPv4=$ENABLE_IPv4
+        --set image.env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
 
 }

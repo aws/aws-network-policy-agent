@@ -3,7 +3,7 @@
 function load_default_values(){
 
     CLUSTER_NAME=network-policy-${RANDOM}
-    : "${AWS_REGION:=us-west-2}"
+    : "${REGION:=us-west-2}"
     : "${AMI_FAMILY:=AmazonLinux2}"
     : "${NODEGROUP_TYPE:=linux}"
     : "${NODES_CAPACITY:=3}"
@@ -13,6 +13,8 @@ function load_default_values(){
     : "${CW_NAMESPACE:=amazon-cloudwatch}"
     : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
     : "${ENDPOINT_FLAG:=""}"
+    : "${HELM_EXTRA_ARGS:=""}"
+
 }
 
 function create_cluster(){
@@ -43,7 +45,7 @@ function create_cluster(){
             alpha.eksctl.io/nodegroup-type: managed
     metadata:
         name: ${CLUSTER_NAME}
-        region: ${AWS_REGION}
+        region: ${REGION}
         version: "${K8S_VERSION}"
 EOF
 

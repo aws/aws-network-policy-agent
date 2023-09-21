@@ -1,10 +1,9 @@
 #!/bin/bash
 
 # The script runs Network Policy Cyclonus tests on a existing cluster
-# Parameters to pass
 # Parameters:
 # CLUSTER_NAME: name of the cluster
-# KUBECONFIG: path to the kubeconfig file, default ~/.kube/config
+# KUBECONFIG: Set the variable to the cluster kubeconfig file path
 # REGION: defaults to us-west-2
 # IP_FAMILY: defaults to IPv4
 # ADDON_VERSION: Optional, defaults to the latest version
@@ -23,24 +22,28 @@ source ${DIR}/lib/tests.sh
 : "${IP_FAMILY:="IPv4"}"
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
+: "${K8S_VERSION:=""}"
 
 if [[ ! -z $ENDPOINT ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
 fi
 
-K8S_VERSION=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION | jq -r '.cluster.version')
+if [[ -z $K8S_VERSION ]]; then
+    K8S_VERSION=$(aws eks describe-cluster $ENDPOINT_FLAG --name $CLUSTER_NAME --region $REGION | jq -r '.cluster.version')
+fi
+
 TEST_FAILED="false"
 
 echo "Running Cyclonus e2e tests with the following variables
-KUBECONFIG: $KUBECONFIG
 CLUSTER_NAME: $CLUSTER_NAME
 REGION: $REGION
 IP_FAMILY: $IP_FAMILY
-K8S_VERSION: $K8S_VERSION
 
 Optional args
 ENDPOINT: $ENDPOINT
-ADDON_VERSION: $ADDON_VERSION"
+ADDON_VERSION: $ADDON_VERSION
+K8S_VERSION: $K8S_VERSION
+"
 
 if [[ $SKIP_ADDON_INSTALLATION == "false" ]]; then
     load_addon_details
