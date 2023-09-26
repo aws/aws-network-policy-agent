@@ -8,10 +8,12 @@ ENV GOPROXY=direct
 
 WORKDIR /workspace
 
-COPY . ./
+COPY go.mod go.sum ./
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
+
+COPY . ./
 
 RUN make build-linux
 
@@ -32,7 +34,7 @@ WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
     yum install -y llvm clang make gcc && \
-    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
+    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel && \
     yum clean all
 
 COPY . ./

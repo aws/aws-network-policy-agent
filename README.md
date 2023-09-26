@@ -31,6 +31,16 @@ Default: false
 
 Set this flag to `true` to enable the Network Policy feature support.
 
+#### `enable-policy-event-logs`
+
+Type: Boolean
+
+Default: false
+
+Set this flag to `true` to enable the collection & logging of policy decision logs.
+
+> Notice: Enabling this feature requires one CPU core per node.
+
 #### `enable-cloudwatch-logs`
 
 Type: Boolean
@@ -38,6 +48,8 @@ Type: Boolean
 Default: false
 
 Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/run/aws-routed-eni/network-policy-agent.log`).
+
+This feature requires to also enable the `enable-policy-event-logs` flag.
 
 This feature requires you to provide relevant Cloudwatch permissions to `aws-node` pod via the below policy.
 
@@ -95,10 +107,11 @@ Available Commands:
 
 - Load all eBPF programs managed by Network Policy Agent
 
+```
    ./aws-eks-na-cli ebpf progs
 
 Example:
-```
+
 ./aws-eks-na-cli ebpf progs
 Programs currently loaded : 
 Type : 26 ID : 6 Associated maps count : 1
@@ -110,11 +123,12 @@ Type : 3 ID : 57 Associated maps count : 3
 ```
 
 - Load all eBPF maps managed by Network Policy Agent
-
+  
+```
    ./aws-eks-na-cli ebpf maps
 
 Example:
-```
+
 ./aws-eks-na-cli ebpf maps
 Maps currently loaded : 
 Type : 2 ID : 45
@@ -126,11 +140,12 @@ Keysize 16 Valuesize 1 MaxEntries 65536
 ```
 
 - Print Map contents by ID
-
+  
+```
    ./aws-eks-na-cli ebpf dump-maps <Map-ID>
   
 Example:
-```
+
 ./aws-eks-na-cli ebpf dump-maps 40
 Key : IP/Prefixlen - 192.168.61.236/32 
 Value : 
@@ -147,10 +162,11 @@ Endport -  0
 ```
 
 - Load all eBPF related programs and maps managed by Network Policy Agent
-
+  
+```
    ./aws-eks-na-cli ebpf loaded-ebpfdata
 
-```
+Example:
 ./aws-eks-na-cli ebpf loaded-ebpfdata
 pinPathName: busybox-deployment-77948c5466-default_handle_egress
 PinPath:  /sys/fs/bpf/globals/aws/programs/busybox-deployment-77948c5466-default_handle_egress
@@ -215,4 +231,3 @@ limitations under the License.
 
 If you think you’ve found a potential security issue, please do not post it in the Issues. Instead, please follow the
 instructions [here](https://aws.amazon.com/security/vulnerability-reporting/) or [email AWS security directly](mailto:aws-security@amazon.com).
-

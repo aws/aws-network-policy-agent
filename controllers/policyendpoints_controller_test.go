@@ -329,7 +329,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false)
+			false, false, false, false)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -436,10 +436,33 @@ func TestDeriveTargetPods(t *testing.T) {
 		},
 	}
 
+	ipv6NodePolicyEndpoint := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			PodSelectorEndpoints: []policyendpoint.PodEndpoint{
+				{
+					HostIP:    "2001:db8::1",
+					PodIP:     "2001:db8::2",
+					Name:      "foo1",
+					Namespace: "bar",
+				},
+			},
+		},
+	}
+
 	tests := []struct {
 		name           string
 		policyendpoint policyendpoint.PolicyEndpoint
 		currentPods    []types.NamespacedName //Current set of active pods against this policy
+		nodeIP         string                 //Default: 1.1.1.1
 		want           want
 	}{
 		{
@@ -478,6 +501,19 @@ func TestDeriveTargetPods(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:           "Matching Local pods on IPv6 node",
+			policyendpoint: ipv6NodePolicyEndpoint,
+			nodeIP:         "2001:db8:0:0:0:0:0:1",
+			want: want{
+				activePods: []types.NamespacedName{
+					{
+						Name:      "foo1",
+						Namespace: "bar",
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -488,7 +524,10 @@ func TestDeriveTargetPods(t *testing.T) {
 		policyEndpointReconciler := PolicyEndpointsReconciler{
 			k8sClient: mockClient,
 			log:       logr.New(&log.NullLogSink{}),
-			nodeIP:    "1.1.1.1",
+			nodeIP:    tt.nodeIP,
+		}
+		if tt.nodeIP == "" {
+			policyEndpointReconciler.nodeIP = "1.1.1.1"
 		}
 
 		if tt.currentPods != nil {

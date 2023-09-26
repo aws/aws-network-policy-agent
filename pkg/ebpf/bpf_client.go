@@ -13,7 +13,7 @@ import (
 
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
-	goebpf "github.com/aws/aws-ebpf-sdk-go/pkg/tc"
+	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
@@ -48,6 +48,7 @@ var (
 	CONNTRACK_MAP_PIN_PATH                     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
+	POD_VETH_PREFIX                            = "eni"
 )
 
 var (
@@ -104,7 +105,7 @@ type EbpfFirewallRules struct {
 	L4Info []v1alpha1.Port
 }
 
-func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableCloudWatchLogs bool,
+func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL time.Duration) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
@@ -131,15 +132,19 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
+	ebpfClient.bpfSDKClient = goelf.New()
+	ebpfClient.bpfTCClient = tc.New(POD_VETH_PREFIX)
+
 	//Set RLIMIT
-	err = goelf.IncreaseRlimit()
+	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
 	if err != nil {
 		//No need to error out from here. We should be good to proceed.
 		ebpfClient.logger.Info("Failed to increase RLIMIT on the node....but moving forward")
 	}
 
 	//Compare BPF binaries
-	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(bpfBinaries)
+	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
+		bpfBinaries, hostBinaryPath)
 	if err != nil {
 		//Log the error and move on
 		ebpfClient.logger.Error(err, "Probe validation/update failed but will continue to load")
@@ -155,7 +160,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 
 	eventBufferFD := 0
-	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(policyEndpointeBPFContext,
+	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
 		ebpfClient.GlobalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
 		//Log the error and move on
@@ -174,7 +179,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := goelf.LoadBpfFile(eventsProbe, "global")
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
 			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
@@ -207,13 +212,17 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enableClou
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6, ebpfClient.logger)
 	ebpfClient.logger.Info("Initialized Conntrack client")
 
-	err = events.ConfigurePolicyEventsLogging(ebpfClient.logger, enableCloudWatchLogs, eventBufferFD, enableIPv6)
-	if err != nil {
-		ebpfClient.logger.Error(err, "unable to initialize event buffer for Policy events, exiting..")
-		sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
-		return nil, err
+	if enablePolicyEventLogs {
+		err = events.ConfigurePolicyEventsLogging(ebpfClient.logger, enableCloudWatchLogs, eventBufferFD, enableIPv6)
+		if err != nil {
+			ebpfClient.logger.Error(err, "unable to initialize event buffer for Policy events, exiting..")
+			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
+			return nil, err
+		}
+		ebpfClient.logger.Info("Configured event logging")
+	} else {
+		ebpfClient.logger.Info("Disabled event logging")
 	}
-	ebpfClient.logger.Info("Configured event logging")
 
 	// Start Conntrack routines
 	if enableIPv6 {
@@ -250,8 +259,12 @@ type bpfClient struct {
 	egressBinary string
 	// host IP Mask - will be initialized based on the IP family
 	hostMask string
-	// Coontrack client instance
+	// Conntrack client instance
 	conntrackClient conntrack.ConntrackClient
+	// eBPF SDK Client
+	bpfSDKClient goelf.BpfSDKClient
+	// eBPF TC Client
+	bpfTCClient tc.BpfTc
 	// Logger instance
 	logger logr.Logger
 }
@@ -265,7 +278,7 @@ type Event_t struct {
 	Verdict    uint32
 }
 
-func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
+func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
 	log := ctrl.Log.WithName("ebpf-client-init") //TODO - reuse the logger
 	updateIngressProbe, updateEgressProbe, updateEventsProbe := false, false, false
 	var existingProbePath string
@@ -311,7 +324,7 @@ func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
 
 	//Clean up probes
 	if updateIngressProbe || updateEgressProbe {
-		err := goebpf.CleanupQdiscs("eni", updateIngressProbe, updateEgressProbe)
+		err := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
 		if err != nil {
 			log.Error(err, "Probe cleanup failed")
 			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
@@ -321,7 +334,7 @@ func checkAndUpdateBPFBinaries(bpfBinaries []string) (bool, bool, bool, error) {
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
-func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
+func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
 	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, error) {
 	log := ctrl.Log.WithName("ebpf-client") //TODO reuse logger
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
@@ -329,7 +342,7 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
-	recoveredGlobalMaps, err := goelf.RecoverGlobalMaps()
+	recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
 	if err != nil {
 		log.Error(err, "failed to recover global maps..")
 		sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
@@ -353,7 +366,7 @@ func recoverBPFState(policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, 
 	// Recover BPF Programs and Maps from BPF_FS. We only aim to recover programs and maps
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
-		bpfState, err := goelf.RecoverAllBpfProgramsAndMaps()
+		bpfState, err := eBPFSDKClient.RecoverAllBpfProgramsAndMaps()
 		var peBPFContext BPFContext
 		if err != nil {
 			//Log it and move on. We will overwrite and recreate the maps/programs
@@ -489,7 +502,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 	}
 
 	l.logger.Info("Attempting to do an Ingress Attach")
-	err = goebpf.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
+	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, TC_INGRESS_PROG)
 	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Info("Ingress Attach failed:", "error", err)
 		return 0, err
@@ -523,7 +536,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	}
 
 	l.logger.Info("Attempting to do an Egress Attach")
-	err = goebpf.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
+	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, TC_EGRESS_PROG)
 	if err != nil && !utils.IsFileExistsError(err.Error()) {
 		l.logger.Error(err, "Egress Attach failed")
 		return 0, err
@@ -535,7 +548,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Ingress Detach")
 	var err error
-	err = goebpf.TCEgressDetach(hostVethName)
+	err = l.bpfTCClient.TCEgressDetach(hostVethName)
 	if err != nil &&
 		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
@@ -547,7 +560,7 @@ func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
 func (l *bpfClient) detachEgressBPFProbe(hostVethName string) error {
 	l.logger.Info("Attempting to do an Egress Detach")
 	var err error
-	err = goebpf.TCIngressDetach(hostVethName)
+	err = l.bpfTCClient.TCIngressDetach(hostVethName)
 	if err != nil &&
 		!utils.IsMissingFilterError(err.Error()) {
 		l.logger.Info("Ingress Detach failed:", "error", err)
@@ -597,7 +610,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
 	// Load a new instance of the ingres program
-	progInfo, _, err := goelf.LoadBpfFile(fileName, podIdentifier)
+	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
@@ -725,43 +738,45 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
 		}
-		//TODO - Just Purge both the entries and avoid these calls for every CIDR
-		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
+
+		if utils.IsNodeIP(l.nodeIP, string(firewallRule.IPCidr)) {
 			continue
 		}
 
-		if len(firewallRule.L4Info) == 0 {
-			l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
-			l.addCatchAllL4Entry(&firewallRule)
-			l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
-		}
-		if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
-			if existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]; ok {
-				firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
+			if len(firewallRule.L4Info) == 0 {
+				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
+				l.addCatchAllL4Entry(&firewallRule)
+				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
 			}
-			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-		} else {
-			if existingL4Info, ok := ipCIDRs[string(firewallRule.IPCidr)]; ok {
-				firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+			if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
+				if existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]; ok {
+					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+				}
+				nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
+			} else {
+				if existingL4Info, ok := ipCIDRs[string(firewallRule.IPCidr)]; ok {
+					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+				}
+				// Check if the /32 entry is part of any non host CIDRs that we've encountered so far
+				// If found, we need to include the port and protocol combination against the current entry as well since
+				// we use LPM TRIE map and the /32 will always win out.
+				cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
+				if len(cidrL4Info) > 0 {
+					firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
+				}
+				ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
 			}
-			// Check if the /32 entry is part of any non host CIDRs that we've encountered so far
-			// If found, we need to include the port and protocol combination against the current entry as well since
-			// we use LPM TRIE map and the /32 will always win out.
-			cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
-			if len(cidrL4Info) > 0 {
-				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
-			}
-			ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-		}
-		//Include port and protocol combination paired with catch all entries
-		firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
+			//Include port and protocol combination paired with catch all entries
+			firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
 
-		l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
-		_, mapKey, _ = net.ParseCIDR(string(firewallRule.IPCidr))
-		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-		key = utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-		value = utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
-		mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
+			l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
+			_, mapKey, _ = net.ParseCIDR(string(firewallRule.IPCidr))
+			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
+			key = utils.ComputeTrieKey(*mapKey, l.enableIPv6)
+			value = utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
+			mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
+		}
 		if firewallRule.Except != nil {
 			for _, exceptCIDR := range firewallRule.Except {
 				_, mapKey, _ = net.ParseCIDR(string(exceptCIDR))
