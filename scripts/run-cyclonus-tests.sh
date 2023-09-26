@@ -60,6 +60,6 @@ fi
 run_cyclonus_tests
 
 if [[ $TEST_FAILED == "true" ]]; then
-    echo "Test run failed, check failures"
+    echo "Test run failed"
     exit 1
 fi
