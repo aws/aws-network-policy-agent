@@ -16,7 +16,7 @@ function run_cyclonus_tests(){
     cat ${DIR}/results.log
 
     echo "Verify results against expected"
-    python3 ${DIR}/lib/verify_test_results.py -f ${DIR}/results.log -ip $IP_FAMILY || (echo "Cyclonus tests have failed" && TEST_FAILED=true)
+    python3 ${DIR}/lib/verify_test_results.py -f ${DIR}/results.log -ip $IP_FAMILY || TEST_FAILED=true
 }
 
 function run_performance_tests(){
