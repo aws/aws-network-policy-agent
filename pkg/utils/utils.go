@@ -285,6 +285,7 @@ func ConvIPv6ToByte(ipaddr net.IP) []byte {
 type ConntrackKeyV6 struct {
 	Source_ip   [16]byte
 	Source_port uint16
+	_           uint16 //Padding
 	Dest_ip     [16]byte
 	Dest_port   uint16
 	Protocol    uint8
@@ -296,7 +297,7 @@ type ConntrackVal struct {
 
 func ConvConntrackV6ToByte(key ConntrackKeyV6) []byte {
 	ipSize := unsafe.Sizeof(key)
-	byteArray := (*[38]byte)(unsafe.Pointer(&key))
+	byteArray := (*[unsafe.Sizeof(key)]byte)(unsafe.Pointer(&key))
 	byteSlice := byteArray[:ipSize]
 	return byteSlice
 }

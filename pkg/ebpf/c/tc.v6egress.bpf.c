@@ -42,21 +42,21 @@ struct lpm_trie_val {
 
 
 struct conntrack_key {
-	__u8  src_ip[16];
+	struct	in6_addr saddr;
 	__u16 src_port;
-	__u8  dest_ip[16];
+	struct	in6_addr daddr;
 	__u16 dest_port;
 	__u8  protocol;
 };
 
 struct conntrack_value {
-	__u8 val[16];
+	struct in6_addr addr;
 };
 
 struct data_t {
-	__u8   src_ip[16];
+	struct	in6_addr src_ip;	
 	__u32  src_port;
-	__u8   dest_ip[16];
+	struct	in6_addr dest_ip;
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
@@ -74,26 +74,22 @@ struct bpf_map_def_pvt SEC("maps") egress_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
-
 SEC("tc_cls")
 int handle_egress(struct __sk_buff *skb)
 {
+	
 	struct keystruct trie_key;
 	struct lpm_trie_val *trie_val;
-    __u32 l4_src_port = 0;
-    __u32 l4_dst_port = 0;
-    struct conntrack_key flow_key;
-    struct conntrack_value *flow_val;
-    struct conntrack_key reverse_flow_key;
-    struct conntrack_value *reverse_flow_val;
-    struct data_t evt = {};
+	__u16 l4_src_port = 0;
+	__u16 l4_dst_port = 0;
+    	struct conntrack_key flow_key;
+    	struct conntrack_value *flow_val;
+    	struct conntrack_value *reverse_flow_val;
+    	struct data_t evt = {};
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
-	__u8 src_ip[16];
 
-    memset(&flow_key, 0, sizeof(flow_key));
-    memset(&src_ip, 0, sizeof(src_ip));
-    memset(&reverse_flow_key, 0, sizeof(reverse_flow_key));
+ 	__builtin_memset(&flow_key, 0, sizeof(flow_key));
 
 	struct ethhdr *ether = data;
 	if (data + sizeof(*ether) > data_end) {
@@ -119,119 +115,109 @@ int handle_egress(struct __sk_buff *skb)
         if (ip->nexthdr == 58) {
         	return BPF_OK;
         }
+   
+	switch (ip->nexthdr) {
+		case IPPROTO_TCP:
+			if (data + sizeof(*ip) + sizeof(*l4_tcp_hdr) > data_end) {
+				return BPF_OK;
+			}
+			l4_src_port = (((((unsigned short)(l4_tcp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->source) & 0xFF00) >> 8));
+			l4_dst_port = (((((unsigned short)(l4_tcp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->dest) & 0xFF00) >> 8));
+			break;
+		case IPPROTO_UDP:
+			if (data + sizeof(*ip) + sizeof(*l4_udp_hdr) > data_end) {
+				return BPF_OK;
+			}
+			l4_src_port = (((((unsigned short)(l4_udp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_udp_hdr->source) & 0xFF00) >> 8));
+			l4_dst_port = (((((unsigned short)(l4_udp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_udp_hdr->dest) & 0xFF00) >> 8));
+			break;
+		case IPPROTO_SCTP:
+			if (data + sizeof(*ip) + sizeof(*l4_sctp_hdr) > data_end) {
+				return BPF_OK;
+			}
+			l4_src_port = (((((unsigned short)(l4_sctp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->source) & 0xFF00) >> 8));
+			l4_dst_port = (((((unsigned short)(l4_sctp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->dest) & 0xFF00) >> 8));
+			break;
+	}
 
-		switch (ip->nexthdr) {
-			case IPPROTO_TCP:
-				if (data + sizeof(*ip) + sizeof(*l4_tcp_hdr) > data_end) {
-					return BPF_OK;
-				}
-				l4_src_port = (((((unsigned short)(l4_tcp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->source) & 0xFF00) >> 8));
-				l4_dst_port = (((((unsigned short)(l4_tcp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->dest) & 0xFF00) >> 8));
-				break;
-			case IPPROTO_UDP:
-				if (data + sizeof(*ip) + sizeof(*l4_udp_hdr) > data_end) {
-					return BPF_OK;
-				}
-				l4_src_port = (((((unsigned short)(l4_udp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_udp_hdr->source) & 0xFF00) >> 8));
-				l4_dst_port = (((((unsigned short)(l4_udp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_udp_hdr->dest) & 0xFF00) >> 8));
-				break;
-			case IPPROTO_SCTP:
-				if (data + sizeof(*ip) + sizeof(*l4_sctp_hdr) > data_end) {
-					return BPF_OK;
-				}
-				l4_src_port = (((((unsigned short)(l4_sctp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->source) & 0xFF00) >> 8));
-				l4_dst_port = (((((unsigned short)(l4_sctp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->dest) & 0xFF00) >> 8));
-				break;
-		}
-
-		trie_key.prefix_len = 128;
+	trie_key.prefix_len = 128;
+		
         //Fill the IP Key to be used for lookup
         for (int i=0; i<16; i++){
               trie_key.ip[i] = ip->daddr.in6_u.u6_addr8[i];
-              src_ip[i] = ip->saddr.in6_u.u6_addr8[i];
-              flow_key.src_ip[i] = ip->saddr.in6_u.u6_addr8[i];
-              flow_key.dest_ip[i] = ip->daddr.in6_u.u6_addr8[i];
-              reverse_flow_key.src_ip[i] = ip->daddr.in6_u.u6_addr8[i];
-              reverse_flow_key.dest_ip[i] = ip->saddr.in6_u.u6_addr8[i];
-              evt.src_ip[i] = ip->saddr.in6_u.u6_addr8[i];
-              evt.dest_ip[i] = ip->daddr.in6_u.u6_addr8[i];
         }
 
-		//Check for the an existing flow in the conntrack table
-		flow_key.src_port = l4_src_port;
-		flow_key.dest_port = l4_dst_port;
-		flow_key.protocol = ip->nexthdr;
+	//Check for the an existing flow in the conntrack table
+	flow_key.saddr = ip->saddr;
+	flow_key.daddr = ip->daddr;
+	flow_key.src_port = l4_src_port;
+	flow_key.dest_port = l4_dst_port;
+	flow_key.protocol = ip->nexthdr;
 
+	//Check if it's an existing flow
+	flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
+	if (flow_val != NULL && (flow_val->addr.in6_u.u6_addr8[12] == flow_key.saddr.in6_u.u6_addr8[12] 
+			         && flow_val->addr.in6_u.u6_addr8[13] == flow_key.saddr.in6_u.u6_addr8[13] 
+				 && flow_val->addr.in6_u.u6_addr8[14] == flow_key.saddr.in6_u.u6_addr8[14]
+				 && flow_val->addr.in6_u.u6_addr8[15] == flow_key.saddr.in6_u.u6_addr8[15])) {
+		return BPF_OK;	
+	}
 
-		//Check if it's an existing flow
-		flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
-		if (flow_val != NULL &&(flow_val->val[12] == src_ip[12] && flow_val->val[13] == src_ip[13]
-					&& flow_val->val[14] == src_ip[14] && flow_val->val[15] == src_ip[15])) {
-			return BPF_OK;
-		}
+	evt.src_ip = ip->saddr;
+	evt.dest_ip = ip->daddr;	
+	evt.src_port = flow_key.src_port;
+	evt.dest_port = flow_key.dest_port;
+	evt.protocol = flow_key.protocol;
 
-		evt.src_port = flow_key.src_port;
-		evt.dest_port = flow_key.dest_port;
-		evt.protocol = flow_key.protocol;
+	//Check for the reverse flow entry in the conntrack table
+	flow_key.daddr = ip->saddr;
+	flow_key.saddr = ip->daddr;
+	flow_key.src_port = flow_key.dest_port;
+	flow_key.dest_port = l4_src_port;
+		
+	reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
+	if (reverse_flow_val != NULL && (reverse_flow_val->addr.in6_u.u6_addr8[12] == flow_key.daddr.in6_u.u6_addr8[12] 
+			         && reverse_flow_val->addr.in6_u.u6_addr8[13] == flow_key.daddr.in6_u.u6_addr8[13] 
+				 && reverse_flow_val->addr.in6_u.u6_addr8[14] == flow_key.daddr.in6_u.u6_addr8[14]
+				 && reverse_flow_val->addr.in6_u.u6_addr8[15] == flow_key.daddr.in6_u.u6_addr8[15])) {
+		return BPF_OK;	
+	}
 
-		//Check for the reverse flow entry in the conntrack table
-		reverse_flow_key.src_port = l4_dst_port;
-		reverse_flow_key.dest_port = l4_src_port;
-		reverse_flow_key.protocol = ip->nexthdr;
+	//Check if it's in the allowed list
+	trie_val = bpf_map_lookup_elem(&egress_map, &trie_key);
+	if (trie_val == NULL) {
+		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+		return BPF_DROP;
+	}
 
-
-		//Check if it's a response packet
-		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
-		if (reverse_flow_val != NULL &&(reverse_flow_val->val[12] == src_ip[12] && reverse_flow_val->val[13] == src_ip[13]
-					&& reverse_flow_val->val[14] == src_ip[14] && reverse_flow_val->val[15] == src_ip[15])) {
-			return BPF_OK;
-		}
-
-		//Check if it's in the allowed list
-		trie_val = bpf_map_lookup_elem(&egress_map, &trie_key);
-		if (trie_val == NULL) {
-			evt.verdict = 0;
+	for (int i=0; i<4; i++, trie_val++){
+		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
 
-		for (int i=0; i<4; i++, trie_val++){
-			if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
-				evt.verdict = 0;
-				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
-				return BPF_DROP;
-			}
+		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->nexthdr &&
+					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+					(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
+			//Inject in to conntrack map
+			struct conntrack_value new_flow_val;
+			__builtin_memset(&new_flow_val, 0, sizeof(new_flow_val));
+			new_flow_val.addr = ip->saddr;
 
-			if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->nexthdr &&
-						((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
-						 (l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
-				//Inject in to conntrack map
-				struct conntrack_value new_flow_val = {};
-				new_flow_val.val[0]=src_ip[0];
-				new_flow_val.val[1]=src_ip[1];
-				new_flow_val.val[2]=src_ip[2];
-				new_flow_val.val[3]=src_ip[3];
-				new_flow_val.val[4]=src_ip[4];
-                new_flow_val.val[5]=src_ip[5];
-                new_flow_val.val[6]=src_ip[6];
-                new_flow_val.val[7]=src_ip[7];
-                new_flow_val.val[8]=src_ip[8];
-                new_flow_val.val[9]=src_ip[9];
-                new_flow_val.val[10]=src_ip[10];
-                new_flow_val.val[11]=src_ip[11];
-                new_flow_val.val[12]=src_ip[12];
-                new_flow_val.val[13]=src_ip[13];
-                new_flow_val.val[14]=src_ip[14];
-                new_flow_val.val[15]=src_ip[15];
-				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
-				evt.verdict = 1;
-				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
-				return BPF_OK;
-			}
+			//Reswap before adding to conntrack
+			flow_key.saddr = ip->saddr;
+			flow_key.daddr = ip->daddr;
+			flow_key.dest_port = flow_key.src_port;
+			flow_key.src_port = l4_src_port;
+
+			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
+			evt.verdict = 1;
+			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+			return BPF_OK;
 		}
-		evt.verdict = 0;
-		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
-		return BPF_DROP;
+	}
+	bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+	return BPF_DROP;
 	}
 	return BPF_OK;
 }
