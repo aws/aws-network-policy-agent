@@ -88,9 +88,9 @@ int handle_egress(struct __sk_buff *skb)
 	void *data = (void *)(long)skb->data;
 	__u8 src_ip[4];
 
-	memset(&flow_key, 0, sizeof(flow_key));
-	memset(&src_ip, 0, sizeof(src_ip));
-	memset(&reverse_flow_key, 0, sizeof(reverse_flow_key));
+	__builtin_memset(&flow_key, 0, sizeof(flow_key));
+	__builtin_memset(&src_ip, 0, sizeof(src_ip));
+	__builtin_memset(&reverse_flow_key, 0, sizeof(reverse_flow_key));
 
 
 	struct ethhdr *ether = data;

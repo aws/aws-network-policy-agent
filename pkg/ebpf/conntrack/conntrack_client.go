@@ -92,6 +92,10 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			iterValue := ConntrackVal{}
 			err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
 			if err != nil {
+				if errors.Is(err, unix.ENOENT) {
+					err = nil
+					break
+				}
 				return
 			} else {
 				newKey := ConntrackKey{}
@@ -179,6 +183,10 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			iterValue := ConntrackVal{}
 			err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&iterValue)), mapID)
 			if err != nil {
+				if errors.Is(err, unix.ENOENT) {
+					err = nil
+					break
+				}
 				return
 			} else {
 				newKey := utils.ConntrackKeyV6{}
