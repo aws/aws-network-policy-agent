@@ -23,6 +23,8 @@ source ${DIR}/lib/tests.sh
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${K8S_VERSION:=""}"
+: "${TEST_IMAGE_REPOSITORY:="registry.k8s.io"}"
+TEST_FAILED="false"
 
 if [[ ! -z $ENDPOINT ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
@@ -31,8 +33,6 @@ fi
 if [[ -z $K8S_VERSION ]]; then
     K8S_VERSION=$(aws eks describe-cluster $ENDPOINT_FLAG --name $CLUSTER_NAME --region $REGION | jq -r '.cluster.version')
 fi
-
-TEST_FAILED="false"
 
 echo "Running Cyclonus e2e tests with the following variables
 CLUSTER_NAME: $CLUSTER_NAME
@@ -58,6 +58,8 @@ else
 fi
 
 run_cyclonus_tests
+
+check_path_cleanup
 
 if [[ $TEST_FAILED == "true" ]]; then
     echo "Test run failed"
