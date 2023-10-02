@@ -303,7 +303,7 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 		log.Info("comparing new and existing probes ...")
 		isEqual := cmp.Equal(currentProbe, existingProbe)
 		if !isEqual {
-			if bpfProbe == EVENTS_BINARY {
+			if bpfProbe == EVENTS_BINARY || bpfProbe == EVENTS_V6_BINARY {
 				// Ingress and Egress probes refer to Conntrack and Policy Events maps defined in
 				// events binary. So, if the events binary changes, we will need to update all the existing
 				// probes in the local node
@@ -311,11 +311,11 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 				log.Info("change detected in event probe binaries..")
 				break
 			}
-			if bpfProbe == TC_INGRESS_BINARY {
+			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY {
 				log.Info("change detected in ingress probe binaries.. ")
 				updateIngressProbe = true
 			}
-			if bpfProbe == TC_EGRESS_BINARY {
+			if bpfProbe == TC_EGRESS_BINARY || bpfProbe == TC_V6_EGRESS_BINARY {
 				log.Info("change detected in egress probe binaries..")
 				updateEgressProbe = true
 			}
@@ -331,6 +331,7 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 			return updateIngressProbe, updateEgressProbe, updateEventsProbe, err
 		}
 	}
+
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
@@ -342,24 +343,26 @@ func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
-	recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
-	if err != nil {
-		log.Error(err, "failed to recover global maps..")
-		sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
-		return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, nil
-	}
-	log.Info("Total no.of  global maps recovered...", "count: ", len(recoveredGlobalMaps))
-	for globalMapName, globalMap := range recoveredGlobalMaps {
-		log.Info("Global Map..", "Name: ", globalMapName, "updateEventsProbe: ", updateEventsProbe)
-		if globalMapName == CONNTRACK_MAP_PIN_PATH {
-			log.Info("Conntrack Map is already present on the node")
-			isConntrackMapPresent = true
-			globalMaps.Store(globalMapName, globalMap)
+	if !updateEventsProbe {
+		recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
+		if err != nil {
+			log.Error(err, "failed to recover global maps..")
+			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, nil
 		}
-		if globalMapName == POLICY_EVENTS_MAP_PIN_PATH && !updateEventsProbe {
-			isPolicyEventsMapPresent = true
-			eventsMapFD = int(globalMap.MapFD)
-			log.Info("Policy event Map is already present on the node ", "Recovered FD", eventsMapFD)
+		log.Info("Total no.of  global maps recovered...", "count: ", len(recoveredGlobalMaps))
+		for globalMapName, globalMap := range recoveredGlobalMaps {
+			log.Info("Global Map..", "Name: ", globalMapName, "updateEventsProbe: ", updateEventsProbe)
+			if globalMapName == CONNTRACK_MAP_PIN_PATH {
+				log.Info("Conntrack Map is already present on the node")
+				isConntrackMapPresent = true
+				globalMaps.Store(globalMapName, globalMap)
+			}
+			if globalMapName == POLICY_EVENTS_MAP_PIN_PATH {
+				isPolicyEventsMapPresent = true
+				eventsMapFD = int(globalMap.MapFD)
+				log.Info("Policy event Map is already present on the node ", "Recovered FD", eventsMapFD)
+			}
 		}
 	}
 
@@ -391,6 +394,7 @@ func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext
 			policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
 		}
 	}
+
 	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, nil
 }
 
