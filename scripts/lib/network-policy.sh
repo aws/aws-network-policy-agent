@@ -111,35 +111,9 @@ function install_network_policy_helm(){
         --set enableNetworkPolicy=true \
         --set originalMatchLabels=true \
         --set init.env.ENABLE_IPv6=$ENABLE_IPv6 \
-        --set image.env.ENABLE_IPv6=$ENABLE_IPv6 \
+        --set env.ENABLE_IPv6=$ENABLE_IPv6 \
         --set nodeAgent.enableIpv6=$ENABLE_IPv6 \
-        --set image.env.ENABLE_PREFIX_DELEGATION=$ENABLE_PREFIX_DELEGATION \
-        --set image.env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
+        --set env.ENABLE_PREFIX_DELEGATION=$ENABLE_PREFIX_DELEGATION \
+        --set env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
 
-}
-
-function build_and_push_image(){
-
-  # Get ECR credentials
-  aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin ${AWS_ECR_REGISTRY}
-
-  # Create repository if doesn't exist
-  if ! `aws ecr describe-repositories --registry-id $AWS_ACCOUNT_ID --repository-names $AWS_ECR_REPO_NAME >/dev/null 2>&1`; then
-      echo "creating ECR repo with name $AWS_ECR_REPO_NAME"
-      aws ecr create-repository --repository-name $AWS_ECR_REPO_NAME
-  fi
-
-  if [[ $(aws ecr batch-get-image --repository-name=$AWS_ECR_REPO_NAME --image-ids imageTag=$IMAGE_VERSION \
-      --query 'images[].imageId.imageTag' --region $REGION) != "[]" ]]; then
-    echo "Image $AWS_ECR_REPO_NAME:$IMAGE_VERSION already exists. Skipping image build."
-  else
-    START=$SECONDS
-    echo "Building AWS Network Policy Agent latest image"
-
-    docker buildx create --name="network-policy-agent-builder" --buildkitd-flags '--allow-insecure-entitlement network.host' --use >/dev/null
-    make multi-arch-build-and-push VERSION=$IMAGE_VERSION IMAGE=$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME
-
-    echo "TIMELINE: Docker build took $(($SECONDS - $START)) seconds."
-    docker buildx rm network-policy-agent-builder
-  fi
 }

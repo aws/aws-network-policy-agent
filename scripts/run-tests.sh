@@ -11,6 +11,7 @@ source ${DIR}/lib/tests.sh
 
 : "${RUN_PERFORMANCE_TESTS:=false}"
 : "${RUN_CONFORMANCE_TESTS:=false}"
+: "${AWS_EKS_NODEAGENT_IMAGE:=""}"
 TEST_FAILED="false"
 
 cleanup() {
@@ -27,8 +28,7 @@ trap cleanup EXIT
 load_default_values
 create_cluster
 
-build_and_push_image
-make update-node-agent-image AWS_EKS_NODEAGENT=$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME:$IMAGE_VERSION IP_FAMILY=$IP_FAMILY
+make update-node-agent-image AWS_EKS_NODEAGENT=$AWS_EKS_NODEAGENT_IMAGE IP_FAMILY=$IP_FAMILY
 
 if [[ $RUN_PERFORMANCE_TESTS == "true" ]]; then
   echo "Runnning Performance tests"
