@@ -20,12 +20,11 @@ jobs:
         uses: actions/checkout@v3
       - name: Install Dependencies
         uses: ./.github/actions/install-dependencies
-      - uses: aws-actions/configure-aws-credentials@v1
+      - uses: aws-actions/configure-aws-credentials@v3
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: us-west-2
           role-duration-seconds: 3600 # 1 hour
-          mask-aws-account-id: 'no'
       - name: Build and Push Network Policy Image
         id: build-and-push-image
         uses: ./.github/actions/build-and-push-image
@@ -45,7 +44,7 @@ jobs:
         uses: actions/checkout@v3
       - name: Install Dependencies
         uses: ./.github/actions/install-dependencies
-      - uses: aws-actions/configure-aws-credentials@v1
+      - uses: aws-actions/configure-aws-credentials@v3
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: us-west-2
