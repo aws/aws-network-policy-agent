@@ -1,5 +1,4 @@
 #! /bin/bash
-
 set -Eeuox pipefail
 
 DIR=$(cd "$(dirname "$0")"; pwd)
@@ -28,8 +27,8 @@ trap cleanup EXIT
 load_default_values
 create_cluster
 
-load_addon_details
-install_network_policy_mao $LATEST_ADDON_VERSION
+build_and_push_image
+make update-node-agent-image AWS_EKS_NODEAGENT=$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME:$IMAGE_VERSION IP_FAMILY=$IP_FAMILY
 
 if [[ $RUN_PERFORMANCE_TESTS == "true" ]]; then
   echo "Runnning Performance tests"
