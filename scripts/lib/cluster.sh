@@ -14,11 +14,6 @@ function load_default_values(){
     : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
     : "${ENDPOINT_FLAG:=""}"
     : "${HELM_EXTRA_ARGS:=""}"
-
-    IMAGE_VERSION=$(git rev-parse HEAD)
-    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-    AWS_ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
-    AWS_ECR_REPO_NAME="amazon/aws-network-policy-agent"
 }
 
 function create_cluster(){

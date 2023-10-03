@@ -1,4 +1,4 @@
-name: e2e-conformance-tests
+name: E2E Conformance Tests
 
 on:
   workflow_dispatch: {}
@@ -10,7 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  build-image:
+    if: github.repository == 'aws/aws-network-policy-agent'
+    runs-on: ubuntu-latest
+    outputs:
+      AWS_EKS_NODEAGENT_IMAGE: ${{steps.build-and-push-image.outputs.image_uri}}
+    steps:
+      - name: Checkout latest commit
+        uses: actions/checkout@v3
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: us-west-2
+          role-duration-seconds: 3600 # 1 hour
+          mask-aws-account-id: 'no'
+      - name: Build and Push Network Policy Image
+        id: build-and-push-image
+        uses: ./.github/actions/build-and-push-image
+        with:
+          aws-region: us-west-2
   e2e-conformance-tests:
+    needs: build-image
     strategy:
       fail-fast: false
       matrix:
@@ -19,19 +41,20 @@ jobs:
     if: github.repository == 'aws/aws-network-policy-agent'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout latest commit in the PR
+      - name: Checkout latest commit
         uses: actions/checkout@v3
       - name: Install Dependencies
         uses: ./.github/actions/install-dependencies
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws-region: us-west-2
           role-duration-seconds: 18000 # 5 hours
       - name: Run e2e conformance test
         env:
           RUN_CONFORMANCE_TESTS: true
           K8S_VERSION: 1.27
           IP_FAMILY: ${{ matrix.ip-family }}
+          AWS_EKS_NODEAGENT_IMAGE: ${{ needs.build-image.outputs.AWS_EKS_NODEAGENT_IMAGE }}
         run: |
           ./scripts/run-tests.sh
