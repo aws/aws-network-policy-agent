@@ -17,13 +17,15 @@ limitations under the License.
 package main
 
 import (
-	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"os"
+
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
 	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
