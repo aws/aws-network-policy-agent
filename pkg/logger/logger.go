@@ -94,7 +94,7 @@ func getLogFilePath(logFilePath string) zapcore.WriteSyncer {
 func getLogWriter(logFilePath string) zapcore.WriteSyncer {
 	lumberJackLogger := &lumberjack.Logger{
 		Filename:   logFilePath,
-		MaxSize:    1,
+		MaxSize:    100,
 		MaxBackups: 5,
 		MaxAge:     30,
 		Compress:   true,
