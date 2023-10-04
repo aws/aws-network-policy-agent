@@ -17,30 +17,26 @@ limitations under the License.
 package main
 
 import (
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"os"
 
 	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
-	zapRaw "go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/config"
 	"github.com/aws/aws-network-policy-agent/pkg/metrics"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -136,32 +132,7 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 }
 
 // getLoggerWithLogLevel returns logger with specific log level.
-func getLoggerWithLogLevel(logLevel string, logFile string) (logr.Logger, error) {
-	var zapLevel zapcore.Level
-	switch logLevel {
-	case "info":
-		zapLevel = zapcore.InfoLevel
-	case "debug":
-		zapLevel = zapcore.DebugLevel
-	default:
-		zapLevel = zapcore.InfoLevel
-	}
-	if len(logFile) > 0 {
-		cfg := zapRaw.NewProductionConfig()
-		cfg.OutputPaths = []string{logFile}
-		cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-		cfg.EncoderConfig.TimeKey = "timestamp"
-		cfg.EncoderConfig.CallerKey = ""
-		cfg.Level = zapRaw.NewAtomicLevelAt(zapLevel)
-		logger, err := cfg.Build()
-		if err != nil {
-			return logr.Logger{}, err
-		}
-		return zapr.NewLogger(logger), nil
-
-	}
-	return zap.New(zap.UseDevMode(false),
-		zap.Level(zapLevel),
-		zap.StacktraceLevel(zapcore.FatalLevel),
-	), nil
+func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
+	ctrlLogger := logger.New(logLevel, logFilePath)
+	return zapr.NewLogger(ctrlLogger), nil
 }
