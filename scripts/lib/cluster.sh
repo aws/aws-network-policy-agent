@@ -56,4 +56,3 @@ function delete_cluster(){
     eksctl delete cluster -f ./eks-cluster.yaml || echo "Cluster Delete failed"
     rm -rf ./eks-cluster.yaml || echo "Cluster config file not found"
 }
-
