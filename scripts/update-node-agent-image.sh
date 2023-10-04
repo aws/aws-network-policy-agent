@@ -22,3 +22,6 @@ else
 fi
 
 install_network_policy_helm
+
+echo "Check aws-node daemonset status"
+kubectl rollout status ds/aws-node -n kube-system --timeout=300s

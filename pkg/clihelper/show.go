@@ -67,7 +67,7 @@ func convByteToTrieV6(keyByte []byte) BPFTrieKeyV6 {
 
 func convConntrackV6ToByte(key ConntrackKeyV6) []byte {
 	ipSize := unsafe.Sizeof(key)
-	byteArray := (*[38]byte)(unsafe.Pointer(&key))
+	byteArray := (*[unsafe.Sizeof(key)]byte)(unsafe.Pointer(&key))
 	byteSlice := byteArray[:ipSize]
 	return byteSlice
 }

@@ -1,5 +1,4 @@
 #! /bin/bash
-
 set -Eeuox pipefail
 
 DIR=$(cd "$(dirname "$0")"; pwd)
@@ -12,6 +11,7 @@ source ${DIR}/lib/tests.sh
 
 : "${RUN_PERFORMANCE_TESTS:=false}"
 : "${RUN_CONFORMANCE_TESTS:=false}"
+: "${AWS_EKS_NODEAGENT_IMAGE:=""}"
 TEST_FAILED="false"
 
 cleanup() {
@@ -28,8 +28,7 @@ trap cleanup EXIT
 load_default_values
 create_cluster
 
-load_addon_details
-install_network_policy_mao $LATEST_ADDON_VERSION
+make update-node-agent-image AWS_EKS_NODEAGENT=$AWS_EKS_NODEAGENT_IMAGE IP_FAMILY=$IP_FAMILY
 
 if [[ $RUN_PERFORMANCE_TESTS == "true" ]]; then
   echo "Runnning Performance tests"

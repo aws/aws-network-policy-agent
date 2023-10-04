@@ -198,6 +198,20 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
 
+
+.PHONY: multi-arch-build-and-push
+multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker image for the manager for cross-platform support
+
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	docker buildx build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
+		-f Dockerfile.cross \
+		--platform "$(PLATFORMS)"\
+		--cache-from=type=gha \
+		--cache-to=type=gha,mode=max \
+		-t $(IMAGE):$(VERSION) \
+		--push \
+		.
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -289,7 +303,7 @@ endif
 
 ./PHONY: update-node-agent-image
 update-node-agent-image: ## Updates node agent image on an existing cluster. Optionally call with AWS_EKS_NODEAGENT=<Image URI>
-	./scripts/update-node-agent-image.sh AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
+	./scripts/update-node-agent-image.sh AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT) IP_FAMILY=$(IP_FAMILY)
 
 ./PHONY: update-image-and-test
 update-image-and-test: ## Updates node agent image on existing cluster and runs cyclonus tests. Call with CLUSTER_NAME=<name of the cluster> and AWS_EKS_NODEAGENT=<Image URI> 

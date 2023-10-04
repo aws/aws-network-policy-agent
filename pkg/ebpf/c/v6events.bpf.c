@@ -27,15 +27,16 @@ struct data_t {
 };
 
 struct conntrack_key {
-	__u8  src_ip[16];
+	struct	in6_addr saddr;
 	__u16 src_port;
-	__u8  dest_ip[16];
+	struct	in6_addr daddr;
 	__u16 dest_port;
 	__u8  protocol;
 };
 
+
 struct conntrack_value {
-	__u8 val[16];
+	struct in6_addr addr;
 };
 
 struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
@@ -46,10 +47,12 @@ struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
     .pinning = PIN_GLOBAL_NS,
 };
 
+
 struct bpf_map_def_pvt SEC("maps") policy_events = {
     .type = BPF_MAP_TYPE_RINGBUF,
     .max_entries = 256 * 1024,
     .pinning = PIN_GLOBAL_NS,
 };
+
 
 char _license[] SEC("license") = "GPL";

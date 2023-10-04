@@ -14,7 +14,6 @@ function load_default_values(){
     : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
     : "${ENDPOINT_FLAG:=""}"
     : "${HELM_EXTRA_ARGS:=""}"
-
 }
 
 function create_cluster(){
@@ -57,4 +56,3 @@ function delete_cluster(){
     eksctl delete cluster -f ./eks-cluster.yaml || echo "Cluster Delete failed"
     rm -rf ./eks-cluster.yaml || echo "Cluster config file not found"
 }
-

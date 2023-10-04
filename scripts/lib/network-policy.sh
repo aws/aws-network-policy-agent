@@ -4,7 +4,7 @@ function load_addon_details() {
   ADDON_NAME="vpc-cni"
   echo "loading $ADDON_NAME addon details"
   LATEST_ADDON_VERSION=$(aws eks describe-addon-versions $ENDPOINT_FLAG --addon-name $ADDON_NAME --kubernetes-version $K8S_VERSION | jq '.addons[0].addonVersions[0].addonVersion' -r)
-  EXISTING_SERVICE_ACCOUNT_ROLE_ARN=$(kubectl get serviceaccount -n kube-system aws-node -o json | jq '.metadata.annotations."eks.amazonaws.com/role-arn"' -r)
+  get_service_account_role_arn
 }
 
 function wait_for_addon_status() {
@@ -73,6 +73,10 @@ function install_network_policy_mao() {
   wait_for_addon_status "ACTIVE"
 }
 
+function get_service_account_role_arn(){
+  EXISTING_SERVICE_ACCOUNT_ROLE_ARN=$(kubectl get serviceaccount -n kube-system aws-node -o json | jq '.metadata.annotations."eks.amazonaws.com/role-arn"' -r)
+}
+
 function install_network_policy_helm(){
 
     helm repo add eks https://aws.github.io/eks-charts
@@ -87,23 +91,29 @@ function install_network_policy_helm(){
         ENABLE_PREFIX_DELEGATION=true
     fi
 
+    get_service_account_role_arn
+
+    if [[ ! -z $EXISTING_SERVICE_ACCOUNT_ROLE_ARN ]]; then
+      HELM_EXTRA_ARGS+=" --set serviceAccount.annotations.\eks\.amazonaws\.com/role-arn=$EXISTING_SERVICE_ACCOUNT_ROLE_ARN"
+    fi
+
     echo "Updating annotations and labels on existing resources"
-    for kind in daemonSet clusterRole clusterRoleBinding serviceAccount; do
-      echo "setting annotations and labels on $kind/aws-node"
-      kubectl -n kube-system annotate --overwrite $kind aws-node meta.helm.sh/release-name=aws-vpc-cni || echo "Unable to annotate $kind/aws-node"
-      kubectl -n kube-system annotate --overwrite $kind aws-node meta.helm.sh/release-namespace=kube-system || echo "Unable to annotate $kind/aws-node"
-      kubectl -n kube-system label --overwrite $kind aws-node app.kubernetes.io/managed-by=Helm || echo "Unable to label $kind/aws-node"
+    resources=("daemonSet/aws-node" "clusterRole/aws-node" "clusterRoleBinding/aws-node" "serviceAccount/aws-node" "configmap/amazon-vpc-cni") 
+    for kind in ${resources[@]}; do
+      echo "setting annotations and labels on $kind"
+      kubectl -n kube-system annotate --overwrite $kind meta.helm.sh/release-name=aws-vpc-cni meta.helm.sh/release-namespace=kube-system || echo "Unable to annotate $kind"
+      kubectl -n kube-system label --overwrite $kind app.kubernetes.io/managed-by=Helm || echo "Unable to label $kind"
     done
 
-    echo "Installing/Updating the aws-vpc-cni helm chart with `enableNetworkPolicy=true`"
+    echo "Installing/Updating the aws-vpc-cni helm chart with enableNetworkPolicy=true"
     helm upgrade --install aws-vpc-cni eks/aws-vpc-cni --wait --timeout 300s \
         --namespace kube-system \
         --set enableNetworkPolicy=true \
         --set originalMatchLabels=true \
         --set init.env.ENABLE_IPv6=$ENABLE_IPv6 \
-        --set image.env.ENABLE_IPv6=$ENABLE_IPv6 \
+        --set env.ENABLE_IPv6=$ENABLE_IPv6 \
         --set nodeAgent.enableIpv6=$ENABLE_IPv6 \
-        --set image.env.ENABLE_PREFIX_DELEGATION=$ENABLE_PREFIX_DELEGATION \
-        --set image.env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
+        --set env.ENABLE_PREFIX_DELEGATION=$ENABLE_PREFIX_DELEGATION \
+        --set env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
 
 }
