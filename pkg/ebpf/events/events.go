@@ -64,8 +64,6 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
 	} else {
-		logger.Info("Configure Event loop ... ")
-		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 		if enableCloudWatchLogs {
 			logger.Info("Cloudwatch log support is enabled")
 			err = setupCW(logger)
@@ -74,6 +72,8 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 				return err
 			}
 		}
+		logger.Info("Configure Event loop ... ")
+		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 	}
 	return nil
 }
