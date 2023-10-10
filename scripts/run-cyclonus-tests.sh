@@ -23,7 +23,7 @@ source ${DIR}/lib/tests.sh
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${K8S_VERSION:=""}"
-: "${TEST_IMAGE_REPOSITORY:="registry.k8s.io"}"
+: "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 TEST_FAILED="false"
 
 if [[ ! -z $ENDPOINT ]]; then
@@ -44,6 +44,9 @@ ENDPOINT: $ENDPOINT
 ADDON_VERSION: $ADDON_VERSION
 K8S_VERSION: $K8S_VERSION
 "
+
+echo "Nodes AMI version for cluster: $CLUSTER_NAME"
+kubectl get nodes -owide
 
 if [[ $SKIP_ADDON_INSTALLATION == "false" ]]; then
     load_addon_details

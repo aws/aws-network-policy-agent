@@ -4,9 +4,9 @@ function generate_manifest_and_apply(){
     IMAGE_REPOSITORY_PARAMETER=""
     CYCLONUS_IMAGE_REPOSITORY="mfenwick100"
 
-    if [[ $TEST_IMAGE_REPOSITORY != "registry.k8s.io" ]]; then
-        IMAGE_REPOSITORY_PARAMETER="- --image-repository=$TEST_IMAGE_REPOSITORY"
-        CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REPOSITORY}/networking-e2e-test-images
+    if [[ $TEST_IMAGE_REGISTRY != "registry.k8s.io" ]]; then
+        IMAGE_REPOSITORY_PARAMETER="- --image-repository=$TEST_IMAGE_REGISTRY"
+        CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
     fi
 
 cat <<EOF | kubectl apply -n netpol -f -
