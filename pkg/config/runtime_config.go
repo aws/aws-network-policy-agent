@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/spf13/pflag"
 )
@@ -65,7 +66,7 @@ func BuildRestConfig(rtCfg RuntimeConfig) (*rest.Config, error) {
 func BuildRuntimeOptions(rtCfg RuntimeConfig, scheme *runtime.Scheme) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                 scheme,
-		MetricsBindAddress:     rtCfg.MetricsBindAddress,
+		Metrics:                metricsserver.Options{BindAddress: rtCfg.MetricsBindAddress},
 		HealthProbeBindAddress: rtCfg.HealthProbeBindAddress,
 	}
 }
