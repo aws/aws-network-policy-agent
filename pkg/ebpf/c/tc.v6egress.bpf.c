@@ -12,6 +12,7 @@
 #define RESERVED_IP_PROTOCOL 255
 #define ANY_IP_PROTOCOL 254
 #define ANY_PORT 0
+#define MAX_PORT_PROTOCOL 24
 
 struct bpf_map_def_pvt {
 	__u32 type;
@@ -47,10 +48,11 @@ struct conntrack_key {
 	struct	in6_addr daddr;
 	__u16 dest_port;
 	__u8  protocol;
+	struct in6_addr owner_addr;
 };
 
 struct conntrack_value {
-	struct in6_addr addr;
+	__u8 val;
 };
 
 struct data_t {
@@ -65,7 +67,7 @@ struct data_t {
 struct bpf_map_def_pvt SEC("maps") egress_map = {
 	.type = BPF_MAP_TYPE_LPM_TRIE,
 	.key_size =sizeof(struct lpm_trie_key),
-	.value_size = sizeof(struct lpm_trie_val[8]),
+	.value_size = sizeof(struct lpm_trie_val[MAX_PORT_PROTOCOL]),
 	.max_entries = 65536,
 	.map_flags = BPF_F_NO_PREALLOC,
 	.pinning = PIN_GLOBAL_NS,
@@ -153,13 +155,11 @@ int handle_egress(struct __sk_buff *skb)
 	flow_key.src_port = l4_src_port;
 	flow_key.dest_port = l4_dst_port;
 	flow_key.protocol = ip->nexthdr;
+	flow_key.owner_addr = ip->saddr;
 
 	//Check if it's an existing flow
 	flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
-	if (flow_val != NULL && (flow_val->addr.in6_u.u6_addr8[12] == flow_key.saddr.in6_u.u6_addr8[12] 
-			         && flow_val->addr.in6_u.u6_addr8[13] == flow_key.saddr.in6_u.u6_addr8[13] 
-				 && flow_val->addr.in6_u.u6_addr8[14] == flow_key.saddr.in6_u.u6_addr8[14]
-				 && flow_val->addr.in6_u.u6_addr8[15] == flow_key.saddr.in6_u.u6_addr8[15])) {
+	if (flow_val != NULL) { 
 		return BPF_OK;	
 	}
 
@@ -176,10 +176,7 @@ int handle_egress(struct __sk_buff *skb)
 	flow_key.dest_port = l4_src_port;
 		
 	reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
-	if (reverse_flow_val != NULL && (reverse_flow_val->addr.in6_u.u6_addr8[12] == flow_key.daddr.in6_u.u6_addr8[12] 
-			         && reverse_flow_val->addr.in6_u.u6_addr8[13] == flow_key.daddr.in6_u.u6_addr8[13] 
-				 && reverse_flow_val->addr.in6_u.u6_addr8[14] == flow_key.daddr.in6_u.u6_addr8[14]
-				 && reverse_flow_val->addr.in6_u.u6_addr8[15] == flow_key.daddr.in6_u.u6_addr8[15])) {
+	if (reverse_flow_val != NULL) { 
 		return BPF_OK;	
 	}
 
@@ -190,7 +187,7 @@ int handle_egress(struct __sk_buff *skb)
 		return BPF_DROP;
 	}
 
-	for (int i=0; i<4; i++, trie_val++){
+	for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
@@ -200,9 +197,8 @@ int handle_egress(struct __sk_buff *skb)
 					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
 					(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
-			struct conntrack_value new_flow_val;
-			__builtin_memset(&new_flow_val, 0, sizeof(new_flow_val));
-			new_flow_val.addr = ip->saddr;
+			struct conntrack_value new_flow_val = {};
+			new_flow_val.val = 1;
 
 			//Reswap before adding to conntrack
 			flow_key.saddr = ip->saddr;

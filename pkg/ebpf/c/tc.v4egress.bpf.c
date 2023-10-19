@@ -12,6 +12,7 @@
 #define RESERVED_IP_PROTOCOL 255
 #define ANY_IP_PROTOCOL 254
 #define ANY_PORT 0
+#define MAX_PORT_PROTOCOL 24
 
 struct bpf_map_def_pvt {
 	__u32 type;
@@ -46,10 +47,11 @@ struct conntrack_key {
    __u32 dest_ip;
    __u16 dest_port;
    __u8  protocol;
+   __u32 owner_ip;
 };
 
 struct conntrack_value {
-   __u8 val[4];
+   __u8 val;
 };
 
 struct data_t {
@@ -64,7 +66,7 @@ struct data_t {
 struct bpf_map_def_pvt SEC("maps") egress_map = {
 	.type = BPF_MAP_TYPE_LPM_TRIE,
 	.key_size =sizeof(struct lpm_trie_key),
-	.value_size = sizeof(struct lpm_trie_val[8]),
+	.value_size = sizeof(struct lpm_trie_val[MAX_PORT_PROTOCOL]),
 	.max_entries = 65536,
 	.map_flags = BPF_F_NO_PREALLOC,
 	.pinning = PIN_GLOBAL_NS,
@@ -153,6 +155,7 @@ int handle_egress(struct __sk_buff *skb)
 		flow_key.dest_ip = ip->daddr;
 		flow_key.dest_port = l4_dst_port;
 		flow_key.protocol = ip->protocol;
+		flow_key.owner_ip = ip->saddr;
 
 		struct data_t evt = {};
 		evt.src_ip = flow_key.src_ip;
@@ -165,8 +168,7 @@ int handle_egress(struct __sk_buff *skb)
 		//Check if it's an existing flow
 		flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
 
-		if (flow_val != NULL &&(flow_val->val[0] == src_ip[0] && flow_val->val[1] == src_ip[1]
-					&& flow_val->val[2] == src_ip[2] && flow_val->val[3] == src_ip[3])) {
+		if (flow_val != NULL) {
 			return BPF_OK;
 		}
 
@@ -176,12 +178,12 @@ int handle_egress(struct __sk_buff *skb)
 		reverse_flow_key.dest_ip = ip->saddr;
 		reverse_flow_key.dest_port = l4_src_port;
 		reverse_flow_key.protocol = ip->protocol;
+		reverse_flow_key.owner_ip = ip->saddr;
 
 		//Check if it's a response packet
 		reverse_flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
 
-		if (reverse_flow_val != NULL &&(reverse_flow_val->val[0] == src_ip[0] && reverse_flow_val->val[1] == src_ip[1]
-					&& reverse_flow_val->val[2] == src_ip[2] && reverse_flow_val->val[3] == src_ip[3])) {
+		if (reverse_flow_val != NULL) { 
 			return BPF_OK;
 		}
 		//Check if it's in the allowed list
@@ -192,7 +194,7 @@ int handle_egress(struct __sk_buff *skb)
 			return BPF_DROP;
 		}
 
-		for (int i=0; i<8; i++, trie_val++){
+		for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 			if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
 				evt.verdict = 0;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
@@ -204,10 +206,7 @@ int handle_egress(struct __sk_buff *skb)
 						 (l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 				//Inject in to conntrack map
 				struct conntrack_value new_flow_val = {};
-				new_flow_val.val[0]=src_ip[0];
-				new_flow_val.val[1]=src_ip[1];
-				new_flow_val.val[2]=src_ip[2];
-				new_flow_val.val[3]=src_ip[3];
+				new_flow_val.val = 1;
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 				evt.verdict = 1;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);

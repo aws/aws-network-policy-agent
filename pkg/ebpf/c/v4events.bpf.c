@@ -32,10 +32,11 @@ struct conntrack_key {
    __u32 dest_ip;
    __u16 dest_port;
    __u8  protocol;
+   __u32 owned_ip;
 };
 
 struct conntrack_value {
-   __u8 val[4];
+   __u8 val;
 };
 
 struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
