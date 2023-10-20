@@ -32,11 +32,12 @@ struct conntrack_key {
 	struct	in6_addr daddr;
 	__u16 dest_port;
 	__u8  protocol;
+	struct in6_addr owner_addr;
 };
 
 
 struct conntrack_value {
-	struct in6_addr addr;
+	__u8 val;
 };
 
 struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
