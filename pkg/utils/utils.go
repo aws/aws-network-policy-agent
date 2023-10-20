@@ -23,7 +23,7 @@ var (
 	ANY_IP_PROTOCOL                 = 254
 	TRIE_KEY_LENGTH                 = 8
 	TRIE_V6_KEY_LENGTH              = 20
-	TRIE_VALUE_LENGTH               = 96
+	TRIE_VALUE_LENGTH               = 288
 	BPF_PROGRAMS_PIN_PATH_DIRECTORY = "/sys/fs/bpf/globals/aws/programs/"
 	BPF_MAPS_PIN_PATH_DIRECTORY     = "/sys/fs/bpf/globals/aws/maps/"
 	TC_INGRESS_PROG                 = "handle_ingress"

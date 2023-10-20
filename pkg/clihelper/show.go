@@ -37,6 +37,7 @@ type ConntrackKey struct {
 	Dest_ip     uint32
 	Dest_port   uint16
 	Protocol    uint8
+	Owner_ip    uint32
 }
 
 type ConntrackKeyV6 struct {
@@ -45,6 +46,7 @@ type ConntrackKeyV6 struct {
 	Dest_ip     [16]byte //16
 	Dest_port   uint16   // 2
 	Protocol    uint8    // 1
+	Owner_ip    [16]byte //16
 }
 
 type ConntrackVal struct {
@@ -220,7 +222,7 @@ func MapWalk(mapID int) error {
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
-					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol)
+					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String())
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
@@ -325,7 +327,7 @@ func MapWalkv6(mapID int) error {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
 					v6key := convByteToConntrackV6(byteSlice)
-					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d", utils.ConvByteToIPv6(v6key.Source_ip).String(), v6key.Source_port, utils.ConvByteToIPv6(v6key.Dest_ip).String(), v6key.Dest_port, v6key.Protocol)
+					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(v6key.Source_ip).String(), v6key.Source_port, utils.ConvByteToIPv6(v6key.Dest_ip).String(), v6key.Dest_port, v6key.Protocol, utils.ConvByteToIPv6(v6key.Owner_ip).String())
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
