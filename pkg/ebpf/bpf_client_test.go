@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"testing"
 
@@ -90,6 +91,8 @@ func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 				for key, _ := range got {
 					gotKeys = append(gotKeys, key)
 				}
+				sort.Strings(tt.want)
+				sort.Strings(gotKeys)
 				assert.Equal(t, tt.want, gotKeys)
 			}
 		})
@@ -294,7 +297,7 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 	}{
 		{
 			name:         "Match Present",
-			firewallRule: "1.1.1.2",
+			firewallRule: "1.1.1.2/32",
 			nonHostCIDRs: sampleNonHostCIDRs,
 			want: want{
 				matchingCIDRL4Info: []v1alpha1.Port{
@@ -308,7 +311,7 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 
 		{
 			name:         "No Match",
-			firewallRule: "2.1.1.2",
+			firewallRule: "2.1.1.2/32",
 			nonHostCIDRs: sampleNonHostCIDRs,
 			want:         want{},
 		},
