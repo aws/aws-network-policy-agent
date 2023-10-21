@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -716,7 +717,11 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules) {
 	sort.Slice(rules, func(i, j int) bool {
-		return len(rules[i].IPCidr) < len(rules[j].IPCidr)
+		prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
+		prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
+		prefixLenIp1, _ := strconv.Atoi(prefixIp1[1])
+		prefixLenIp2, _ := strconv.Atoi(prefixIp2[1])
+		return prefixLenIp1 < prefixLenIp2
 	})
 }
 
