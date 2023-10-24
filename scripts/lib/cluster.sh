@@ -3,17 +3,17 @@
 function load_default_values(){
 
     CLUSTER_NAME=network-policy-${RANDOM}
-    : "${REGION:=us-west-2}"
-    : "${AMI_FAMILY:=AmazonLinux2}"
-    : "${NODEGROUP_TYPE:=linux}"
-    : "${NODES_CAPACITY:=3}"
-    : "${INSTANCE_TYPE:=t3.large}"
-    : "${K8S_VERSION:=1.27}"
-    : "${IP_FAMILY:=IPv4}"
-    : "${CW_NAMESPACE:=amazon-cloudwatch}"
-    : "${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
-    : "${ENDPOINT_FLAG:=""}"
-    : "${HELM_EXTRA_ARGS:=""}"
+    REGION="${REGION:=us-west-2}"
+    AMI_FAMILY="${AMI_FAMILY:=AmazonLinux2}"
+    NODEGROUP_TYPE="${NODEGROUP_TYPE:=linux}"
+    NODES_CAPACITY="${NODES_CAPACITY:=3}"
+    INSTANCE_TYPE="${INSTANCE_TYPE:=t3.large}"
+    K8S_VERSION="${K8S_VERSION:=1.27}"
+    IP_FAMILY="${IP_FAMILY:=IPv4}"
+    CW_NAMESPACE="${CW_NAMESPACE:=amazon-cloudwatch}"
+    CW_POLICY_ARN="${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
+    ENDPOINT_FLAG="${ENDPOINT_FLAG:=""}"
+    HELM_EXTRA_ARGS="${HELM_EXTRA_ARGS:=""}"
 }
 
 function create_cluster(){
@@ -49,6 +49,10 @@ function create_cluster(){
 EOF
 
     eksctl create cluster -f ./eks-cluster.yaml
+
+    echo "Nodes AMI version for cluster: $CLUSTER_NAME"
+    kubectl get nodes -owide
+
 }
 
 function delete_cluster(){
