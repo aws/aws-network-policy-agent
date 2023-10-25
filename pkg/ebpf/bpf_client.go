@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -713,6 +715,16 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 	return nil
 }
 
+func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules) {
+	sort.Slice(rules, func(i, j int) bool {
+		prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
+		prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
+		prefixLenIp1, _ := strconv.Atoi(prefixIp1[1])
+		prefixLenIp2, _ := strconv.Atoi(prefixIp2[1])
+		return prefixLenIp1 < prefixLenIp2
+	})
+}
+
 func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string]uintptr, error) {
 	mapEntries := make(map[string]uintptr)
 	ipCIDRs := make(map[string][]v1alpha1.Port)
@@ -725,6 +737,9 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
 	value := utils.ComputeTrieValue([]v1alpha1.Port{}, l.logger, true, false)
 	mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
+
+	//Sort the rules
+	sortFirewallRulesByPrefixLength(firewallRules)
 
 	//Check and aggregate L4 Port Info for Catch All Entries.
 	catchAllIPPorts, isCatchAllIPEntryPresent, allowAll = l.checkAndDeriveCatchAllIPPorts(firewallRules)
@@ -754,8 +769,17 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
 			}
 			if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
-				if existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]; ok {
+				existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]
+				if ok {
 					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
+				} else {
+					// Check if the /m entry is part of any /n CIDRs that we've encountered so far
+					// If found, we need to include the port and protocol combination against the current entry as well since
+					// we use LPM TRIE map and the /m will always win out.
+					cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
+					if len(cidrL4Info) > 0 {
+						firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
+					}
 				}
 				nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
 			} else {
@@ -824,10 +848,11 @@ func (l *bpfClient) checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string
 	nonHostCIDRs map[string][]v1alpha1.Port) []v1alpha1.Port {
 	var matchingCIDRL4Info []v1alpha1.Port
 
-	ipToCheck := net.ParseIP(firewallRule)
+	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
 	for nonHostCIDR, l4Info := range nonHostCIDRs {
 		_, cidrEntry, _ := net.ParseCIDR(nonHostCIDR)
-		if cidrEntry.Contains(ipToCheck) {
+		l.logger.Info("CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
+		if cidrEntry.Contains(ipToCheck.IP) {
 			l.logger.Info("Found a CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
 			matchingCIDRL4Info = append(matchingCIDRL4Info, l4Info...)
 		}

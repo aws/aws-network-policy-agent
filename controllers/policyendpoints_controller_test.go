@@ -461,6 +461,7 @@ func TestDeriveTargetPods(t *testing.T) {
 	tests := []struct {
 		name           string
 		policyendpoint policyendpoint.PolicyEndpoint
+		parentPEList   []string
 		currentPods    []types.NamespacedName //Current set of active pods against this policy
 		nodeIP         string                 //Default: 1.1.1.1
 		want           want
@@ -468,6 +469,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		{
 			name:           "Matching Local pods",
 			policyendpoint: samplePolicyEndpoint,
+			parentPEList:   []string{samplePolicyEndpoint.Name},
 			want: want{
 				activePods: []types.NamespacedName{
 					{
@@ -485,6 +487,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		{
 			name:           "Derive Old pods to be cleaned up",
 			policyendpoint: policyEndpointUpdate,
+			parentPEList:   []string{policyEndpointUpdate.Name},
 			currentPods:    samplePods,
 			want: want{
 				activePods: []types.NamespacedName{
@@ -504,6 +507,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		{
 			name:           "Matching Local pods on IPv6 node",
 			policyendpoint: ipv6NodePolicyEndpoint,
+			parentPEList:   []string{ipv6NodePolicyEndpoint.Name},
 			nodeIP:         "2001:db8:0:0:0:0:0:1",
 			want: want{
 				activePods: []types.NamespacedName{
@@ -537,7 +541,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotActivePods, _, gotPodsToBeCleanedUp := policyEndpointReconciler.deriveTargetPods(context.Background(),
-				&tt.policyendpoint)
+				&tt.policyendpoint, tt.parentPEList)
 			assert.Equal(t, tt.want.activePods, gotActivePods)
 			assert.Equal(t, tt.want.podsToBeCleanedUp, gotPodsToBeCleanedUp)
 		})
