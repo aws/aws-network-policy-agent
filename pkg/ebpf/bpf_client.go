@@ -715,9 +715,10 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 	return nil
 }
 
-func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLen int) {
+func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
 
+		prefixLen, _ := strconv.Atoi(prefixLenStr)
 		prefixLenIp1 := prefixLen
 		prefixLenIp2 := prefixLen
 
@@ -751,11 +752,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	mapEntries[string(key)] = uintptr(unsafe.Pointer(&value[0]))
 
 	//Sort the rules
-	defaultPrefixLen := 32
-	if l.enableIPv6 {
-		defaultPrefixLen = 128
-	}
-	sortFirewallRulesByPrefixLength(firewallRules, defaultPrefixLen)
+	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
 
 	//Check and aggregate L4 Port Info for Catch All Entries.
 	catchAllIPPorts, isCatchAllIPEntryPresent, allowAll = l.checkAndDeriveCatchAllIPPorts(firewallRules)
