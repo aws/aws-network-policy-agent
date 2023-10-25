@@ -715,6 +715,7 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 	return nil
 }
 
+
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
 
