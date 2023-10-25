@@ -715,21 +715,24 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 	return nil
 }
 
-func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, defaultPrefixLen int) {
+func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLen int) {
 	sort.Slice(rules, func(i, j int) bool {
-		prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
-		prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
 
-		prefixLenIp1 := defaultPrefixLen
-		prefixLenIp2 := defaultPrefixLen
+		prefixLenIp1 := prefixLen
+		prefixLenIp2 := prefixLen
 
-		if len(prefixIp1) == 2 {
+		if strings.Contains(string(rules[i].IPCidr), "/") {
+			prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
 			prefixLenIp1, _ = strconv.Atoi(prefixIp1[1])
+
 		}
 
-		if len(prefixIp2) == 2 {
+		if strings.Contains(string(rules[j].IPCidr), "/") {
+
+			prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
 			prefixLenIp2, _ = strconv.Atoi(prefixIp2[1])
 		}
+
 		return prefixLenIp1 < prefixLenIp2
 	})
 }
