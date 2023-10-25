@@ -721,13 +721,11 @@ func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr str
 		prefixLen, _ := strconv.Atoi(prefixLenStr)
 		prefixLenIp1 := prefixLen
 		prefixLenIp2 := prefixLen
-
 		if strings.Contains(string(rules[i].IPCidr), "/") {
 			prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
 			prefixLenIp1, _ = strconv.Atoi(prefixIp1[1])
 
 		}
-
 		if strings.Contains(string(rules[j].IPCidr), "/") {
 
 			prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
