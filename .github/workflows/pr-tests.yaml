@@ -17,9 +17,15 @@ jobs:
       - name: Checkout latest commit in the PR
         uses: actions/checkout@v3
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
-          go-version: "1.20"
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/go/bin
       - name: Set up tools
         run: |
           go install golang.org/x/lint/golint@latest
@@ -44,9 +50,27 @@ jobs:
         uses: docker/setup-qemu-action@v2
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-      - name: Set up Go
-        uses: actions/setup-go@v3
-        with:
-          go-version: "1.20"
       - name: Build Network Policy Agent images
-        run: make docker-buildx 
+        run: make docker-buildx
+  deprecated-apigroups:
+    name: Detect deprecated apiGroups
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: |
+          version=$(curl -sL https://api.github.com/repos/FairwindsOps/pluto/releases/latest | jq -r ".tag_name")
+          number=${version:1}
+          wget https://github.com/FairwindsOps/pluto/releases/download/${version}/pluto_${number}_linux_amd64.tar.gz
+          sudo tar -C /usr/local -xzf pluto_${number}_linux_amd64.tar.gz
+      - run: |
+          /usr/local/pluto detect-files -d .
+  vuln_check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install `govulncheck`
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run `govulncheck`
+        run: ~/go/bin/govulncheck ./...
