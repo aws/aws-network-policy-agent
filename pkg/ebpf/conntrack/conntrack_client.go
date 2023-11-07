@@ -23,6 +23,7 @@ type ConntrackKey struct {
 	Dest_ip     uint32
 	Dest_port   uint16
 	Protocol    uint8
+	Owner_ip    uint32
 }
 
 type ConntrackVal struct {
@@ -69,15 +70,28 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	localConntrackCache := make(map[ConntrackKey]bool)
 	// Build local conntrack cache
 	for _, conntrackFlow := range conntrackFlows {
-		//Check fwd flow
-		fwdFlow := ConntrackKey{}
-		fwdFlow.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
-		fwdFlow.Source_port = conntrackFlow.Forward.SrcPort
-		fwdFlow.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
-		fwdFlow.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlow.Protocol = conntrackFlow.Forward.Protocol
+		//Check fwd flow with SIP as owner
+		fwdFlowWithSIP := ConntrackKey{}
+		fwdFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+		fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+		fwdFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
+		fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
+		fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+		fwdFlowWithSIP.Owner_ip = fwdFlowWithSIP.Source_ip
 
-		localConntrackCache[fwdFlow] = true
+		localConntrackCache[fwdFlowWithSIP] = true
+
+		//Check fwd flow with DIP as owner
+		fwdFlowWithDIP := ConntrackKey{}
+		fwdFlowWithDIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+		fwdFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
+		fwdFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
+		fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
+		fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
+		fwdFlowWithDIP.Owner_ip = fwdFlowWithSIP.Dest_ip
+
+		localConntrackCache[fwdFlowWithDIP] = true
+
 	}
 
 	//Check if the entry is expired..
@@ -154,17 +168,31 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	localConntrackCache := make(map[utils.ConntrackKeyV6]bool)
 	// Build local conntrack cache
 	for _, conntrackFlow := range conntrackFlows {
-		//Check fwd flow
-		fwdFlow := utils.ConntrackKeyV6{}
+		//Check fwd flow with SIP as owner
+		fwdFlowWithSIP := utils.ConntrackKeyV6{}
 		sip := utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
-		copy(fwdFlow.Source_ip[:], sip)
-		fwdFlow.Source_port = conntrackFlow.Forward.SrcPort
+		copy(fwdFlowWithSIP.Source_ip[:], sip)
+		fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
 		dip := utils.ConvIPv6ToByte(conntrackFlow.Forward.DstIP)
-		copy(fwdFlow.Dest_ip[:], dip)
-		fwdFlow.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlow.Protocol = conntrackFlow.Forward.Protocol
+		copy(fwdFlowWithSIP.Dest_ip[:], dip)
+		fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
+		fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+		copy(fwdFlowWithSIP.Owner_ip[:], sip)
 
-		localConntrackCache[fwdFlow] = true
+		localConntrackCache[fwdFlowWithSIP] = true
+
+		//Check fwd flow with DIP as owner
+		fwdFlowWithDIP := utils.ConntrackKeyV6{}
+		sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
+		copy(fwdFlowWithDIP.Source_ip[:], sip)
+		fwdFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
+		dip = utils.ConvIPv6ToByte(conntrackFlow.Forward.DstIP)
+		copy(fwdFlowWithDIP.Dest_ip[:], dip)
+		fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
+		fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
+		copy(fwdFlowWithDIP.Owner_ip[:], dip)
+
+		localConntrackCache[fwdFlowWithSIP] = true
 	}
 
 	//Check if the entry is expired..
