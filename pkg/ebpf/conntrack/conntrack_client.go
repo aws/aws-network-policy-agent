@@ -128,7 +128,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
 					expiredList[iterKey] = true
 				}
-				
+
 				//Check with DIP as owner
 				newKey.Owner_ip = newKey.Dest_ip
 				_, ok = localConntrackCache[newKey]
@@ -249,7 +249,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
 					expiredList[newKey] = true
 				}
-				
+
 				//Check with DIP as owner
 				utils.CopyV6Bytes(&newKey.Owner_ip, connKey.Dest_ip)
 				_, ok = localConntrackCache[newKey]
