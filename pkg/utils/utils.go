@@ -285,9 +285,11 @@ func ConvIPv6ToByte(ipaddr net.IP) []byte {
 type ConntrackKeyV6 struct {
 	Source_ip   [16]byte
 	Source_port uint16
+	_           uint16 //Padding
 	Dest_ip     [16]byte
 	Dest_port   uint16
 	Protocol    uint8
+	_           uint8    //Padding
 	Owner_ip    [16]byte //16
 }
 
