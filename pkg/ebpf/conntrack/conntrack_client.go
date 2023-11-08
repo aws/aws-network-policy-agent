@@ -118,10 +118,23 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				newKey.Dest_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Dest_ip))
 				newKey.Dest_port = iterKey.Dest_port
 				newKey.Protocol = iterKey.Protocol
+
+				//Check with SIP as owner
+				newKey.Owner_ip = newKey.Source_ip
 				_, ok := localConntrackCache[newKey]
 				if !ok {
 					//Delete the entry in local cache
-					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol)
+					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key with SIP as owner: Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String())
+					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
+					expiredList[iterKey] = true
+				}
+				
+				//Check with DIP as owner
+				newKey.Owner_ip = newKey.Dest_ip
+				_, ok = localConntrackCache[newKey]
+				if !ok {
+					//Delete the entry in local cache
+					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key with DIP as owner: Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String())
 					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
 					expiredList[iterKey] = true
 				}
@@ -217,6 +230,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				}
 				return
 			} else {
+				//Check with SIP as owner
 				newKey := utils.ConntrackKeyV6{}
 				connKey := utils.ConvByteToConntrackV6(byteSlice)
 
@@ -226,10 +240,22 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				newKey.Source_port = connKey.Source_port
 				newKey.Dest_port = connKey.Dest_port
 				newKey.Protocol = connKey.Protocol
+
+				utils.CopyV6Bytes(&newKey.Owner_ip, connKey.Source_ip)
 				_, ok := localConntrackCache[newKey]
 				if !ok {
 					//Delete the entry in local cache
-					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d", utils.ConvByteToIPv6(newKey.Source_ip).String(), newKey.Source_port, utils.ConvByteToIPv6(newKey.Dest_ip).String(), newKey.Dest_port, newKey.Protocol)
+					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key with SIP as owner: Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(newKey.Source_ip).String(), newKey.Source_port, utils.ConvByteToIPv6(newKey.Dest_ip).String(), newKey.Dest_port, newKey.Protocol, utils.ConvByteToIPv6(newKey.Owner_ip).String())
+					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
+					expiredList[newKey] = true
+				}
+				
+				//Check with DIP as owner
+				utils.CopyV6Bytes(&newKey.Owner_ip, connKey.Dest_ip)
+				_, ok = localConntrackCache[newKey]
+				if !ok {
+					//Delete the entry in local cache
+					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key with SIP as owner: Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(newKey.Source_ip).String(), newKey.Source_port, utils.ConvByteToIPv6(newKey.Dest_ip).String(), newKey.Dest_port, newKey.Protocol, utils.ConvByteToIPv6(newKey.Owner_ip).String())
 					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
 					expiredList[newKey] = true
 				}
