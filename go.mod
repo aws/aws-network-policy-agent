@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.15.1
-	github.com/aws/aws-ebpf-sdk-go v1.0.3
+	github.com/aws/aws-ebpf-sdk-go v1.0.4
 	github.com/aws/aws-sdk-go v1.47.5
 	github.com/go-logr/logr v1.3.0
 	github.com/go-logr/zapr v1.2.4
@@ -18,7 +18,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	go.uber.org/zap v1.26.0
-	golang.org/x/sys v0.13.0
+	golang.org/x/sys v0.14.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.28.3
 	k8s.io/apimachinery v0.28.3

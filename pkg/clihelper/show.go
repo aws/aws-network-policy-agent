@@ -15,72 +15,6 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 )
 
-type BPFTrieKey struct {
-	PrefixLen uint32
-	IP        uint32
-}
-
-type BPFTrieKeyV6 struct {
-	PrefixLen uint32
-	IP        [16]byte
-}
-
-type BPFTrieVal struct {
-	Protocol  uint32
-	StartPort uint32
-	EndPort   uint32
-}
-
-type ConntrackKey struct {
-	Source_ip   uint32
-	Source_port uint16
-	Dest_ip     uint32
-	Dest_port   uint16
-	Protocol    uint8
-	Owner_ip    uint32
-}
-
-type ConntrackKeyV6 struct {
-	Source_ip   [16]byte //16
-	Source_port uint16   // 2
-	Dest_ip     [16]byte //16
-	Dest_port   uint16   // 2
-	Protocol    uint8    // 1
-	Owner_ip    [16]byte //16
-}
-
-type ConntrackVal struct {
-	Value uint8
-}
-
-func convTrieV6ToByte(key BPFTrieKeyV6) []byte {
-	ipSize := unsafe.Sizeof(key)
-	byteArray := (*[20]byte)(unsafe.Pointer(&key))
-	byteSlice := byteArray[:ipSize]
-	return byteSlice
-}
-
-func convByteToTrieV6(keyByte []byte) BPFTrieKeyV6 {
-	var v6key BPFTrieKeyV6
-	byteArray := (*[unsafe.Sizeof(v6key)]byte)(unsafe.Pointer(&v6key))
-	copy(byteArray[:], keyByte)
-	return v6key
-}
-
-func convConntrackV6ToByte(key ConntrackKeyV6) []byte {
-	ipSize := unsafe.Sizeof(key)
-	byteArray := (*[unsafe.Sizeof(key)]byte)(unsafe.Pointer(&key))
-	byteSlice := byteArray[:ipSize]
-	return byteSlice
-}
-
-func convByteToConntrackV6(keyByte []byte) ConntrackKeyV6 {
-	var v6key ConntrackKeyV6
-	byteArray := (*[unsafe.Sizeof(v6key)]byte)(unsafe.Pointer(&v6key))
-	copy(byteArray[:], keyByte)
-	return v6key
-}
-
 // Show - Displays all loaded AWS BPF Programs and their associated maps
 func Show() error {
 
@@ -164,8 +98,8 @@ func MapWalk(mapID int) error {
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
-		iterKey := BPFTrieKey{}
-		iterNextKey := BPFTrieKey{}
+		iterKey := utils.BPFTrieKey{}
+		iterNextKey := utils.BPFTrieKey{}
 
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
@@ -177,7 +111,7 @@ func MapWalk(mapID int) error {
 		} else {
 			for {
 
-				iterValue := BPFTrieVal{}
+				iterValue := utils.BPFTrieVal{}
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
@@ -206,8 +140,8 @@ func MapWalk(mapID int) error {
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
-		iterKey := ConntrackKey{}
-		iterNextKey := ConntrackKey{}
+		iterKey := utils.ConntrackKey{}
+		iterNextKey := utils.ConntrackKey{}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
 			if errors.Is(err, unix.ENOENT) {
@@ -217,7 +151,7 @@ func MapWalk(mapID int) error {
 			return fmt.Errorf("Unable to get First key: %v", err)
 		} else {
 			for {
-				iterValue := ConntrackVal{}
+				iterValue := utils.ConntrackVal{}
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
@@ -267,11 +201,11 @@ func MapWalkv6(mapID int) error {
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
-		iterKey := BPFTrieKeyV6{}
-		iterNextKey := BPFTrieKeyV6{}
+		iterKey := utils.BPFTrieKeyV6{}
+		iterNextKey := utils.BPFTrieKeyV6{}
 
-		byteSlice := convTrieV6ToByte(iterKey)
-		nextbyteSlice := convTrieV6ToByte(iterNextKey)
+		byteSlice := utils.ConvTrieV6ToByte(iterKey)
+		nextbyteSlice := utils.ConvTrieV6ToByte(iterNextKey)
 
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID)
 		if err != nil {
@@ -279,13 +213,13 @@ func MapWalkv6(mapID int) error {
 		} else {
 			for {
 
-				iterValue := BPFTrieVal{}
+				iterValue := utils.BPFTrieVal{}
 
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
-					v6key := convByteToTrieV6(byteSlice)
+					v6key := utils.ConvByteToTrieV6(byteSlice)
 					retrievedKey := fmt.Sprintf("Key : IP/Prefixlen - %s/%d ", utils.ConvByteToIPv6(v6key.IP).String(), v6key.PrefixLen)
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
@@ -310,23 +244,23 @@ func MapWalkv6(mapID int) error {
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
-		iterKey := ConntrackKeyV6{}
-		iterNextKey := ConntrackKeyV6{}
+		iterKey := utils.ConntrackKeyV6{}
+		iterNextKey := utils.ConntrackKeyV6{}
 
-		byteSlice := convConntrackV6ToByte(iterKey)
-		nextbyteSlice := convConntrackV6ToByte(iterNextKey)
+		byteSlice := utils.ConvConntrackV6ToByte(iterKey)
+		nextbyteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
 
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID)
 		if err != nil {
 			return fmt.Errorf("Unable to get First key: %v", err)
 		} else {
 			for {
-				iterValue := ConntrackVal{}
+				iterValue := utils.ConntrackVal{}
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
-					v6key := convByteToConntrackV6(byteSlice)
+					v6key := utils.ConvByteToConntrackV6(byteSlice)
 					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(v6key.Source_ip).String(), v6key.Source_port, utils.ConvByteToIPv6(v6key.Dest_ip).String(), v6key.Dest_port, v6key.Protocol, utils.ConvByteToIPv6(v6key.Owner_ip).String())
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")

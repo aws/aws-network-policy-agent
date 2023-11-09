@@ -289,6 +289,17 @@ type ConntrackKeyV6 struct {
 	Dest_ip     [16]byte
 	Dest_port   uint16
 	Protocol    uint8
+	_           uint8    //Padding
+	Owner_ip    [16]byte //16
+}
+
+type ConntrackKey struct {
+	Source_ip   uint32
+	Source_port uint16
+	Dest_ip     uint32
+	Dest_port   uint16
+	Protocol    uint8
+	Owner_ip    uint32
 }
 
 type ConntrackVal struct {
@@ -313,4 +324,34 @@ func CopyV6Bytes(dest *[16]byte, src [16]byte) {
 	for i := 0; i < len(src); i++ {
 		dest[i] = src[i]
 	}
+}
+
+type BPFTrieKey struct {
+	PrefixLen uint32
+	IP        uint32
+}
+
+type BPFTrieKeyV6 struct {
+	PrefixLen uint32
+	IP        [16]byte
+}
+
+type BPFTrieVal struct {
+	Protocol  uint32
+	StartPort uint32
+	EndPort   uint32
+}
+
+func ConvTrieV6ToByte(key BPFTrieKeyV6) []byte {
+	ipSize := unsafe.Sizeof(key)
+	byteArray := (*[20]byte)(unsafe.Pointer(&key))
+	byteSlice := byteArray[:ipSize]
+	return byteSlice
+}
+
+func ConvByteToTrieV6(keyByte []byte) BPFTrieKeyV6 {
+	var v6key BPFTrieKeyV6
+	byteArray := (*[unsafe.Sizeof(v6key)]byte)(unsafe.Pointer(&v6key))
+	copy(byteArray[:], keyByte)
+	return v6key
 }
