@@ -17,19 +17,6 @@ var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
 
-type ConntrackKey struct {
-	Source_ip   uint32
-	Source_port uint16
-	Dest_ip     uint32
-	Dest_port   uint16
-	Protocol    uint8
-	Owner_ip    uint32
-}
-
-type ConntrackVal struct {
-	Value uint8
-}
-
 type ConntrackClient interface {
 	CleanupConntrackMap()
 	Cleanupv6ConntrackMap()
@@ -67,11 +54,11 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		return
 	}
 
-	localConntrackCache := make(map[ConntrackKey]bool)
+	localConntrackCache := make(map[utils.ConntrackKey]bool)
 	// Build local conntrack cache
 	for _, conntrackFlow := range conntrackFlows {
 		//Check fwd flow with SIP as owner
-		fwdFlowWithSIP := ConntrackKey{}
+		fwdFlowWithSIP := utils.ConntrackKey{}
 		fwdFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
 		fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
 		fwdFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
@@ -82,7 +69,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		localConntrackCache[fwdFlowWithSIP] = true
 
 		//Check fwd flow with DIP as owner
-		fwdFlowWithDIP := ConntrackKey{}
+		fwdFlowWithDIP := utils.ConntrackKey{}
 		fwdFlowWithDIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
 		fwdFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
 		fwdFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
@@ -95,15 +82,15 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	}
 
 	//Check if the entry is expired..
-	iterKey := ConntrackKey{}
-	iterNextKey := ConntrackKey{}
-	expiredList := make(map[ConntrackKey]bool)
+	iterKey := utils.ConntrackKey{}
+	iterNextKey := utils.ConntrackKey{}
+	expiredList := make(map[utils.ConntrackKey]bool)
 	err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 	if err != nil {
 		return
 	} else {
 		for {
-			iterValue := ConntrackVal{}
+			iterValue := utils.ConntrackVal{}
 			err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) {
@@ -112,7 +99,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				}
 				return
 			} else {
-				newKey := ConntrackKey{}
+				newKey := utils.ConntrackKey{}
 				newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Source_ip))
 				newKey.Source_port = iterKey.Source_port
 				newKey.Dest_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Dest_ip))
@@ -211,7 +198,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		return
 	} else {
 		for {
-			iterValue := ConntrackVal{}
+			iterValue := utils.ConntrackVal{}
 			err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&iterValue)), mapID)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) {
