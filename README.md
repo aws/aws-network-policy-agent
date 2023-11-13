@@ -80,6 +80,8 @@ Default: false
 
 Network Policy agent can operate in either IPv4 or IPv6 mode. Setting this flag to `true` in the manifest will configure it in IPv6 mode.
 
+**Note:** VPC CNI by default creates an egress only IPv4 interface for IPv6 pods and this network interface will not be secured by the Network policy feature. Network policies will only be enforced on the Pod's primary interface (i.e.,) `eth0`. If you want to block the egress IPv4 access, please disable the interface creation via [ENABLE_V4_EGRESS](https://github.com/aws/amazon-vpc-cni-k8s#enable_v4_egress-v1151) flag in VPC CNI. 
+
 ## Network Policy Agent CLI
 The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.
 

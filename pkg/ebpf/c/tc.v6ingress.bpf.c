@@ -17,9 +17,6 @@
 #define IN6_ARE_ADDR_EQUAL(a, b)			\
     (__builtin_memcmp(&(a)->in6_u.u6_addr8[0], &(b)->in6_u.u6_addr8[0], sizeof(struct in6_addr)) == 0)
 
-#define IN6_ARE_ADDR_EQUAL(a, b)			\
-    (__builtin_memcmp(&(a)->in6_u.u6_addr8[0], &(b)->in6_u.u6_addr8[0], sizeof(struct in6_addr)) == 0)
-
 struct bpf_map_def_pvt {
 	__u32 type;
 	__u32 key_size;
