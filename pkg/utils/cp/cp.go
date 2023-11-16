@@ -66,10 +66,14 @@ func CopyFile(src, dst string) (err error) {
 func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
 	utilLogger.Info("Let's install BPF Binaries on to the host path.....")
 	for _, plugin := range pluginBins {
+		targetPlugin := plugin
+
+		// CLI binary should always refer to aws-eks-na-cli
 		if plugin == EKS_V6_CLI_BINARY {
-			plugin = EKS_CLI_BINARY //CLI binary should always refer to aws-eks-na-cli
+			targetPlugin = EKS_CLI_BINARY
 		}
-		target := fmt.Sprintf("%s%s", hostCNIBinPath, plugin)
+
+		target := fmt.Sprintf("%s%s", hostCNIBinPath, targetPlugin)
 		source := fmt.Sprintf("%s", plugin)
 		utilLogger.Info("Installing BPF Binary..", "target", target, "source", source)
 
