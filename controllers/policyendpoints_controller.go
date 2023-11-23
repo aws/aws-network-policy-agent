@@ -91,6 +91,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	conntrackTTL := r.getLocalConntrackCacheCleanupPeriod()
 	var err error
 	if enableNetworkPolicy {
+		r.policyEndpointEnabled = true
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
 			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL)
 
@@ -107,6 +108,8 @@ type PolicyEndpointsReconciler struct {
 	scheme    *runtime.Scheme
 	//Primary IP of EC2 instance
 	nodeIP string
+	// Flag to enable/disable operatations for PolicyEndpoint resource
+	policyEndpointEnabled bool
 	// Maps PolicyEndpoint resource to it's eBPF context
 	policyEndpointeBPFContext sync.Map
 	// Maps pod Identifier to list of PolicyEndpoint resources
@@ -127,6 +130,11 @@ type PolicyEndpointsReconciler struct {
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.log.Info("Received a new reconcile request", "req", req)
+	if !r.policyEndpointEnabled {
+		r.log.Info("NetworkPolicies is disabled. Skipping reconcile request", "req", req)
+		return ctrl.Result{}, nil
+	}
+
 	if err := r.reconcile(ctx, req); err != nil {
 		r.log.Error(err, "Reconcile error")
 		return ctrl.Result{}, err
