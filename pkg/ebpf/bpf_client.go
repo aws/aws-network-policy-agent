@@ -755,9 +755,6 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	//Sort the rules
 	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
 
-	//Sort the rules
-	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
-
 	//Check and aggregate L4 Port Info for Catch All Entries.
 	catchAllIPPorts, isCatchAllIPEntryPresent, allowAll = l.checkAndDeriveCatchAllIPPorts(firewallRules)
 	if isCatchAllIPEntryPresent {
