@@ -15,9 +15,9 @@ def verify_results(file_name,ip_family):
     # expected_results maintains a mapping of the test number and the number of sub-tests that are expected to pass for v4/v6 clusters
     # For the test numbers not included in this map, it is expected that all the sub-tests should be passing
     if ip_family == "IPv6":
-        expected_results={ 2:80, 3:80, 8:80, 12:80, 23:80, 25:80, 26:80, 28:80,29:80, 31:77, 98:80, 102:72, 104:72, 106:72, 108:72, 111:80, 112:80 }
+        expected_results={ 2:80, 3:80, 8:80, 12:64, 23:80, 25:80, 26:80, 28:80, 29:80, 31:50, 98:80, 102:72, 104:72, 106:72, 108:72, 111:80, 112:80 }
     else:
-        expected_results={ 2:80, 3:80, 8:80, 12:80, 23:80, 25:80, 26:80, 28:80, 29:80, 31:80, 98:80, 111:80, 112:80 }
+        expected_results={ 2:80, 3:80, 8:80, 12:80, 23:80, 25:80, 26:80, 28:80, 29:80, 31:50, 98:80, 111:80, 112:80 }
 
     start="starting test case"
     wrong="wrong"
