@@ -243,9 +243,17 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	for expiredFlow, _ := range expiredList {
 		c.logger.Info("Conntrack cleanup", "Delete - ", expiredFlow)
 		ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
+		c.printByteArray(ceByteSlice)
 		c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
 	}
 
 	c.logger.Info("Done cleanup of conntrack map")
 	return
+}
+
+func (c *conntrackClient) printByteArray(byteArray []byte) {
+	for _, b := range byteArray {
+		c.logger.Info("CONNTRACK VAL", "->", b)
+	}
+	c.logger.Info("DONE")
 }
