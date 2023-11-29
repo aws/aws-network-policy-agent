@@ -577,7 +577,7 @@ func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ct
 		Complete(r)
 }
 
-func (r *PolicyEndpointsReconciler) getLocalConntrackCacheCleanupPeriod() time.Duration {
+func (r *PolicyEndpointsReconciler) getLocalConntrackCacheCleanupPeriod() int {
 	periodStr, found := os.LookupEnv(envLocalConntrackCacheCleanupPeriod)
 	if !found {
 		return defaultLocalConntrackCacheCleanupPeriodInSeconds
@@ -587,8 +587,8 @@ func (r *PolicyEndpointsReconciler) getLocalConntrackCacheCleanupPeriod() time.D
 			r.log.Info("conntrack cache cleanup is set to less than 1s. Reverting to default value")
 			return defaultLocalConntrackCacheCleanupPeriodInSeconds
 		}
-		r.log.Info("Setting CONNTRACK_CACHE_CLEANUP_PERIOD %v", cleanupPeriod)
-		return time.Duration(cleanupPeriod) * time.Second
+		r.log.Info("Setting CONNTRACK_CACHE_CLEANUP_PERIOD", "cleanupPeriod", cleanupPeriod)
+		return cleanupPeriod
 	}
 	return defaultLocalConntrackCacheCleanupPeriodInSeconds
 }
