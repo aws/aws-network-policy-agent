@@ -296,9 +296,11 @@ type ConntrackKeyV6 struct {
 type ConntrackKey struct {
 	Source_ip   uint32
 	Source_port uint16
+	_           uint16 //Padding
 	Dest_ip     uint32
 	Dest_port   uint16
 	Protocol    uint8
+	_           uint8 //Padding
 	Owner_ip    uint32
 }
 
