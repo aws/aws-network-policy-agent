@@ -39,7 +39,6 @@ import (
 )
 
 const (
-	envLocalConntrackCacheCleanupPeriod              = "CONNTRACK_CACHE_CLEANUP_PERIOD"
 	defaultLocalConntrackCacheCleanupPeriodInSeconds = 300
 )
 

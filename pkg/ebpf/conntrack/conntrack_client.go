@@ -39,7 +39,7 @@ func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool, logger 
 }
 
 func (c *conntrackClient) CleanupConntrackMap() {
-	c.logger.Info("Start cleanup of conntrack map")
+	c.logger.Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
@@ -152,7 +152,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 }
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
-	c.logger.Info("Start cleanup of conntrack map")
+	c.logger.Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
