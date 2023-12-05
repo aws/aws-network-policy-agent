@@ -349,7 +349,7 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				Name:      policyEndpointResource,
 				Namespace: resourceNamespace,
 			}
-			
+
 			if isDeleteFlow {
 				deletedPEParentNPName := utils.GetParentNPNameFromPEName(resourceName)
 				currentPEParentNPName := utils.GetParentNPNameFromPEName(policyEndpointResource)
