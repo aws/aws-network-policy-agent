@@ -38,7 +38,6 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
-
 func GetProtocol(protocolNum int) string {
 	protocolStr := "UNKNOWN"
 	if protocolNum == TCP_PROTOCOL_NUMBER {

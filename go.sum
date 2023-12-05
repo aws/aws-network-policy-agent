@@ -6,6 +6,8 @@ github.com/aws/aws-ebpf-sdk-go v1.0.4-rc2 h1:DZOKWMO/iCQekTkugs9A3h4o9hYwOvTdNSx
 github.com/aws/aws-ebpf-sdk-go v1.0.4-rc2/go.mod h1:CCXK40H7FN2eN1FLt/O2vT9eNIDH0uXZxZGxQEdJaIM=
 github.com/aws/aws-ebpf-sdk-go v1.0.4 h1:WJeuAYd8ThiC22kKJHpGZCJ63wotsJ04rY3JsHhdwVM=
 github.com/aws/aws-ebpf-sdk-go v1.0.4/go.mod h1:CCXK40H7FN2eN1FLt/O2vT9eNIDH0uXZxZGxQEdJaIM=
+github.com/aws/aws-ebpf-sdk-go v1.0.5 h1:ahdT2sWE/OINq0eRqbvaCpfiAjYz+/m+4jT6551W304=
+github.com/aws/aws-ebpf-sdk-go v1.0.5/go.mod h1:BlJUNGRjbwP8zax4c0Y4A9hw2tPGSUxi0Mm1dNLvNKQ=
 github.com/aws/aws-sdk-go v1.47.5 h1:U2JlfPmrUoz5p+2X/XwKxmaJFo2oV+LbJqx8jyEvyAY=
 github.com/aws/aws-sdk-go v1.47.5/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
 github.com/benbjohnson/clock v1.1.0/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
@@ -191,6 +193,8 @@ golang.org/x/sys v0.13.0 h1:Af8nKPmuFypiUBjVoU9V20FiaFXOcuZI21p0ycVYYGE=
 golang.org/x/sys v0.13.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.14.0 h1:Vz7Qs629MkJkGyHxUlRHizWJRG2j8fbQKjELVSNhy7Q=
 golang.org/x/sys v0.14.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+golang.org/x/sys v0.15.0 h1:h48lPFYpsTvQJZF4EKyI4aLHaev3CxivZmv7yZig9pc=
+golang.org/x/sys v0.15.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
 golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod h1:bj7SfCRtBDWHUb9snDiAeCFNEtKQo2Wmx5Cou7ajbmo=
 golang.org/x/term v0.13.0 h1:bb+I9cTfFazGW51MZqBVmZy7+JEJMouUHTUSKVQLBek=
 golang.org/x/term v0.13.0/go.mod h1:LTmsnFJwVN6bCy1rVCoS+qHT1HhALEFxKncY3WNNh4U=
