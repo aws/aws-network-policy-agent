@@ -39,6 +39,7 @@ func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool, logger 
 }
 
 func (c *conntrackClient) CleanupConntrackMap() {
+	c.logger.Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
@@ -99,20 +100,30 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				}
 				return
 			} else {
+
 				newKey := utils.ConntrackKey{}
 				newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Source_ip))
 				newKey.Source_port = iterKey.Source_port
 				newKey.Dest_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Dest_ip))
 				newKey.Dest_port = iterKey.Dest_port
 				newKey.Protocol = iterKey.Protocol
+				newKey.Owner_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(iterKey.Owner_ip))
 
-				newKey.Owner_ip = iterKey.Owner_ip
 				_, ok := localConntrackCache[newKey]
 				if !ok {
 					//Delete the entry in local cache
 					retrievedKey := fmt.Sprintf("Expired/Delete Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String())
 					c.logger.Info("Conntrack cleanup", "Entry - ", retrievedKey)
-					expiredList[iterKey] = true
+
+					// Copy from iterKey since we will replace the value
+					nKey := utils.ConntrackKey{}
+					nKey.Source_ip = iterKey.Source_ip
+					nKey.Source_port = iterKey.Source_port
+					nKey.Dest_ip = iterKey.Dest_ip
+					nKey.Dest_port = iterKey.Dest_port
+					nKey.Protocol = iterKey.Protocol
+					nKey.Owner_ip = iterKey.Owner_ip
+					expiredList[nKey] = true
 				}
 
 			}
@@ -124,6 +135,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			if err != nil {
 				break
 			}
+
 			iterKey = iterNextKey
 		}
 	}
@@ -140,6 +152,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 }
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
+	c.logger.Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
