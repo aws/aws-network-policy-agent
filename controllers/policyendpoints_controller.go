@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -41,7 +39,6 @@ import (
 )
 
 const (
-	envLocalConntrackCacheCleanupPeriod              = "CONNTRACK_CACHE_CLEANUP_PERIOD"
 	defaultLocalConntrackCacheCleanupPeriodInSeconds = 300
 )
 
@@ -77,7 +74,7 @@ func prometheusRegister() {
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
-	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool) (*PolicyEndpointsReconciler, error) {
+	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool, conntrackTTL int) (*PolicyEndpointsReconciler, error) {
 	r := &PolicyEndpointsReconciler{
 		k8sClient: k8sClient,
 		log:       log,
@@ -88,7 +85,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	} else {
 		r.nodeIP, _ = imds.GetMetaData("ipv6")
 	}
-	conntrackTTL := r.getLocalConntrackCacheCleanupPeriod()
+	r.log.Info("ConntrackTTL", "cleanupPeriod", conntrackTTL)
 	var err error
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
@@ -586,22 +583,6 @@ func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ct
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&policyk8sawsv1.PolicyEndpoint{}).
 		Complete(r)
-}
-
-func (r *PolicyEndpointsReconciler) getLocalConntrackCacheCleanupPeriod() time.Duration {
-	periodStr, found := os.LookupEnv(envLocalConntrackCacheCleanupPeriod)
-	if !found {
-		return defaultLocalConntrackCacheCleanupPeriodInSeconds
-	}
-	if cleanupPeriod, err := strconv.Atoi(periodStr); err == nil {
-		if cleanupPeriod < 1 {
-			r.log.Info("conntrack cache cleanup is set to less than 1s. Reverting to default value")
-			return defaultLocalConntrackCacheCleanupPeriodInSeconds
-		}
-		r.log.Info("Setting CONNTRACK_CACHE_CLEANUP_PERIOD %v", cleanupPeriod)
-		return time.Duration(cleanupPeriod) * time.Second
-	}
-	return defaultLocalConntrackCacheCleanupPeriodInSeconds
 }
 
 func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.Context, parentNP, resourceNamespace string) []string {
