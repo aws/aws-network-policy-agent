@@ -347,7 +347,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotIngressRules, gotEgressRules, gotIsIngressIsolated, gotIsEgressIsolated, gotError := policyEndpointReconciler.deriveIngressAndEgressFirewallRules(context.Background(),
-				tt.podIdentifier, tt.resourceNamespace)
+				tt.podIdentifier, tt.resourceNamespace, tt.policyEndpointName, false)
 			assert.Equal(t, tt.want.ingressRules, gotIngressRules)
 			assert.Equal(t, tt.want.egressRules, gotEgressRules)
 			assert.Equal(t, tt.want.isIngressIsolated, gotIsIngressIsolated)
