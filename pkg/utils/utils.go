@@ -38,6 +38,24 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+func GetProtocol(protocolNum int) string {
+	protocolStr := "UNKNOWN"
+	if protocolNum == TCP_PROTOCOL_NUMBER {
+		protocolStr = "TCP"
+	} else if protocolNum == UDP_PROTOCOL_NUMBER {
+		protocolStr = "UDP"
+	} else if protocolNum == SCTP_PROTOCOL_NUMBER {
+		protocolStr = "SCTP"
+	} else if protocolNum == ICMP_PROTOCOL_NUMBER {
+		protocolStr = "ICMP"
+	} else if protocolNum == RESERVED_IP_PROTOCOL_NUMBER {
+		protocolStr = "RESERVED"
+	} else if protocolNum == ANY_IP_PROTOCOL {
+		protocolStr = "ANY PROTOCOL"
+	}
+	return protocolStr
+}
+
 type VerdictType int
 
 const (
