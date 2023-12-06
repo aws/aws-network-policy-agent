@@ -91,6 +91,10 @@ func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
 	return policyName + policyNamespace
 }
 
+func GetParentNPNameFromPEName(policyEndpointName string) string {
+	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
+}
+
 func GetHostVethName(podName, podNamespace string) string {
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
