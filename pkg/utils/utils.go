@@ -109,6 +109,10 @@ func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
 	return policyName + policyNamespace
 }
 
+func GetParentNPNameFromPEName(policyEndpointName string) string {
+	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
+}
+
 func GetHostVethName(podName, podNamespace string) string {
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
@@ -314,9 +318,11 @@ type ConntrackKeyV6 struct {
 type ConntrackKey struct {
 	Source_ip   uint32
 	Source_port uint16
+	_           uint16 //Padding
 	Dest_ip     uint32
 	Dest_port   uint16
 	Protocol    uint8
+	_           uint8 //Padding
 	Owner_ip    uint32
 }
 
