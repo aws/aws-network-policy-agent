@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -41,7 +39,6 @@ import (
 )
 
 const (
-	envLocalConntrackCacheCleanupPeriod              = "CONNTRACK_CACHE_CLEANUP_PERIOD"
 	defaultLocalConntrackCacheCleanupPeriodInSeconds = 300
 )
 
@@ -77,7 +74,7 @@ func prometheusRegister() {
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
-	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool) (*PolicyEndpointsReconciler, error) {
+	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool, conntrackTTL int) (*PolicyEndpointsReconciler, error) {
 	r := &PolicyEndpointsReconciler{
 		k8sClient: k8sClient,
 		log:       log,
@@ -88,7 +85,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	} else {
 		r.nodeIP, _ = imds.GetMetaData("ipv6")
 	}
-	conntrackTTL := r.getLocalConntrackCacheCleanupPeriod()
+	r.log.Info("ConntrackTTL", "cleanupPeriod", conntrackTTL)
 	var err error
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
@@ -155,7 +152,6 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 		req.NamespacedName.Namespace)
 
 	start := time.Now()
-
 	if targetPods, ok := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier); ok {
 		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods.([]types.NamespacedName))
 		if err != nil {
@@ -210,7 +206,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	for podIdentifier, _ := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
-			policyEndpoint.Namespace)
+			policyEndpoint.Namespace, policyEndpoint.Name, false)
 		if err != nil {
 			r.log.Error(err, "Error Parsing policy Endpoint resource", "name:", policyEndpoint.Name)
 			return err
@@ -287,7 +283,8 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
 	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace)
+		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
+			policyEndpoint, true)
 		if err != nil {
 			r.log.Error(err, "Error Parsing policy Endpoint resource", "name ", policyEndpoint)
 			return err
@@ -337,7 +334,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 }
 
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
-	podIdentifier string, resourceNamespace string) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
+	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
 	var ingressRules, egressRules []ebpf.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
@@ -349,6 +346,17 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				Name:      policyEndpointResource,
 				Namespace: resourceNamespace,
 			}
+
+			if isDeleteFlow {
+				deletedPEParentNPName := utils.GetParentNPNameFromPEName(resourceName)
+				currentPEParentNPName := utils.GetParentNPNameFromPEName(policyEndpointResource)
+				if deletedPEParentNPName == currentPEParentNPName {
+					r.log.Info("PE belongs to same NP. Ignore and move on since it's a delete flow",
+						"deletedPE", resourceName, "currentPE", policyEndpointResource)
+					continue
+				}
+			}
+
 			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
@@ -514,7 +522,7 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
 	var policyEndpoints []string
 
-	r.log.Info("Total PEs for Parent NP:", "Count: ", len(parentPEList))
+	r.log.Info("Current PE Count for Parent NP:", "Count: ", len(parentPEList))
 	if currentPESet, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		policyEndpoints = currentPESet.([]string)
 		for _, policyEndpointResourceName := range parentPEList {
@@ -575,22 +583,6 @@ func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ct
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&policyk8sawsv1.PolicyEndpoint{}).
 		Complete(r)
-}
-
-func (r *PolicyEndpointsReconciler) getLocalConntrackCacheCleanupPeriod() time.Duration {
-	periodStr, found := os.LookupEnv(envLocalConntrackCacheCleanupPeriod)
-	if !found {
-		return defaultLocalConntrackCacheCleanupPeriodInSeconds
-	}
-	if cleanupPeriod, err := strconv.Atoi(periodStr); err == nil {
-		if cleanupPeriod < 1 {
-			r.log.Info("conntrack cache cleanup is set to less than 1s. Reverting to default value")
-			return defaultLocalConntrackCacheCleanupPeriodInSeconds
-		}
-		r.log.Info("Setting CONNTRACK_CACHE_CLEANUP_PERIOD %v", cleanupPeriod)
-		return time.Duration(cleanupPeriod) * time.Second
-	}
-	return defaultLocalConntrackCacheCleanupPeriodInSeconds
 }
 
 func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.Context, parentNP, resourceNamespace string) []string {
