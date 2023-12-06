@@ -107,20 +107,6 @@ func setupCW(logger logr.Logger) error {
 	return nil
 }
 
-func getProtocol(protocolNum int) string {
-	protocolStr := "UNKNOWN"
-	if protocolNum == utils.TCP_PROTOCOL_NUMBER {
-		protocolStr = "TCP"
-	} else if protocolNum == utils.UDP_PROTOCOL_NUMBER {
-		protocolStr = "UDP"
-	} else if protocolNum == utils.SCTP_PROTOCOL_NUMBER {
-		protocolStr = "SCTP"
-	} else if protocolNum == utils.ICMP_PROTOCOL_NUMBER {
-		protocolStr = "ICMP"
-	}
-	return protocolStr
-}
-
 func getVerdict(verdict int) string {
 	verdictStr := "DENY"
 	if verdict == utils.ACCEPT.Index() {
@@ -186,7 +172,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					continue
 				}
 
-				protocol := getProtocol(int(rb.Protocol))
+				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
@@ -201,7 +187,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					log.Info("Failed to read from Ring buf", err)
 					continue
 				}
-				protocol := getProtocol(int(rb.Protocol))
+				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,

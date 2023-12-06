@@ -108,7 +108,7 @@ type EbpfFirewallRules struct {
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL time.Duration) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -227,9 +227,9 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 
 	// Start Conntrack routines
 	if enableIPv6 {
-		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, conntrackTTL*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, time.Duration(conntrackTTL)*time.Second)
 	} else {
-		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, conntrackTTL*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, time.Duration(conntrackTTL)*time.Second)
 	}
 
 	// Initializes prometheus metrics
