@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM public.ecr.aws/eks-distro-build-tooling/golang:1.21.3-4-gcc-al2 as builder
+FROM public.ecr.aws/eks-distro-build-tooling/golang:1.21.5-6-gcc-al2 as builder
 ARG TARGETOS
 ARG TARGETARCH
 
