@@ -21,7 +21,6 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
-	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
@@ -56,11 +55,6 @@ func init() {
 
 func main() {
 	initLogger, _ := getLoggerWithLogLevel("info", "")
-	initLogger.Info("version",
-		"GitVersion", version.GitVersion,
-		"GitCommit", version.GitCommit,
-		"BuildDate", version.BuildDate,
-	)
 
 	ctrlConfig, err := loadControllerConfig()
 	if err != nil {
@@ -111,7 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	go metrics.ServeMetrics(setupLog)
+	go metrics.ServeMetrics()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
@@ -135,6 +129,6 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 
 // getLoggerWithLogLevel returns logger with specific log level.
 func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
-	ctrlLogger := logger.New(logLevel, logFilePath)
+	ctrlLogger := logger.New(logLevel, logFilePath, 2)
 	return zapr.NewLogger(ctrlLogger), nil
 }
