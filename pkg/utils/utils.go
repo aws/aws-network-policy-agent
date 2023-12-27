@@ -38,6 +38,24 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+func GetProtocol(protocolNum int) string {
+	protocolStr := "UNKNOWN"
+	if protocolNum == TCP_PROTOCOL_NUMBER {
+		protocolStr = "TCP"
+	} else if protocolNum == UDP_PROTOCOL_NUMBER {
+		protocolStr = "UDP"
+	} else if protocolNum == SCTP_PROTOCOL_NUMBER {
+		protocolStr = "SCTP"
+	} else if protocolNum == ICMP_PROTOCOL_NUMBER {
+		protocolStr = "ICMP"
+	} else if protocolNum == RESERVED_IP_PROTOCOL_NUMBER {
+		protocolStr = "RESERVED"
+	} else if protocolNum == ANY_IP_PROTOCOL {
+		protocolStr = "ANY PROTOCOL"
+	}
+	return protocolStr
+}
+
 type VerdictType int
 
 const (
@@ -89,6 +107,10 @@ func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) s
 
 func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
 	return policyName + policyNamespace
+}
+
+func GetParentNPNameFromPEName(policyEndpointName string) string {
+	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
 }
 
 func GetHostVethName(podName, podNamespace string) string {
@@ -296,9 +318,11 @@ type ConntrackKeyV6 struct {
 type ConntrackKey struct {
 	Source_ip   uint32
 	Source_port uint16
+	_           uint16 //Padding
 	Dest_ip     uint32
 	Dest_port   uint16
 	Protocol    uint8
+	_           uint8 //Padding
 	Owner_ip    uint32
 }
 

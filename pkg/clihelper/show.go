@@ -19,7 +19,7 @@ import (
 func Show() error {
 
 	bpfSDKclient := goelf.New()
-	bpfState, err := bpfSDKclient.RecoverAllBpfProgramsAndMaps()
+	bpfState, err := bpfSDKclient.GetAllBpfProgramsAndMaps()
 	if err != nil {
 		return err
 	}
@@ -30,7 +30,7 @@ func Show() error {
 		line := fmt.Sprintf("Pod Identifier : %s  Direction : %s \n", podIdentifier, direction)
 		fmt.Print(line)
 		bpfProg := bpfEntry.Program
-		fmt.Println("Prog FD: ", bpfProg.ProgFD)
+		fmt.Println("Prog ID: ", bpfProg.ProgID)
 		fmt.Println("Associated Maps -> ")
 		bpfMaps := bpfEntry.Maps
 		for k, v := range bpfMaps {
@@ -111,17 +111,24 @@ func MapWalk(mapID int) error {
 		} else {
 			for {
 
-				iterValue := utils.BPFTrieVal{}
+				iterValue := [24]utils.BPFTrieVal{}
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
 					retrievedKey := fmt.Sprintf("Key : IP/Prefixlen - %s/%d ", utils.ConvIntToIPv4(iterKey.IP).String(), iterKey.PrefixLen)
 					fmt.Println(retrievedKey)
-					fmt.Println("Value : ")
-					fmt.Println("Protocol - ", iterValue.Protocol)
-					fmt.Println("StartPort - ", iterValue.StartPort)
-					fmt.Println("Endport - ", iterValue.EndPort)
+					for i := 0; i < len(iterValue); i++ {
+						if iterValue[i].Protocol == 0 {
+							continue
+						}
+						fmt.Println("-------------------")
+						fmt.Println("Value Entry : ", i)
+						fmt.Println("Protocol - ", utils.GetProtocol(int(iterValue[i].Protocol)))
+						fmt.Println("StartPort - ", iterValue[i].StartPort)
+						fmt.Println("Endport - ", iterValue[i].EndPort)
+						fmt.Println("-------------------")
+					}
 					fmt.Println("*******************************")
 				}
 
@@ -213,7 +220,7 @@ func MapWalkv6(mapID int) error {
 		} else {
 			for {
 
-				iterValue := utils.BPFTrieVal{}
+				iterValue := [24]utils.BPFTrieVal{}
 
 				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&iterValue)), mapID)
 				if err != nil {
@@ -222,10 +229,17 @@ func MapWalkv6(mapID int) error {
 					v6key := utils.ConvByteToTrieV6(byteSlice)
 					retrievedKey := fmt.Sprintf("Key : IP/Prefixlen - %s/%d ", utils.ConvByteToIPv6(v6key.IP).String(), v6key.PrefixLen)
 					fmt.Println(retrievedKey)
-					fmt.Println("Value : ")
-					fmt.Println("Protocol - ", iterValue.Protocol)
-					fmt.Println("StartPort - ", iterValue.StartPort)
-					fmt.Println("Endport - ", iterValue.EndPort)
+					for i := 0; i < len(iterValue); i++ {
+						if iterValue[i].Protocol == 0 {
+							continue
+						}
+						fmt.Println("-------------------")
+						fmt.Println("Value Entry : ", i)
+						fmt.Println("Protocol - ", utils.GetProtocol(int(iterValue[i].Protocol)))
+						fmt.Println("StartPort - ", iterValue[i].StartPort)
+						fmt.Println("Endport - ", iterValue[i].EndPort)
+						fmt.Println("-------------------")
+					}
 					fmt.Println("*******************************")
 				}
 
