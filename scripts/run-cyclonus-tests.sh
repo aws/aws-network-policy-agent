@@ -49,7 +49,7 @@ echo "Nodes AMI version for cluster: $CLUSTER_NAME"
 kubectl get nodes -owide
 
 PROVIDER_ID=$(kubectl get nodes -ojson | jq -r '.items[0].spec.providerID')
-AMI_ID=$(aws ec2 describe-instances --instance-ids ${PROVIDER_ID##*/} | jq -r '.Reservations[].Instances[].ImageId')
+AMI_ID=$(aws ec2 describe-instances --instance-ids ${PROVIDER_ID##*/} --region $REGION | jq -r '.Reservations[].Instances[].ImageId')
 echo "Nodes AMI ID: $AMI_ID"
 
 if [[ $SKIP_ADDON_INSTALLATION == "false" ]]; then
