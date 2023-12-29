@@ -54,7 +54,7 @@ EOF
     kubectl get nodes -owide
 
     local providerID=$(kubectl get nodes -ojson | jq -r '.items[0].spec.providerID')
-    local amiID=$(aws ec2 describe-instances --instance-ids ${providerID##*/} | jq -r '.Reservations[].Instances[].ImageId')
+    local amiID=$(aws ec2 describe-instances --instance-ids ${providerID##*/} --region $REGION | jq -r '.Reservations[].Instances[].ImageId')
     echo "Nodes AMI ID: $amiID"
 }
 
