@@ -6,7 +6,7 @@ require (
 	github.com/aws/amazon-vpc-cni-k8s v1.15.1
 	github.com/aws/aws-ebpf-sdk-go v1.0.6
 	github.com/aws/aws-sdk-go v1.47.5
-	github.com/go-logr/logr v1.3.0
+	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.2.4
 	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.6.0
