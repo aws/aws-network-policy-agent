@@ -143,7 +143,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	//Delete entries in conntrack table
 	//TODO use bulk delete
 	for expiredFlow, _ := range expiredList {
-		c.logger.Info("Conntrack cleanup", "Delete - ", expiredFlow)
+		key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String())
+		c.logger.Info("Conntrack cleanup", "Delete - ", key)
 		c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
 	}
 
@@ -254,7 +255,8 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	//Delete entries in conntrack table
 	//TODO use bulk delete
 	for expiredFlow, _ := range expiredList {
-		c.logger.Info("Conntrack cleanup", "Delete - ", expiredFlow)
+		key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
+		c.logger.Info("Conntrack cleanup", "Delete - ", key)
 		ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 		c.printByteArray(ceByteSlice)
 		c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
