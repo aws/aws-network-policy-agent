@@ -21,7 +21,6 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
-	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"

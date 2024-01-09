@@ -105,20 +105,12 @@ func getLogWriter(logFilePath string) zapcore.WriteSyncer {
 }
 
 // New logger initializes logger
-<<<<<<< HEAD
-func New(logLevel, logLocation string) *zap.Logger {
-=======
 func New(logLevel, logLocation string, callSkip int) *zap.Logger {
->>>>>>> remotes/upstream/main
 	inputLogConfig := &Configuration{
 		LogLevel:    logLevel,
 		LogLocation: logLocation,
 	}
 
-<<<<<<< HEAD
-	logger := inputLogConfig.newZapLogger()
-=======
 	logger := inputLogConfig.newZapLogger(callSkip)
->>>>>>> remotes/upstream/main
 	return logger
 }
