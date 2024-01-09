@@ -3,14 +3,14 @@ package conntrack
 import (
 	"errors"
 	"fmt"
+	"net"
+	"unsafe"
 
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/go-logr/logr"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
-
-	"unsafe"
 )
 
 var (
@@ -76,10 +76,37 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		fwdFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
 		fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
 		fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
-		fwdFlowWithDIP.Owner_ip = fwdFlowWithSIP.Dest_ip
+		fwdFlowWithDIP.Owner_ip = fwdFlowWithDIP.Dest_ip
 
 		localConntrackCache[fwdFlowWithDIP] = true
 
+		//Dest can be VIP and pods can be on same node
+		destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
+		revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
+
+		if !destIP.Equal(revDestIP) {
+			//Check fwd flow with SIP as owner
+			revFlowWithSIP := utils.ConntrackKey{}
+			revFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+			revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+			revFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Reverse.SrcIP)
+			revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
+			revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+			revFlowWithSIP.Owner_ip = revFlowWithSIP.Source_ip
+
+			localConntrackCache[revFlowWithSIP] = true
+
+			//Check fwd flow with DIP as owner
+			revFlowWithDIP := utils.ConntrackKey{}
+			revFlowWithDIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+			revFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
+			revFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Reverse.SrcIP)
+			revFlowWithDIP.Dest_port = conntrackFlow.Reverse.SrcPort
+			revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
+			revFlowWithDIP.Owner_ip = revFlowWithDIP.Dest_ip
+
+			localConntrackCache[revFlowWithDIP] = true
+		}
 	}
 
 	//Check if the entry is expired..
@@ -143,7 +170,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	//Delete entries in conntrack table
 	//TODO use bulk delete
 	for expiredFlow, _ := range expiredList {
-		c.logger.Info("Conntrack cleanup", "Delete - ", expiredFlow)
+		key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String())
+		c.logger.Info("Conntrack cleanup", "Delete - ", key)
 		c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
 	}
 
@@ -196,6 +224,38 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		copy(fwdFlowWithDIP.Owner_ip[:], dip)
 
 		localConntrackCache[fwdFlowWithDIP] = true
+
+		//Dest can be VIP and pods can be on same node
+		destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
+		revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
+
+		if !destIP.Equal(revDestIP) {
+			//Check fwd flow with SIP as owner
+			revFlowWithSIP := utils.ConntrackKeyV6{}
+			sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
+			copy(revFlowWithSIP.Source_ip[:], sip)
+			revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+			dip = utils.ConvIPv6ToByte(conntrackFlow.Reverse.SrcIP)
+			copy(revFlowWithSIP.Dest_ip[:], dip)
+			revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
+			revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+			copy(revFlowWithSIP.Owner_ip[:], sip)
+
+			localConntrackCache[revFlowWithSIP] = true
+
+			//Check fwd flow with DIP as owner
+			revFlowWithDIP := utils.ConntrackKeyV6{}
+			sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
+			copy(revFlowWithDIP.Source_ip[:], sip)
+			revFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
+			dip = utils.ConvIPv6ToByte(conntrackFlow.Reverse.SrcIP)
+			copy(revFlowWithDIP.Dest_ip[:], dip)
+			revFlowWithDIP.Dest_port = conntrackFlow.Reverse.SrcPort
+			revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
+			copy(revFlowWithDIP.Owner_ip[:], dip)
+
+			localConntrackCache[revFlowWithDIP] = true
+		}
 	}
 
 	//Check if the entry is expired..
@@ -254,11 +314,20 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	//Delete entries in conntrack table
 	//TODO use bulk delete
 	for expiredFlow, _ := range expiredList {
-		c.logger.Info("Conntrack cleanup", "Delete - ", expiredFlow)
+		key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
+		c.logger.Info("Conntrack cleanup", "Delete - ", key)
 		ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
+		c.printByteArray(ceByteSlice)
 		c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
 	}
 
 	c.logger.Info("Done cleanup of conntrack map")
 	return
+}
+
+func (c *conntrackClient) printByteArray(byteArray []byte) {
+	for _, b := range byteArray {
+		c.logger.Info("CONNTRACK VAL", "->", b)
+	}
+	c.logger.Info("DONE")
 }

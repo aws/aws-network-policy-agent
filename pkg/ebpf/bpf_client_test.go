@@ -631,18 +631,20 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		testPod types.NamespacedName
-		ingress bool
-		egress  bool
-		wantErr error
+		name          string
+		testPod       types.NamespacedName
+		ingress       bool
+		egress        bool
+		deletePinPath bool
+		wantErr       error
 	}{
 		{
-			name:    "Ingress and Egress Detach",
-			testPod: testPod,
-			ingress: true,
-			egress:  true,
-			wantErr: nil,
+			name:          "Ingress and Egress Detach",
+			testPod:       testPod,
+			ingress:       true,
+			egress:        true,
+			deletePinPath: true,
+			wantErr:       nil,
 		},
 	}
 	for _, tt := range tests {
@@ -664,7 +666,7 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotError := testBpfClient.DetacheBPFProbes(tt.testPod, tt.ingress, tt.egress)
+			gotError := testBpfClient.DetacheBPFProbes(tt.testPod, tt.ingress, tt.egress, tt.deletePinPath)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}

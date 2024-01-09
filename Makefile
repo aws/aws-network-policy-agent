@@ -308,3 +308,8 @@ update-node-agent-image: ## Updates node agent image on an existing cluster. Opt
 update-image-and-test: ## Updates node agent image on existing cluster and runs cyclonus tests. Call with CLUSTER_NAME=<name of the cluster> and AWS_EKS_NODEAGENT=<Image URI> 
 	$(MAKE) update-node-agent-image AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
 	$(MAKE) run-cyclonus-test CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=true
+
+clean: # Clean temporary files and build artifacts from the project
+	@rm -f -- aws-eks-na-cli
+	@rm -f -- aws-eks-na-cli-v6
+	@rm -f -- coverage.txt

@@ -234,8 +234,8 @@ func ensureLogGroupExists(name string) error {
 }
 
 func createLogStream() error {
-	name := uuid.New().String()
 
+	name := "aws-network-policy-agent-audit-" + uuid.New().String()
 	_, err := cwl.CreateLogStream(&cloudwatchlogs.CreateLogStreamInput{
 		LogGroupName:  &logGroupName,
 		LogStreamName: &name,

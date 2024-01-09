@@ -55,7 +55,7 @@ func getEncoder() zapcore.Encoder {
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 
-func (logConfig *Configuration) newZapLogger() *zap.Logger { //Logger {
+func (logConfig *Configuration) newZapLogger(callSkip int) *zap.Logger { //Logger {
 	var cores []zapcore.Core
 
 	logLevel := getZapLevel(logConfig.LogLevel)
@@ -66,9 +66,11 @@ func (logConfig *Configuration) newZapLogger() *zap.Logger { //Logger {
 
 	combinedCore := zapcore.NewTee(cores...)
 
+	// Allow callers to set value for call skip. The value should be 2 by default, but goroutines
+	// set it to 0 or 1 to avoid log stack errors.
 	logger := zap.New(combinedCore,
 		zap.AddCaller(),
-		zap.AddCallerSkip(2),
+		zap.AddCallerSkip(callSkip),
 	)
 	defer logger.Sync()
 
@@ -103,12 +105,12 @@ func getLogWriter(logFilePath string) zapcore.WriteSyncer {
 }
 
 // New logger initializes logger
-func New(logLevel, logLocation string) *zap.Logger {
+func New(logLevel, logLocation string, callSkip int) *zap.Logger {
 	inputLogConfig := &Configuration{
 		LogLevel:    logLevel,
 		LogLocation: logLocation,
 	}
 
-	logger := inputLogConfig.newZapLogger()
+	logger := inputLogConfig.newZapLogger(callSkip)
 	return logger
 }

@@ -152,8 +152,12 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 		req.NamespacedName.Namespace)
 
 	start := time.Now()
+
+	// No need to fill this since we will cleanup all pods
+	podIdentifiers := make(map[string]bool)
+
 	if targetPods, ok := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier); ok {
-		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods.([]types.NamespacedName))
+		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods.([]types.NamespacedName), podIdentifiers)
 		if err != nil {
 			r.log.Info("failed to clean up bpf probes for ", "policy endpoint ", req.NamespacedName.Name)
 			return err
@@ -166,7 +170,7 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 }
 
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,
-	targetPods []types.NamespacedName) error {
+	targetPods []types.NamespacedName, podIdentifiers map[string]bool) error {
 	var err error
 	// 1. If the pods are already deleted, we move on.
 	// 2. If the pods have another policy or policies active against them, we update the maps to purge the entries
@@ -175,7 +179,18 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 	//    corresponding BPF maps. We will also clean up eBPF pin paths under BPF FS.
 	for _, targetPod := range targetPods {
 		r.log.Info("Updating Pod: ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
-		cleanupErr := r.cleanupeBPFProbes(ctx, targetPod, policyEndpointName)
+
+		deletePinPath := true
+		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
+		r.log.Info("Derived ", "Pod identifier to check if update is needed : ", podIdentifier)
+		//Derive the podIdentifier and check if there is another pod in the same replicaset using the pinpath
+		if found, ok := podIdentifiers[podIdentifier]; ok {
+			//podIdentifiers will always have true in the value if found..
+			r.log.Info("PodIdentifier pinpath ", "shared: ", found)
+			deletePinPath = !found
+		}
+
+		cleanupErr := r.cleanupeBPFProbes(ctx, targetPod, policyEndpointName, deletePinPath)
 		if cleanupErr != nil {
 			r.log.Info("Cleanup/Update unsuccessful for Pod ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
 			err = errors.Join(err, cleanupErr)
@@ -196,8 +211,8 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, policyEndpoint)
 
 	// Check if we need to remove this policy against any existing pods against which this policy
-	// is currently active
-	err := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp)
+	// is currently active. podIdentifiers will have the pod identifiers of the targetPods from the derived PEs
+	err := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers)
 	if err != nil {
 		r.log.Error(err, "failed to update policy enforcement status for existing pods")
 		return err
@@ -269,7 +284,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 }
 
 func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targetPod types.NamespacedName,
-	policyEndpoint string) error {
+	policyEndpoint string, deletePinPath bool) error {
 
 	var err error
 	var ingressRules, egressRules []ebpf.EbpfFirewallRules
@@ -300,7 +315,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 		// We only detach probes if there are no policyendpoint resources on both the
 		// directions
 		if noActiveIngressPolicies && noActiveEgressPolicies {
-			err = r.ebpfClient.DetacheBPFProbes(targetPod, noActiveIngressPolicies, noActiveEgressPolicies)
+			err = r.ebpfClient.DetacheBPFProbes(targetPod, noActiveIngressPolicies, noActiveEgressPolicies, deletePinPath)
 			if err != nil {
 				r.log.Info("PolicyEndpoint cleanup unsuccessful", "Name: ", policyEndpoint)
 				return err
@@ -510,6 +525,7 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 			}
 		}
 		if !activePod {
+			r.log.Info("Pod to cleanup: ", "name: ", oldPod.Name, "namespace: ", oldPod.Namespace)
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
 		}
 	}
