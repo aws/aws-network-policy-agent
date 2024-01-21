@@ -744,6 +744,43 @@ func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr str
 	})
 }
 
+func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
+	uniquePorts := make(map[string]v1alpha1.Port)
+	var result []v1alpha1.Port
+	var key string
+
+	for _, p := range ports {
+
+		portKey := 0
+		endPortKey := 0
+
+		if p.Port != nil {
+			portKey = int(*p.Port)
+		}
+
+		if p.EndPort != nil {
+			endPortKey = int(*p.EndPort)
+		}
+		if p.Protocol == nil {
+			key = fmt.Sprintf("%s-%d-%d", "", portKey, endPortKey)
+		} else {
+			key = fmt.Sprintf("%s-%d-%d", *p.Protocol, portKey, endPortKey)
+		}
+
+		if _, ok := uniquePorts[key]; ok {
+			continue
+		} else {
+			uniquePorts[key] = p
+		}
+	}
+
+	for _, port := range uniquePorts {
+		result = append(result, port)
+	}
+
+	return result
+}
+
 func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string]uintptr, error) {
 
 	firewallMap := make(map[string][]byte)
@@ -823,6 +860,12 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			_, firewallMapKey, _ := net.ParseCIDR(string(firewallRule.IPCidr))
 			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 			firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
+
+			if len(firewallRule.L4Info) != 0 {
+				mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
+				firewallRule.L4Info = mergedL4Info
+
+			}
 			firewallValue := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
 			firewallMap[string(firewallKey)] = firewallValue
 		}
@@ -831,6 +874,10 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 				_, mapKey, _ := net.ParseCIDR(string(exceptCIDR))
 				key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
 				l.logger.Info("Parsed Except CIDR", "IP Key: ", mapKey)
+				if len(firewallRule.L4Info) != 0 {
+					mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
+					firewallRule.L4Info = mergedL4Info
+				}
 				value := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, false, true)
 				firewallMap[string(key)] = value
 			}

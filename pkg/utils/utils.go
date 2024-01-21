@@ -164,6 +164,8 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 			return value
 		}
 		endPort = 0
+		startPort = 0
+
 		protocol = deriveProtocolValue(l4Entry, allowAll, denyAll)
 		if l4Entry.Port != nil {
 			startPort = int(*l4Entry.Port)
