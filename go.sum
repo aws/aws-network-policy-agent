@@ -2,8 +2,8 @@ github.com/aws/amazon-vpc-cni-k8s v1.16.0 h1:rDbmXhsjjHjX1S5telGAdPBk2JHjWbbu4vA
 github.com/aws/amazon-vpc-cni-k8s v1.16.0/go.mod h1:kteasCnxkn8p3iolTaZtBHudbeD9GmcrWAfPeKzceys=
 github.com/aws/aws-ebpf-sdk-go v1.0.6 h1:f4f2HKmDEA2hQLd4Sz5jA0YYAFLmgLVnopZIycKcxnA=
 github.com/aws/aws-ebpf-sdk-go v1.0.6/go.mod h1:sZz5xaENDQ1Y/FXjGIMJfVCSmHMB4LG9Bc+8+V1MLTo=
-github.com/aws/aws-sdk-go v1.49.13 h1:f4mGztsgnx2dR9r8FQYa9YW/RsKb+N7bgef4UGrOW1Y=
-github.com/aws/aws-sdk-go v1.49.13/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
+github.com/aws/aws-sdk-go v1.50.8 h1:gY0WoOW+/Wz6XmYSgDH9ge3wnAevYDSQWPxxJvqAkP4=
+github.com/aws/aws-sdk-go v1.50.8/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
 github.com/benbjohnson/clock v1.1.0/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
