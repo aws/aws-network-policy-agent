@@ -8,6 +8,8 @@
 # IP_FAMILY: defaults to IPv4
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
+# DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
+# NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional
 
 set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
@@ -24,6 +26,9 @@ source ${DIR}/lib/tests.sh
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
+: "${PROD_IMAGE_REGISTRY:=""}"
+: "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
+: "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=""}}"
 TEST_FAILED="false"
 
 if [[ ! -z $ENDPOINT ]]; then
@@ -56,12 +61,21 @@ if [[ $SKIP_ADDON_INSTALLATION == "false" ]]; then
     load_addon_details
 
     if [[ ! -z $ADDON_VERSION ]]; then
+        # Install the specified addon version
         install_network_policy_mao $ADDON_VERSION
-    else
+    elif [[ ! -z $LATEST_ADDON_VERSION ]]; then
+        # Install the latest addon version for the k8s version, if available
         install_network_policy_mao $LATEST_ADDON_VERSION
+    else
+        # Fall back to installing the latest version using helm
+        install_network_policy_helm
     fi
 else
     echo "Skipping addons installation. Make sure you have enabled network policy support in your cluster before executing the test"
+fi
+
+if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" ]]; then
+    make deploy-network-policy-controller-on-dataplane NP_CONTROLLER_IMAGE=$PROD_IMAGE_REGISTRY NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE
 fi
 
 run_cyclonus_tests
