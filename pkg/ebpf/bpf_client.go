@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -621,6 +622,12 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
+
+	if strings.Contains(podIdentifier, ".") {
+		l.logger.Info("Pod name cannot contain '.'")
+		return nil, -1, errors.New("Pod name cannot contain '.'")
+	}
+
 	// Load a new instance of the ingres program
 	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)

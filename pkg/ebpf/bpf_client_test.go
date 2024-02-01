@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"errors"
 	"net"
 	"sort"
 	"sync"
@@ -401,6 +402,23 @@ func TestLoadBPFProgram(t *testing.T) {
 
 	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
 	_, _, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-abcd")
+	assert.Equal(t, gotErr, wantErr)
+}
+func TestLoadBPFProgramPodIdentifierContainsPeriod(t *testing.T) {
+	wantErr := errors.New("Pod name cannot contain '.'")
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	testBpfClient := &bpfClient{
+		nodeIP:       "10.1.1.1",
+		logger:       logr.New(&log.NullLogSink{}),
+		enableIPv6:   false,
+		bpfSDKClient: mockBpfClient,
+	}
+
+	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
+	_, _, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-ab.cd")
 	assert.Equal(t, gotErr, wantErr)
 }
 
