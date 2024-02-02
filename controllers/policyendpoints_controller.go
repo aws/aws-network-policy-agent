@@ -153,24 +153,45 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 
 	start := time.Now()
 
-	// No need to fill this since we will cleanup all pods
-	podIdentifiers := make(map[string]bool)
+	// Get all podIdentifiers since we need to decide if pinpath has to be deleted on local node
+	parentNP := utils.GetParentNPNameFromPEName(req.NamespacedName.Name)
+	resourceName := req.NamespacedName.Name
+	resourceNamespace := req.NamespacedName.Namespace
+	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
-	if targetPods, ok := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier); ok {
-		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods.([]types.NamespacedName), podIdentifiers)
+	r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
+
+	r.log.Info("cleanUpPolicyEndpoint: ", "Pods to cleanup - ", len(podsToBeCleanedUp), "and Pods to be updated - ", len(targetPods))
+
+	// targetPods are pods which would need map update
+	if len(targetPods) > 0 {
+		r.log.Info("Updating active pods...")
+		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods, podIdentifiers, false)
+		if err != nil {
+			r.log.Info("failed to update bpf probes for ", "policy endpoint ", req.NamespacedName.Name)
+			return err
+		}
+		duration := msSince(start)
+		policyTearDownLatency.WithLabelValues(req.NamespacedName.Name, req.NamespacedName.Namespace).Observe(duration)
+	}
+
+	// podsToBeCleanedUp - pods which are no longer selected by this policy
+	if len(podsToBeCleanedUp) > 0 {
+		r.log.Info("Cleaning up current policy against below pods..")
+		err := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, podsToBeCleanedUp, podIdentifiers, true)
 		if err != nil {
 			r.log.Info("failed to clean up bpf probes for ", "policy endpoint ", req.NamespacedName.Name)
 			return err
 		}
-		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 		duration := msSince(start)
 		policyTearDownLatency.WithLabelValues(req.NamespacedName.Name, req.NamespacedName.Namespace).Observe(duration)
 	}
+
 	return nil
 }
 
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,
-	targetPods []types.NamespacedName, podIdentifiers map[string]bool) error {
+	targetPods []types.NamespacedName, podIdentifiers map[string]bool, isDeleteFlow bool) error {
 	var err error
 	// 1. If the pods are already deleted, we move on.
 	// 2. If the pods have another policy or policies active against them, we update the maps to purge the entries
@@ -190,7 +211,7 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 			deletePinPath = !found
 		}
 
-		cleanupErr := r.cleanupeBPFProbes(ctx, targetPod, policyEndpointName, deletePinPath)
+		cleanupErr := r.cleanupeBPFProbes(ctx, targetPod, policyEndpointName, deletePinPath, isDeleteFlow)
 		if cleanupErr != nil {
 			r.log.Info("Cleanup/Update unsuccessful for Pod ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
 			err = errors.Join(err, cleanupErr)
@@ -208,11 +229,14 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 
 	// Identify pods local to the node. PolicyEndpoint resource will include `HostIP` field and
 	// network policy agent relies on it to filter local pods
-	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, policyEndpoint)
+	parentNP := policyEndpoint.Spec.PolicyRef.Name
+	resourceNamespace := policyEndpoint.Namespace
+	resourceName := policyEndpoint.Name
+	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
 	// Check if we need to remove this policy against any existing pods against which this policy
 	// is currently active. podIdentifiers will have the pod identifiers of the targetPods from the derived PEs
-	err := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers)
+	err := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers, false)
 	if err != nil {
 		r.log.Error(err, "failed to update policy enforcement status for existing pods")
 		return err
@@ -284,7 +308,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 }
 
 func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targetPod types.NamespacedName,
-	policyEndpoint string, deletePinPath bool) error {
+	policyEndpoint string, deletePinPath, isDeleteFlow bool) error {
 
 	var err error
 	var ingressRules, egressRules []ebpf.EbpfFirewallRules
@@ -299,7 +323,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
 	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
-			policyEndpoint, true)
+			policyEndpoint, isDeleteFlow)
 		if err != nil {
 			r.log.Error(err, "Error Parsing policy Endpoint resource", "name ", policyEndpoint)
 			return err
@@ -442,20 +466,38 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdent
 }
 
 func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
-	var targetPods, podsToBeCleanedUp []types.NamespacedName
+	parentNP, resourceNamespace, resourceName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
+	var targetPods, podsToBeCleanedUp, currentPods []types.NamespacedName
 	podIdentifiers := make(map[string]bool)
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
-	r.log.Info("Parent NP resource:", "Name: ", policyEndpoint.Spec.PolicyRef.Name)
-	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, policyEndpoint.Spec.PolicyRef.Name, policyEndpoint.Namespace)
+	r.log.Info("Parent NP resource:", "Name: ", parentNP)
+	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
 	r.log.Info("Total PEs for Parent NP:", "Count: ", len(parentPEList))
+
+	policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(resourceName,
+		resourceNamespace)
+	// Gather the current set of pods (local to the node) that are configured with this policy rules.
+	existingPods, podsPresent := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier)
+	if podsPresent {
+		existingPodsSlice := existingPods.([]types.NamespacedName)
+		for _, pods := range existingPodsSlice {
+			currentPods = append(currentPods, pods)
+			r.log.Info("Current pods for this slice : ", "Pod name", pods.Name, "Pod namespace", pods.Namespace)
+		}
+	}
+
+	if len(parentPEList) == 0 {
+		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
+		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
+		r.log.Info("No PEs left: ", "number of pods to cleanup - ", len(podsToBeCleanedUp))
+	}
 
 	for _, policyEndpointResource := range parentPEList {
 		r.log.Info("Derive PE Object ", "Name ", policyEndpointResource)
 		peNamespacedName := types.NamespacedName{
 			Name:      policyEndpointResource,
-			Namespace: policyEndpoint.Namespace,
+			Namespace: resourceNamespace,
 		}
 		if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -463,12 +505,29 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			}
 		}
 		r.log.Info("Processing PE ", "Name ", policyEndpointResource)
-		currentTargetPods, currentPodIdentifiers, currentPodsToBeCleanedUp := r.deriveTargetPods(ctx, currentPE, parentPEList)
+		currentTargetPods, currentPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
+		r.log.Info("Adding to current targetPods", "Total pods: ", len(currentTargetPods))
 		targetPods = append(targetPods, currentTargetPods...)
-		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPodsToBeCleanedUp...)
 		for podIdentifier, _ := range currentPodIdentifiers {
 			podIdentifiers[podIdentifier] = true
 		}
+	}
+
+	for _, policyEndpointResource := range parentPEList {
+		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource,
+			resourceNamespace)
+		if len(targetPods) > 0 {
+			r.log.Info("Update target pods for PE Object ", "Name ", policyEndpointResource, " with Total pods: ", len(targetPods))
+			r.policyEndpointSelectorMap.Store(policyEndpointIdentifier, targetPods)
+		} else {
+			r.log.Info("No more target pods so deleting the entry in PE selector map for ", "Name ", policyEndpointResource)
+			r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
+		}
+
+	}
+
+	if len(currentPods) > 0 {
+		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods)
 	}
 	return targetPods, podIdentifiers, podsToBeCleanedUp
 }
@@ -477,15 +536,10 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 // Function returns list of target pods along with their unique identifiers. It also
 // captures list of (any) existing pods against which this policy is no longer active.
 func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool,
-	[]types.NamespacedName) {
-	var targetPods, podsToBeCleanedUp []types.NamespacedName
+	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool) {
+	var targetPods []types.NamespacedName
 	podIdentifiers := make(map[string]bool)
 
-	policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpoint.Name,
-		policyEndpoint.Namespace)
-	// Gather the current set of pods (local to the node) that are configured with this policy rules.
-	currentPods, podsPresent := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier)
 	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
 	// by the Host IP value.
 	nodeIP := net.ParseIP(r.nodeIP)
@@ -500,16 +554,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 		}
 	}
 
-	if podsPresent && len(currentPods.([]types.NamespacedName)) > 0 {
-		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods.([]types.NamespacedName), targetPods)
-	}
-
-	if len(targetPods) > 0 {
-		r.policyEndpointSelectorMap.Store(policyEndpointIdentifier, targetPods)
-	} else {
-		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
-	}
-	return targetPods, podIdentifiers, podsToBeCleanedUp
+	return targetPods, podIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.NamespacedName,

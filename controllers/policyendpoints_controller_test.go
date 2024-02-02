@@ -496,12 +496,6 @@ func TestDeriveTargetPods(t *testing.T) {
 						Namespace: "bar",
 					},
 				},
-				podsToBeCleanedUp: []types.NamespacedName{
-					{
-						Name:      "foo1",
-						Namespace: "bar",
-					},
-				},
 			},
 		},
 		{
@@ -540,10 +534,9 @@ func TestDeriveTargetPods(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotActivePods, _, gotPodsToBeCleanedUp := policyEndpointReconciler.deriveTargetPods(context.Background(),
+			gotActivePods, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
 				&tt.policyendpoint, tt.parentPEList)
 			assert.Equal(t, tt.want.activePods, gotActivePods)
-			assert.Equal(t, tt.want.podsToBeCleanedUp, gotPodsToBeCleanedUp)
 		})
 	}
 }

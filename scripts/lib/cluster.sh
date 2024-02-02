@@ -8,12 +8,18 @@ function load_default_values(){
     NODEGROUP_TYPE="${NODEGROUP_TYPE:=linux}"
     NODES_CAPACITY="${NODES_CAPACITY:=3}"
     INSTANCE_TYPE="${INSTANCE_TYPE:=t3.large}"
-    K8S_VERSION="${K8S_VERSION:=1.27}"
+    K8S_VERSION="${K8S_VERSION:=""}"
     IP_FAMILY="${IP_FAMILY:=IPv4}"
     CW_NAMESPACE="${CW_NAMESPACE:=amazon-cloudwatch}"
     CW_POLICY_ARN="${CW_POLICY_ARN:=arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy}"
     ENDPOINT_FLAG="${ENDPOINT_FLAG:=""}"
     HELM_EXTRA_ARGS="${HELM_EXTRA_ARGS:=""}"
+
+    # If Kubernetes version is not passed then use the latest available version
+    if [[ -z $K8S_VERSION ]]; then
+        K8S_VERSION=$(eksctl version -o json | jq -r '.EKSServerSupportedVersions | sort | reverse | .[0]')
+    fi
+
 }
 
 function create_cluster(){
@@ -60,6 +66,6 @@ EOF
 
 function delete_cluster(){
 
-    eksctl delete cluster -f ./eks-cluster.yaml || echo "Cluster Delete failed"
+    eksctl delete cluster -f ./eks-cluster.yaml --disable-nodegroup-eviction || echo "Cluster Delete failed"
     rm -rf ./eks-cluster.yaml || echo "Cluster config file not found"
 }

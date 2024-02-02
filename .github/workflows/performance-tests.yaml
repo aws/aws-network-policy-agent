@@ -52,7 +52,6 @@ jobs:
       - name: Run performance tests
         env:
           RUN_PERFORMANCE_TESTS: true
-          K8S_VERSION: 1.27
           NODES_CAPACITY: 3
           INSTANCE_TYPE: c5.xlarge
           IP_FAMILY: ${{ matrix.ip-family }}
