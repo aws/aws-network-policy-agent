@@ -3,7 +3,7 @@ function load_addon_details() {
 
   ADDON_NAME="vpc-cni"
   echo "loading $ADDON_NAME addon details"
-  LATEST_ADDON_VERSION=$(aws eks describe-addon-versions $ENDPOINT_FLAG --addon-name $ADDON_NAME --kubernetes-version $K8S_VERSION | jq '.addons[0].addonVersions[0].addonVersion' -r)
+  LATEST_ADDON_VERSION=$(aws eks describe-addon-versions $ENDPOINT_FLAG --addon-name $ADDON_NAME --kubernetes-version $K8S_VERSION --region $REGION | jq '.addons[0].addonVersions[0].addonVersion' -r)
   get_service_account_role_arn
 }
 

@@ -107,6 +107,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 
 			localConntrackCache[revFlowWithDIP] = true
 		}
+
 	}
 
 	//Check if the entry is expired..
@@ -256,6 +257,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 
 			localConntrackCache[revFlowWithDIP] = true
 		}
+
 	}
 
 	//Check if the entry is expired..
