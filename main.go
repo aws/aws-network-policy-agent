@@ -19,6 +19,8 @@ package main
 import (
 	"os"
 
+	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
 	"github.com/go-logr/logr"
@@ -106,12 +108,14 @@ func main() {
 	}
 
 	go metrics.ServeMetrics()
+	go rpc.RunRPCHandler(policyEndpointController)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
 }
 
 // loadControllerConfig loads the controller configuration

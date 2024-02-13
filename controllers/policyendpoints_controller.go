@@ -94,7 +94,6 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 		// Start prometheus
 		prometheusRegister()
 	}
-
 	return r, err
 }
 
@@ -544,16 +543,15 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 	// by the Host IP value.
 	nodeIP := net.ParseIP(r.nodeIP)
 	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
+		podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			r.log.Info("Found a matching Pod: ", "name: ", pod.Name, "namespace: ", pod.Namespace)
 			targetPods = append(targetPods, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace})
-			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 			podIdentifiers[podIdentifier] = true
 			r.log.Info("Derived ", "Pod identifier: ", podIdentifier)
-			r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList)
 		}
+		r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList)
 	}
-
 	return targetPods, podIdentifiers
 }
 
@@ -664,4 +662,44 @@ func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.
 		}
 	}
 	return parentPolicyEndpointList
+}
+
+func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
+	return r.ebpfClient
+}
+
+func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]ebpf.EbpfFirewallRules,
+	[]ebpf.EbpfFirewallRules, error) {
+
+	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(context.Background(), podIdentifier,
+		podNamespace, "", false)
+	if err != nil {
+		r.log.Error(err, "Error deriving firewall rules")
+		return ingressRules, egressRules, nil
+	}
+
+	if len(ingressRules) == 0 && !isIngressIsolated {
+		// No active ingress rules for this pod, but we only should land here
+		// if there are active egress rules. So, we need to add an allow-all entry to ingress rule set
+		r.log.Info("No Ingress rules and no ingress isolation - Appending catch all entry")
+		r.addCatchAllEntry(context.Background(), &ingressRules)
+	}
+
+	if len(egressRules) == 0 && !isEgressIsolated {
+		// No active egress rules for this pod but we only should land here
+		// if there are active ingress rules. So, we need to add an allow-all entry to egress rule set
+		r.log.Info("No Egress rules and no egress isolation - Appending catch all entry")
+		r.addCatchAllEntry(context.Background(), &egressRules)
+	}
+
+	return ingressRules, egressRules, nil
+}
+
+func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {
+	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		if len(policyEndpointList.([]string)) > 0 {
+			return true
+		}
+	}
+	return false
 }
