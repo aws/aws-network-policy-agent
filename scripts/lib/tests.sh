@@ -28,6 +28,7 @@ spec:
             - ./cyclonus
             - generate
             - --retries=2
+            - --verbosity=debug
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
