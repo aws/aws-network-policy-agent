@@ -27,7 +27,7 @@ spec:
           command:
             - ./cyclonus
             - generate
-            - --cleanup-namespaces=true
+            - --retries=2
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
@@ -41,12 +41,14 @@ function run_cyclonus_tests(){
     generate_manifest_and_apply
 
     echo "Executing cyclonus suite"
-    kubectl wait --for=condition=complete --timeout=240m -n netpol job.batch/cyclonus || echo "Job timed out after 4 hrs"
+    kubectl wait --for=condition=complete --timeout=300m -n netpol job.batch/cyclonus || echo "Job timed out after 4 hrs"
     kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
+
+    kubectl get pods -A -owide
 
     # Cleanup after test finishes
     kubectl delete clusterrolebinding cyclonus
-    kubectl delete ns netpol
+    kubectl delete ns netpol x y z
 
     cat ${DIR}/results.log
 
