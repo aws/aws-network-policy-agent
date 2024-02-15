@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM public.ecr.aws/eks-distro-build-tooling/golang:1.21.5-6-gcc-al2 as builder
+FROM public.ecr.aws/eks-distro-build-tooling/golang:1.21.7-8-gcc-al2 as builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -41,12 +41,8 @@ COPY . ./
 COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h ./pkg/ebpf/c/
 RUN make build-bpf
 
-FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-base:latest.2
-RUN yum update -y && \
-    yum install -y iptables iproute jq && \
-    yum install -y llvm clang make gcc && \
-    yum install -y coreutils kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel && \
-    yum clean all
+# Container base image
+FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-glibc:latest.2
 
 WORKDIR /
 COPY --from=builder /workspace/controller .
