@@ -698,6 +698,7 @@ func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdent
 func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		if len(policyEndpointList.([]string)) > 0 {
+			r.log.Info("Active policies available against", "podIdentifier", podIdentifier)
 			return true
 		}
 	}

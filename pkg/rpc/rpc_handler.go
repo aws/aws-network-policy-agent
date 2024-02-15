@@ -62,26 +62,24 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 	// node agent will have the policy information available to it. If not, we will leave the pod in default deny state
 	// until the Network Policy controller reconciles existing policies against this pod.
 
-	if s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier) {
-		// Check if there are other pods on the local node that share the eBPF firewall maps with the newly launched pod,
-		// if already present we can skip the map update and return
-		s.log.Info("Active policies present against this pod. Configuring....")
-		if isMapUpdateRequired {
-			// If we're here, then the local agent knows the list of active policies that apply to this pod and
-			// this is the first pod of it's type to land on the local node
+	// Check if there are active policies against the new pod and if there are other pods on the local node that share
+	// the eBPF firewall maps with the newly launched pod, if already present we can skip the map update and return
+	if s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier) && isMapUpdateRequired {
+		// If we're here, then the local agent knows the list of active policies that apply to this pod and
+		// this is the first pod of it's type to land on the local node/cluster
+		s.log.Info("Active policies present against this pod and this is a new Pod to the local node, configuring firewall rules....")
 
-			//Derive Ingress and Egress Firewall Rules and Update the relevant eBPF maps
-			ingressRules, egressRules, _ :=
-				s.policyReconciler.DeriveFireWallRulesPerPodIdentifier(podIdentifier, in.K8S_POD_NAMESPACE)
+		//Derive Ingress and Egress Firewall Rules and Update the relevant eBPF maps
+		ingressRules, egressRules, _ :=
+			s.policyReconciler.DeriveFireWallRulesPerPodIdentifier(podIdentifier, in.K8S_POD_NAMESPACE)
 
-			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
-			if err != nil {
-				s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
-				return nil, err
-			}
-		} else {
-			s.log.Info("Pod shares the eBPF firewall maps with other local pods. No Map update required..")
+		err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
+		if err != nil {
+			s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
+			return nil, err
 		}
+	} else {
+		s.log.Info("Pod either has no active policies or shares the eBPF firewall maps with other local pods. No Map update required..")
 	}
 
 	resp := rpc.EnforceNpReply{
@@ -91,7 +89,6 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 }
 
 // RunRPCHandler handles request from gRPC
-// func RunRPCHandler(ebpfClient ebpf.BpfClient) error {
 func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) error {
 	rpcLog := ctrl.Log.WithName("rpc-handler")
 
