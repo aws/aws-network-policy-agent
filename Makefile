@@ -309,6 +309,13 @@ update-image-and-test: ## Updates node agent image on existing cluster and runs 
 	$(MAKE) update-node-agent-image AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
 	$(MAKE) run-cyclonus-test CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=true
 
+./PHONY: deploy-network-policy-controller-on-dataplane
+deploy-network-policy-controller-on-dataplane: ## This uses the script from amazon-network-policy-controller-k8s repository to install the controller on dataplane nodes
+	@if [ ! -d ./amazon-network-policy-controller-k8s ]; then \
+		git clone https://github.com/aws/amazon-network-policy-controller-k8s.git; \
+	fi
+	./amazon-network-policy-controller-k8s/scripts/deploy-controller-on-dataplane.sh NP_CONTROLLER_IMAGE=$(NP_CONTROLLER_IMAGE) NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=$(NP_CONTROLLER_ENDPOINT_CHUNK_SIZE)
+
 clean: # Clean temporary files and build artifacts from the project
 	@rm -f -- aws-eks-na-cli
 	@rm -f -- aws-eks-na-cli-v6
