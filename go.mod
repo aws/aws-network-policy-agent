@@ -4,8 +4,8 @@ go 1.21
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.16.2
-	github.com/aws/aws-ebpf-sdk-go v1.0.6
-	github.com/aws/aws-sdk-go v1.49.13
+	github.com/aws/aws-ebpf-sdk-go v1.0.7
+	github.com/aws/aws-sdk-go v1.50.9
 	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.2.4
 	github.com/golang/mock v1.6.0
@@ -18,11 +18,11 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	go.uber.org/zap v1.26.0
-	golang.org/x/sys v0.15.0
+	golang.org/x/sys v0.16.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-	k8s.io/api v0.29.0
-	k8s.io/apimachinery v0.29.0
-	k8s.io/client-go v0.29.0
+	k8s.io/api v0.29.1
+	k8s.io/apimachinery v0.29.1
+	k8s.io/client-go v0.29.1
 	sigs.k8s.io/controller-runtime v0.16.3
 )
 
@@ -63,7 +63,6 @@ require (
 	golang.org/x/term v0.15.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
-	golang.org/x/tools v0.16.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect

@@ -777,3 +777,62 @@ func TestRecoverBPFState(t *testing.T) {
 	}
 
 }
+
+func TestMergeDuplicateL4Info(t *testing.T) {
+	type mergeDuplicatePortsTestCase struct {
+		Name     string
+		Ports    []v1alpha1.Port
+		Expected []v1alpha1.Port
+	}
+	protocolTCP := corev1.ProtocolTCP
+	protocolUDP := corev1.ProtocolUDP
+
+	testCases := []mergeDuplicatePortsTestCase{
+		{
+			Name: "Merge Duplicate Ports with nil Protocol",
+			Ports: []v1alpha1.Port{
+				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
+				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
+				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
+				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
+				{Protocol: &protocolTCP, Port: Int32Ptr(8081), EndPort: Int32Ptr(8081)},
+			},
+			Expected: []v1alpha1.Port{
+				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
+				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
+				{Protocol: &protocolTCP, Port: Int32Ptr(8081), EndPort: Int32Ptr(8081)},
+			},
+		},
+		{
+			Name: "Merge Duplicate Ports with nil EndPort",
+			Ports: []v1alpha1.Port{
+				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
+				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
+			},
+			Expected: []v1alpha1.Port{
+				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
+			},
+		},
+		{
+			Name: "Merge Duplicate Ports with nil Port",
+			Ports: []v1alpha1.Port{
+				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
+				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
+			},
+			Expected: []v1alpha1.Port{
+				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			mergedPorts := mergeDuplicateL4Info(tc.Ports)
+			assert.Equal(t, len(tc.Expected), len(mergedPorts))
+		})
+	}
+}
+
+func Int32Ptr(i int32) *int32 {
+	return &i
+}
