@@ -38,7 +38,6 @@ const (
 
 // server controls RPC service responses.
 type server struct {
-	//ebpfClient ebpf.BpfClient
 	policyReconciler *controllers.PolicyEndpointsReconciler
 	log              logr.Logger
 }
