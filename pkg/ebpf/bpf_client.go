@@ -89,6 +89,7 @@ type BpfClient interface {
 	DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
+	IsMapUpdateRequired(podIdentifier string) bool
 }
 
 type EvProgram struct {
@@ -699,6 +700,15 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 		egress = true
 	}
 	return ingress, egress
+}
+
+func (l *bpfClient) IsMapUpdateRequired(podIdentifier string) bool {
+	mapUpdateRequired := false
+	if _, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
+		l.logger.Info("No map instance found")
+		mapUpdateRequired = true
+	}
+	return mapUpdateRequired
 }
 
 func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []EbpfFirewallRules) error {
