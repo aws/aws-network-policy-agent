@@ -27,7 +27,7 @@ spec:
           command:
             - ./cyclonus
             - generate
-            - --retries=2
+            - --retries=0
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
