@@ -110,8 +110,7 @@ if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
     install_network_policy_helm
 
-    kubectl -n kube-system patch daemonset aws-node \
-        --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/1/args/-", "value": "--enable-mode=\"strict\""}]'
+    kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
 
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
