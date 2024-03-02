@@ -5,7 +5,7 @@ go 1.21
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.12.1-0.20240206190757-c7ed274bef5f
 	github.com/aws/aws-ebpf-sdk-go v1.0.7
-	github.com/aws/aws-sdk-go v1.50.9
+	github.com/aws/aws-sdk-go v1.50.30
 	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.3.0
 	github.com/golang/mock v1.6.0
