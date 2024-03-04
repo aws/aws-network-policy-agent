@@ -5,28 +5,28 @@ go 1.21
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.12.1-0.20240206190757-c7ed274bef5f
 	github.com/aws/aws-ebpf-sdk-go v1.0.7
-	github.com/aws/aws-sdk-go v1.50.9
+	github.com/aws/aws-sdk-go v1.50.30
 	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.3.0
 	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.6.0
-	github.com/google/uuid v1.4.0
+	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.15.0
 	github.com/onsi/gomega v1.31.1
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.18.0
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.9.0
 	github.com/vishvananda/netlink v1.2.1-beta.2
-	go.uber.org/zap v1.26.0
+	go.uber.org/zap v1.27.0
 	golang.org/x/sys v0.16.0
 	google.golang.org/grpc v1.61.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.29.1
 	k8s.io/apimachinery v0.29.1
 	k8s.io/client-go v0.29.1
-	sigs.k8s.io/controller-runtime v0.17.0
+	sigs.k8s.io/controller-runtime v0.17.2
 )
 
 require (
