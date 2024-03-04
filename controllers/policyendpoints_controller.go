@@ -189,7 +189,7 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	}
 
 	for _, podToBeCleanedUp := range podsToBeCleanedUp {
-		podIdentifier := utils.GetPodIdentifier(podToBeCleanedUp.Name, podToBeCleanedUp.Namespace)
+		podIdentifier := utils.GetPodIdentifier(podToBeCleanedUp.Name, podToBeCleanedUp.Namespace, r.log)
 		//Delete this policyendpoint resource against the current PodIdentifier
 		r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, req.NamespacedName.Name)
 	}
@@ -209,7 +209,7 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 		r.log.Info("Updating Pod: ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
 
 		deletePinPath := true
-		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
+		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace, r.log)
 		r.log.Info("Derived ", "Pod identifier to check if update is needed : ", podIdentifier)
 		//Derive the podIdentifier and check if there is another pod in the same replicaset using the pinpath
 		if found, ok := podIdentifiers[podIdentifier]; ok {
@@ -289,7 +289,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 	for _, pod := range targetPods {
 		r.log.Info("Processing Pod: ", "name:", pod.Name, "namespace:", pod.Namespace, "podIdentifier: ", podIdentifier)
 
-		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, r.log)
 		if currentPodIdentifier != podIdentifier {
 			r.log.Info("Target Pod doesn't belong to the current pod Identifier: ", "Name: ", pod.Name, "Pod ID: ", podIdentifier)
 			continue
@@ -322,7 +322,7 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	var isIngressIsolated, isEgressIsolated bool
 	noActiveIngressPolicies, noActiveEgressPolicies := false, false
 
-	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace, r.log)
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
@@ -559,7 +559,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 	// by the Host IP value.
 	nodeIP := net.ParseIP(r.nodeIP)
 	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
-		podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+		podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, r.log)
 		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			r.log.Info("Found a matching Pod: ", "name: ", pod.Name, "namespace: ", pod.Namespace)
 			targetPods = append(targetPods, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace})
@@ -577,7 +577,7 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 
 	for _, oldPod := range oldPodSet {
 		activePod := false
-		oldPodIdentifier := utils.GetPodIdentifier(oldPod.Name, oldPod.Namespace)
+		oldPodIdentifier := utils.GetPodIdentifier(oldPod.Name, oldPod.Namespace, r.log)
 		for _, newPod := range newPodSet {
 			if oldPod == newPod {
 				activePod = true

@@ -576,7 +576,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		{
 			name:          "Ingress and Egress Attach - Existing probes",
 			testPod:       testPod,
-			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
+			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace, logr.New(&log.NullLogSink{})),
 			ingress:       true,
 			egress:        true,
 			wantErr:       nil,
