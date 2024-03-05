@@ -3,11 +3,16 @@
 IMAGE ?= amazon/aws-network-policy-agent
 VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME = $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
+GOLANG_VERSION ?= $(shell cat .go-version)
+GOLANG_IMAGE ?= public.ecr.aws/eks-distro-build-tooling/golang:$(GOLANG_VERSION)-gcc-al2
 # TEST_IMAGE is the testing environment container image.
 TEST_IMAGE = aws-network-policy-agent-test
 TEST_IMAGE_NAME = $(TEST_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
+MAKEFILE_PATH = $(dir $(realpath -s $(firstword $(MAKEFILE_LIST))))
 
 export GOPROXY = direct
+export GOSUMDB = sum.golang.org
+export GOTOOLCHAIN = go$(GOLANG_VERSION)
 
 # aws-ebpf-sdk-go override in case we need to build against a custom version
 EBPF_SDK_OVERRIDE ?= "n"
@@ -155,18 +160,19 @@ build-bpf: ## Build BPF.
 #docker-build: test ## Build docker image with the manager.
 #	docker build -t ${IMAGE_NAME} .
 docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
-	docker build -t ${IMAGE_NAME} .
+	docker build -t ${IMAGE_NAME} --build-arg golang_image="$(GOLANG_IMAGE)" .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push ${IMAGE_NAME}
 
-##@ Build and Run Unit Tests 
+##@ Build and Run Unit Tests
 # Build the unit test driver container image.
 build-docker-test:     ## Build the unit test driver container image.
 	docker build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
 		-f Dockerfile.test \
 		-t $(TEST_IMAGE_NAME) \
+		--build-arg golang_image="$(GOLANG_IMAGE)" \
 		.
 
 # Run unit tests inside of the testing container image.
@@ -174,7 +180,7 @@ docker-unit-tests: build-docker-test     ## Run unit tests inside of the testing
 	docker run $(DOCKER_RUN_ARGS) \
 		$(TEST_IMAGE_NAME) \
 		make test
- 
+
 
 # PLATFORMS defines the target platforms for  the manager image be build to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -194,6 +200,7 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 		--platform "$(PLATFORMS)"\
 		--cache-from=type=gha \
 		--cache-to=type=gha,mode=max \
+		--build-arg golang_image="$(GOLANG_IMAGE)" \
 		.
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
@@ -208,6 +215,7 @@ multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker imag
 		--cache-from=type=gha \
 		--cache-to=type=gha,mode=max \
 		-t $(IMAGE):$(VERSION) \
+		--build-arg golang_image="$(GOLANG_IMAGE)" \
 		--push \
 		.
 
@@ -305,7 +313,7 @@ update-node-agent-image: ## Updates node agent image on an existing cluster. Opt
 	./scripts/update-node-agent-image.sh AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT) IP_FAMILY=$(IP_FAMILY)
 
 ./PHONY: update-image-and-test
-update-image-and-test: ## Updates node agent image on existing cluster and runs cyclonus tests. Call with CLUSTER_NAME=<name of the cluster> and AWS_EKS_NODEAGENT=<Image URI> 
+update-image-and-test: ## Updates node agent image on existing cluster and runs cyclonus tests. Call with CLUSTER_NAME=<name of the cluster> and AWS_EKS_NODEAGENT=<Image URI>
 	$(MAKE) update-node-agent-image AWS_EKS_NODEAGENT=$(AWS_EKS_NODEAGENT)
 	$(MAKE) run-cyclonus-test CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=true
 
@@ -320,3 +328,8 @@ clean: # Clean temporary files and build artifacts from the project
 	@rm -f -- aws-eks-na-cli
 	@rm -f -- aws-eks-na-cli-v6
 	@rm -f -- coverage.txt
+
+build-test-binaries: # Builds the test suite binaries
+	mkdir -p ${MAKEFILE_PATH}test/build
+	find ${MAKEFILE_PATH}test -name '*suite_test.go' -type f  | xargs dirname  | xargs ginkgo build
+	find ${MAKEFILE_PATH}test -name "*.test" -print0 | xargs -0 -I {} mv {} ${MAKEFILE_PATH}test/build
