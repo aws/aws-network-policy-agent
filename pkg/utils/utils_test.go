@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestComputeTrieKey(t *testing.T) {
@@ -384,7 +386,35 @@ func TestGetPodIdentifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestGetDotPodIdentifier(t *testing.T) {
+	type args struct {
+		podName      string
+		podNamespace string
+	}
+
+	tests := []struct {
+		name string
+		args args
+		want string
+	}{
+		{
+			name: "Valid pod name and namespace",
+			args: args{
+				podName:      "my.pod.name-udp-748dc8d996-fb8b2",
+				podNamespace: "default",
+			},
+			want: "my_pod_name-udp-748dc8d996-default",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
 			assert.Equal(t, tt.want, got)
 		})
 	}
