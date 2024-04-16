@@ -16,6 +16,7 @@
 
 set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
+GINKGO_TEST_BUILD_DIR="$DIR/../test/build"
 
 source ${DIR}/lib/cleanup.sh
 source ${DIR}/lib/network-policy.sh
@@ -27,15 +28,14 @@ source ${DIR}/lib/tests.sh
 : "${IP_FAMILY:="IPv4"}"
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
+: "${SKIP_MAKE_TEST_BINARIES:="false"}"
 : "${ENABLE_STRICT_MODE:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
 : "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=""}}"
-: "${AWS_EKS_NODEAGENT:=""}"
-: "${AWS_CNI_IMAGE:=""}"
-: "${AWS_CNI_INIT_IMAGE:=""}"
+: "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
 
@@ -92,33 +92,20 @@ check_path_cleanup
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
-    echo "Running strict mode tests"
-    if [[ ! -z $AWS_EKS_NODEAGENT ]]; then
-        echo "Replacing Node Agent Image in aws-vpc-cni helm chart with $AWS_EKS_NODEAGENT"
-        HELM_EXTRA_ARGS+=" --set nodeAgent.image.override=$AWS_EKS_NODEAGENT"  
+    if [[ $SKIP_MAKE_TEST_BINARIES == "false" ]]; then
+        echo "Making ginkgo test binaries"
+        (cd $DIR/../ && make build-test-binaries)
+    else
+        echo "Skipping making ginkgo test binaries"
     fi
 
-    if [[ ! -z $AWS_CNI_IMAGE ]]; then
-        echo "Replacing CNI Image in aws-vpc-cni helm chart with $AWS_CNI_IMAGE"
-        HELM_EXTRA_ARGS+=" --set image.override=$AWS_CNI_IMAGE"  
-    fi
-
-    if [[ ! -z $AWS_CNI_INIT_IMAGE ]]; then
-        echo "Replacing CNI Init Image in aws-vpc-cni helm chart with $AWS_CNI_INIT_IMAGE"
-        HELM_EXTRA_ARGS+=" --set init.image.override=$AWS_CNI_INIT_IMAGE"
-    fi
-
-    install_network_policy_helm
-
-    kubectl -n kube-system patch daemonset aws-node \
-        --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/1/args/-", "value": "--enable-mode=\"strict\""}]'
+    echo "Enable network policy strict mode"
+    kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
 
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 
-    pushd ${DIR}/../test/integration/strict
-        CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending -- --cluster-kubeconfig="$KUBECONFIG" --cluster-name="$CLUSTER_NAME" --test-image-registry=$TEST_IMAGE_REGISTRY || TEST_FAILED="true"
-    popd
+    CGO_ENABLED=0 ginkgo -v -timeout 15m $GINKGO_TEST_BUILD_DIR/strict.test --no-color --fail-on-pending -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
 
 fi
 

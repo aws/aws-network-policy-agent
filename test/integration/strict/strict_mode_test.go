@@ -116,6 +116,10 @@ var _ = Describe("Strict Mode Test Cases", func() {
 					AddEgressRule(egressPeer).
 					Build()
 
+				if fw.Options.IpFamily == "IPv6" {
+					serverPodIP = fmt.Sprintf("[%s]", serverPodIP)
+				}
+
 				err := fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, clientNetworkPolicy)
 				Expect(err).ToNot(HaveOccurred())
 
