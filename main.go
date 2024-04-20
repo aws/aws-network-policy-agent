@@ -133,6 +133,6 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 
 // getLoggerWithLogLevel returns logger with specific log level.
 func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
-	ctrlLogger := logger.New(logLevel, logFilePath, 2)
+	ctrlLogger := logger.New(logLevel, logFilePath)
 	return zapr.NewLogger(ctrlLogger), nil
 }
