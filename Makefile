@@ -124,8 +124,10 @@ EBPF_OBJ_CORE_HEADERS = $(shell find pkg/ebpf/c -name *.h)
 EBPF_OBJ_SRC = ./pkg/ebpf/c/xdpdrop.bpf.c
 EBPF_OBJ_SRC_TC = ./pkg/ebpf/c/tc.bpf.c
 
+VMLINUX ?= /sys/kernel/btf/vmlinux
+
 vmlinuxh:
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(abspath ./$(EBPF_DIR))/vmlinux.h
+	bpftool btf dump file $(VMLINUX) format c > $(abspath ./$(EBPF_DIR))/vmlinux.h
 
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/g; s/aarch64/arm64/g')
 
