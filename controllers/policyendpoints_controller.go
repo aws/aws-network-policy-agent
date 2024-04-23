@@ -176,12 +176,6 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 		policyTearDownLatency.WithLabelValues(req.NamespacedName.Name, req.NamespacedName.Namespace).Observe(duration)
 	}
 
-	for _, targetPod := range targetPods {
-		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
-		//Delete this policyendpoint resource against the current PodIdentifier
-		r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, req.NamespacedName.Name)
-	}
-
 	// podsToBeCleanedUp - pods which are no longer selected by this policy
 	if len(podsToBeCleanedUp) > 0 {
 		r.log.Info("Cleaning up current policy against below pods..")
@@ -550,7 +544,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
 
 	if len(currentPods) > 0 {
-		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods)
+		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods, podIdentifiers)
 	}
 	return targetPods, podIdentifiers, podsToBeCleanedUp
 }
@@ -580,22 +574,24 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 }
 
 func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.NamespacedName,
-	newPodSet []types.NamespacedName) []types.NamespacedName {
+	newPodSet []types.NamespacedName, podIdentifiers map[string]bool) []types.NamespacedName {
 	var podsToBeCleanedUp []types.NamespacedName
 
 	for _, oldPod := range oldPodSet {
 		activePod := false
+		oldPodIdentifier := utils.GetPodIdentifier(oldPod.Name, oldPod.Namespace)
 		for _, newPod := range newPodSet {
 			if oldPod == newPod {
 				activePod = true
 				break
 			}
 		}
-		if !activePod {
+		if !activePod && !podIdentifiers[oldPodIdentifier] {
 			r.log.Info("Pod to cleanup: ", "name: ", oldPod.Name, "namespace: ", oldPod.Namespace)
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
 		}
 	}
+
 	return podsToBeCleanedUp
 }
 
