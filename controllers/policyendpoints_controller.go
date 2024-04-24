@@ -323,8 +323,6 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	noActiveIngressPolicies, noActiveEgressPolicies := false, false
 
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
-	// Delete this policyendpoint resource against the current PodIdentifier
-	//r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpoint)
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
