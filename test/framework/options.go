@@ -21,6 +21,7 @@ type Options struct {
 	NgNameLabelVal    string
 	EKSEndpoint       string
 	TestImageRegistry string
+	IpFamily          string
 }
 
 func (options *Options) BindFlags() {
@@ -31,6 +32,7 @@ func (options *Options) BindFlags() {
 	flag.StringVar(&options.NgNameLabelVal, "ng-name-label-val", "", "label value with the nodegroup name")
 	flag.StringVar(&options.EKSEndpoint, "eks-endpoint", "", "optional eks api server endpoint")
 	flag.StringVar(&options.TestImageRegistry, "test-image-registry", "617930562442.dkr.ecr.us-west-2.amazonaws.com", `AWS registry where the e2e test images are stored`)
+	flag.StringVar(&options.IpFamily, "ip-family", "IPv4", `IP family for the cluster`)
 }
 
 func (options *Options) Validate() error {
