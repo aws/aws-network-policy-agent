@@ -39,8 +39,14 @@ func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool, logger 
 		enableIPv6:            enableIPv6,
 		logger:                logger,
 		hydratelocalConntrack: true,
-		localConntrackV4Cache: make(map[utils.ConntrackKey]bool),
-		localConntrackV6Cache: make(map[utils.ConntrackKeyV6]bool),
+	}
+}
+
+func (c *conntrackClient) InitializeLocalCache() {
+	if c.enableIPv6 {
+		c.localConntrackV6Cache = make(map[utils.ConntrackKeyV6]bool)
+	} else {
+		c.localConntrackV4Cache = make((map[utils.ConntrackKey]bool))
 	}
 }
 
@@ -57,9 +63,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	// Read from eBPF Table if local conntrack table is not cached
 	if c.hydratelocalConntrack {
 		//Lets cleanup all entries in cache
-		for conntrackKey := range c.localConntrackV4Cache {
-			delete(c.localConntrackV4Cache, conntrackKey)
-		}
+		c.InitializeLocalCache()
+
 		iterKey := utils.ConntrackKey{}
 		iterNextKey := utils.ConntrackKey{}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
@@ -200,9 +205,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	// Read from eBPF Table if local conntrack table is not cached
 	if c.hydratelocalConntrack {
 		//Lets cleanup all entries in cache
-		for conntrackKey := range c.localConntrackV6Cache {
-			delete(c.localConntrackV6Cache, conntrackKey)
-		}
+		c.InitializeLocalCache()
 		iterKey := utils.ConntrackKeyV6{}
 		iterNextKey := utils.ConntrackKeyV6{}
 
