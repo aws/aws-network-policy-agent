@@ -227,10 +227,12 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	}
 
 	// Start Conntrack routines
+	duration := time.Duration(conntrackTTL) * time.Second
+	halfDuration := duration / 2
 	if enableIPv6 {
-		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, halfDuration)
 	} else {
-		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, halfDuration)
 	}
 
 	// Initializes prometheus metrics
