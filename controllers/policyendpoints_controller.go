@@ -111,6 +111,8 @@ type PolicyEndpointsReconciler struct {
 	podIdentifierToPolicyEndpointMapMutex sync.Mutex
 	// Maps PolicyEndpoint resource with a list of local pods
 	policyEndpointSelectorMap sync.Map
+	// Maps a Network Policy to list of selected pod Identifiers
+	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 
@@ -184,6 +186,12 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 		}
 		duration := msSince(start)
 		policyTearDownLatency.WithLabelValues(req.NamespacedName.Name, req.NamespacedName.Namespace).Observe(duration)
+	}
+
+	for _, podToBeCleanedUp := range podsToBeCleanedUp {
+		podIdentifier := utils.GetPodIdentifier(podToBeCleanedUp.Name, podToBeCleanedUp.Namespace)
+		//Delete this policyendpoint resource against the current PodIdentifier
+		r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, req.NamespacedName.Name)
 	}
 
 	return nil
@@ -315,8 +323,6 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	noActiveIngressPolicies, noActiveEgressPolicies := false, false
 
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
-	// Delete this policyendpoint resource against the current PodIdentifier
-	r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpoint)
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
@@ -467,6 +473,7 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdent
 func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
 	parentNP, resourceNamespace, resourceName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
 	var targetPods, podsToBeCleanedUp, currentPods []types.NamespacedName
+	var targetPodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
@@ -509,8 +516,12 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		targetPods = append(targetPods, currentTargetPods...)
 		for podIdentifier, _ := range currentPodIdentifiers {
 			podIdentifiers[podIdentifier] = true
+			targetPodIdentifiers = append(targetPodIdentifiers, podIdentifier)
 		}
 	}
+
+	//Update active podIdentifiers selected by the current Network Policy
+	stalePodIdentifiers := r.deriveStalePodIdentifiers(ctx, resourceName, targetPodIdentifiers)
 
 	for _, policyEndpointResource := range parentPEList {
 		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource,
@@ -522,11 +533,16 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			r.log.Info("No more target pods so deleting the entry in PE selector map for ", "Name ", policyEndpointResource)
 			r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 		}
-
+		for _, podIdentifier := range stalePodIdentifiers {
+			r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpointResource)
+		}
 	}
 
+	//Update active podIdentifiers selected by the current Network Policy
+	r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
+
 	if len(currentPods) > 0 {
-		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods)
+		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods, podIdentifiers)
 	}
 	return targetPods, podIdentifiers, podsToBeCleanedUp
 }
@@ -556,22 +572,24 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 }
 
 func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.NamespacedName,
-	newPodSet []types.NamespacedName) []types.NamespacedName {
+	newPodSet []types.NamespacedName, podIdentifiers map[string]bool) []types.NamespacedName {
 	var podsToBeCleanedUp []types.NamespacedName
 
 	for _, oldPod := range oldPodSet {
 		activePod := false
+		oldPodIdentifier := utils.GetPodIdentifier(oldPod.Name, oldPod.Namespace)
 		for _, newPod := range newPodSet {
 			if oldPod == newPod {
 				activePod = true
 				break
 			}
 		}
-		if !activePod {
+		if !activePod && !podIdentifiers[oldPodIdentifier] {
 			r.log.Info("Pod to cleanup: ", "name: ", oldPod.Name, "namespace: ", oldPod.Namespace)
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
 		}
 	}
+
 	return podsToBeCleanedUp
 }
 
@@ -604,6 +622,29 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 	}
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, policyEndpoints)
 	return
+}
+
+func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Context, resourceName string,
+	targetPodIdentifiers []string) []string {
+
+	var stalePodIdentifiers []string
+	if currentPodIdentifiers, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(resourceName)); ok {
+		for _, podIdentifier := range currentPodIdentifiers.([]string) {
+			r.log.Info("podIdentifier", "name", podIdentifier)
+			stalePodIdentifier := true
+			for _, pe := range targetPodIdentifiers {
+				if pe == podIdentifier {
+					//Nothing to do if this PE is already tracked against this podIdentifier
+					stalePodIdentifier = false
+					break
+				}
+			}
+			if stalePodIdentifier {
+				stalePodIdentifiers = append(stalePodIdentifiers, podIdentifier)
+			}
+		}
+	}
+	return stalePodIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
