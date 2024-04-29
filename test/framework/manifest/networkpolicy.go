@@ -11,6 +11,8 @@ type NetworkPolicyBuilder struct {
 	podSelector  map[string]string
 	egressRules  []network.NetworkPolicyEgressRule
 	ingressRules []network.NetworkPolicyIngressRule
+	ingress      bool
+	egress       bool
 }
 
 func (n *NetworkPolicyBuilder) Build() *network.NetworkPolicy {
@@ -28,13 +30,21 @@ func (n *NetworkPolicyBuilder) Build() *network.NetworkPolicy {
 	}
 
 	if len(n.ingressRules) > 0 {
-		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeIngress)
+		n.ingress = true
 		netpol.Spec.Ingress = n.ingressRules
 	}
 
 	if len(n.egressRules) > 0 {
-		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeEgress)
+		n.egress = true
 		netpol.Spec.Egress = n.egressRules
+	}
+
+	if n.egress {
+		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeEgress)
+	}
+
+	if n.ingress {
+		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeIngress)
 	}
 
 	return netpol
@@ -72,5 +82,11 @@ func (n *NetworkPolicyBuilder) AddEgressRule(egressRule network.NetworkPolicyEgr
 
 func (n *NetworkPolicyBuilder) AddIngressRule(ingressRule network.NetworkPolicyIngressRule) *NetworkPolicyBuilder {
 	n.ingressRules = append(n.ingressRules, ingressRule)
+	return n
+}
+
+func (n *NetworkPolicyBuilder) SetPolicyType(ingress bool, egress bool) *NetworkPolicyBuilder {
+	n.ingress = ingress
+	n.egress = egress
 	return n
 }

@@ -443,7 +443,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 	start := time.Now()
 	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
-	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
 	if ingress {
 		err := l.detachIngressBPFProbe(hostVethName)
 		duration := msSince(start)
