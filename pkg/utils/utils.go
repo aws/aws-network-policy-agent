@@ -72,7 +72,11 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + podNamespace
 }
 
-func GetPodIdentifier(podName, podNamespace string) string {
+func GetPodIdentifier(podName, podNamespace string, log logr.Logger) string {
+	if strings.Contains(podName, ".") {
+		log.Info("Replacing '.' character with '_' for pod pin path.")
+		podName = strings.Replace(podName, ".", "_", -1)
+	}
 	podIdentifierPrefix := podName
 	if strings.Contains(string(podName), "-") {
 		tmpName := strings.Split(podName, "-")
