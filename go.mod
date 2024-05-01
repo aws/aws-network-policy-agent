@@ -3,7 +3,7 @@ module github.com/aws/aws-network-policy-agent
 go 1.21
 
 require (
-	github.com/aws/amazon-vpc-cni-k8s v1.18.0
+	github.com/aws/amazon-vpc-cni-k8s v1.18.1
 	github.com/aws/aws-ebpf-sdk-go v1.0.7
 	github.com/aws/aws-sdk-go v1.50.30
 	github.com/go-logr/logr v1.4.1
@@ -57,13 +57,13 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.6.0 // indirect
-	github.com/prometheus/common v0.48.0 // indirect
+	github.com/prometheus/common v0.52.2 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/oauth2 v0.17.0 // indirect
+	golang.org/x/oauth2 v0.18.0 // indirect
 	golang.org/x/term v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
