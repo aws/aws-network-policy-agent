@@ -227,10 +227,12 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	}
 
 	// Start Conntrack routines
+	duration := time.Duration(conntrackTTL) * time.Second
+	halfDuration := duration / 2
 	if enableIPv6 {
-		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, halfDuration)
 	} else {
-		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, halfDuration)
 	}
 
 	// Initializes prometheus metrics
@@ -441,7 +443,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 	start := time.Now()
 	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
-	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
 	if ingress {
 		err := l.detachIngressBPFProbe(hostVethName)
 		duration := msSince(start)
