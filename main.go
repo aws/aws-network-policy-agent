@@ -83,13 +83,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+
+	ctrlConfig.GetUpdatedControllerConfigsFromIPAM(ctx)
+
 	err = ctrlConfig.ValidControllerFlags()
 	if err != nil {
 		setupLog.Error(err, "Controller flags validation failed")
 		os.Exit(1)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
