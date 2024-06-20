@@ -1,6 +1,9 @@
 package config
 
-import "github.com/spf13/pflag"
+import (
+	"github.com/spf13/pflag"
+	"errors"
+)
 
 const (
 	flagLogLevel                       = "log-level"
@@ -10,11 +13,13 @@ const (
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
+	defaultConntrackCacheTableSize     = 256 * 1024
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
 	flagEnableCloudWatchLogs           = "enable-cloudwatch-logs"
 	flagEnableIPv6                     = "enable-ipv6"
 	flagEnableNetworkPolicy            = "enable-network-policy"
 	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
+	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
 )
 
 // ControllerConfig contains the controller configuration
@@ -35,6 +40,8 @@ type ControllerConfig struct {
 	EnableNetworkPolicy bool
 	// ConntrackCacheCleanupPeriod specifies the cleanup period
 	ConntrackCacheCleanupPeriod int
+	// ConntrackTableSize specifies the conntrack table size for the agent
+	ConntrackCacheTableSize int
 	// Configurations for the Controller Runtime
 	RuntimeConfig RuntimeConfig
 }
@@ -52,6 +59,17 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&cfg.EnableNetworkPolicy, flagEnableNetworkPolicy, false, "If enabled, Network Policy agent will initialize BPF maps and start reconciler")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
+	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
+		"Table size for network policy agent conntrack cache")
 
 	cfg.RuntimeConfig.BindFlags(fs)
+}
+
+// Validate controller flags
+func (cfg *ControllerConfig) ValidControllerFlags() error {
+	// Validate conntrack cache table size
+	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
+		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
+	}
+	return nil
 }

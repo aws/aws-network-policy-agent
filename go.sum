@@ -1,7 +1,11 @@
 github.com/aws/amazon-vpc-cni-k8s v1.18.1 h1:u/OeBgnUUX6f3PCEOpA4dbG0+iZ71CnY6tEljjrl3iw=
 github.com/aws/amazon-vpc-cni-k8s v1.18.1/go.mod h1:m/J5GsxF0Th2iQTOE3ww4W9LFvwdC0tGyA9dIL4h6iQ=
-github.com/aws/aws-ebpf-sdk-go v1.0.8 h1:GyfMwkfS6Z8+5FgqRWlq+Sa3J97Qyb4fVY3KPkkyTW0=
-github.com/aws/aws-ebpf-sdk-go v1.0.8/go.mod h1:RR0L0fJn8cJGgRH6zEYU4N64j6aee5P8gpUUFgkUQMA=
+github.com/aws/aws-ebpf-sdk-go v1.0.9-rc1 h1:vDtkvNEvdF8L+2/qBahIuyLvOTeQs+ToVbkGw4QGJvI=
+github.com/aws/aws-ebpf-sdk-go v1.0.9-rc1/go.mod h1:6lwTHtNgTp/kQzx4pdnp09LJevvIVqYf0ce8pP2u66E=
+github.com/aws/aws-ebpf-sdk-go v1.0.9-rc2 h1:W2mdC1KjMk/fh7jfF/YP6s+Y9FsiEYc33PdJVsfix1g=
+github.com/aws/aws-ebpf-sdk-go v1.0.9-rc2/go.mod h1:SBy1vl1WXMingLbqPZfHd1VXTqB9cD473JwUfoEM+Qs=
+github.com/aws/aws-ebpf-sdk-go v1.0.9 h1:FvkyeRUKNvbUFgzh+Ia7XbBb5U86dHW6dCrljt76Fao=
+github.com/aws/aws-ebpf-sdk-go v1.0.9/go.mod h1:SBy1vl1WXMingLbqPZfHd1VXTqB9cD473JwUfoEM+Qs=
 github.com/aws/aws-sdk-go v1.50.30 h1:2OelKH1eayeaH7OuL1Y9Ombfw4HK+/k0fEnJNWjyLts=
 github.com/aws/aws-sdk-go v1.50.30/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
