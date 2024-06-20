@@ -82,8 +82,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller manager")
 		os.Exit(1)
 	}
-
 	ctx := ctrl.SetupSignalHandler()
+
+	ctrlConfig.GetUpdatedControllerConfigsFromIPAM(ctx)
+
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod)
