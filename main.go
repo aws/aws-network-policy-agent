@@ -83,8 +83,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = ctrlConfig.ValidControllerFlags() 
-	if err != nil{
+	err = ctrlConfig.ValidControllerFlags()
+	if err != nil {
 		setupLog.Error(err, "Controller flags validation failed")
 		os.Exit(1)
 	}

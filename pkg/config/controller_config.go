@@ -1,8 +1,9 @@
 package config
 
 import (
-	"github.com/spf13/pflag"
 	"errors"
+
+	"github.com/spf13/pflag"
 )
 
 const (
