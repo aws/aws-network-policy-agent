@@ -109,7 +109,7 @@ type EbpfFirewallRules struct {
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -181,10 +181,19 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
+		var bpfSdkInputData goelf.BpfCustomData
+		bpfSdkInputData.FilePath = eventsProbe
+		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomMapSize = make(map[string]int)
+
+		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
+
+		ebpfClient.logger.Info("Setting conntrack cache map size: ", "max entries", conntrackTableSize)
+
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFileWithCustomData(bpfSdkInputData)
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
-			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
+			sdkAPIErr.WithLabelValues("LoadBpfFileWithCustomData").Inc()
 			return nil, err
 		}
 		ebpfClient.logger.Info("Successfully loaded events probe")

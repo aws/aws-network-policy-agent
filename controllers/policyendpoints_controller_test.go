@@ -329,7 +329,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300)
+			false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -748,7 +748,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300)
+			false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -994,7 +994,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300)
+			false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
