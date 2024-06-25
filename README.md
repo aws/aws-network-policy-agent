@@ -96,7 +96,7 @@ Type: Integer
 
 Default: 1024 * 256
 
-Network Policy agent maintains a local conntrack cache. Ideally this should be of the same size as kernel conntrack table. Note, this should be configured on new nodes before enabling network policy or if network policy is already enabled the change in configuration would need a reload of the nodes. Dynamic update of conntrack map size would lead to traffic disruption hence we won't support it. The value supported is between 32K and 1024K.
+Network Policy agent maintains a local conntrack cache. Ideally this should be of the same size as kernel conntrack table. Note, this should be configured on new nodes before enabling network policy or if network policy is already enabled the change in configuration would need a reload of the nodes. Dynamic update of conntrack map size would lead to traffic disruption and isn't supported. The value supported is between 32K and 1024K.
 
 
 ## Network Policy Agent CLI
