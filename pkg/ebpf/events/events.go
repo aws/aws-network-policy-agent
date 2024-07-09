@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
@@ -172,14 +171,16 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					continue
 				}
 
+				srcIP := utils.ConvByteToIPv6(rb.SourceIP).String()
+				srcPort := int(rb.SourcePort)
+				destIP := utils.ConvByteToIPv6(rb.DestIP).String()
+				destPort := int(rb.DestPort)
+
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				logPolicyEventsWithK8sMetadata(log, &message, nodeName, srcIP, srcPort, destIP, destPort, protocol, verdict)
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -187,14 +188,15 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					log.Info("Failed to read from Ring buf", err)
 					continue
 				}
+				srcIP := utils.ConvByteArrayToIP(rb.SourceIP)
+				srcPort := int(rb.SourcePort)
+				destIP := utils.ConvByteArrayToIP(rb.DestIP)
+				destPort := int(rb.DestPort)
+
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
-
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				logPolicyEventsWithK8sMetadata(log, &message, nodeName, srcIP, srcPort, destIP, destPort, protocol, verdict)
 			}
 
 			if enableCloudWatchLogs {
@@ -205,6 +207,18 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 			}
 		}
 	}(ringbufferdata)
+}
+
+func logPolicyEventsWithK8sMetadata(log logr.Logger, message *string, nodeName, srcIP string, srcPort int, destIP string, destPort int, protocol, verdict string) {
+	srcName, srcNS, err := utils.GetPodMetadata(srcIP)
+	if err != nil {
+		log.Info("Failed to get source name and namespace metadata", "source IP:", srcIP)
+	}
+	destName, destNS, err := utils.GetPodMetadata(destIP)
+	if err != nil {
+		log.Info("Failed to get destination name and namespace metadata for", "dest IP:", destIP)
+	}
+	utils.LogFlowInfo(log, message, nodeName, srcIP, srcName, srcNS, srcPort, destIP, destName, destNS, destPort, protocol, verdict)
 }
 
 func ensureLogGroupExists(name string) error {
