@@ -19,9 +19,9 @@ package main
 import (
 	"os"
 
-	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"github.com/emilyhuaa/aws-network-policy-agent/pkg/rpc"
 
-	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	"github.com/emilyhuaa/aws-network-policy-agent/pkg/logger"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -32,9 +32,9 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/aws/aws-network-policy-agent/controllers"
-	"github.com/aws/aws-network-policy-agent/pkg/config"
 	"github.com/aws/aws-network-policy-agent/pkg/metrics"
+	"github.com/emilyhuaa/aws-network-policy-agent/controllers"
+	"github.com/emilyhuaa/aws-network-policy-agent/pkg/config"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"

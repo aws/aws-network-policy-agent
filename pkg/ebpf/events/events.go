@@ -5,12 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/emilyhuaa/aws-network-policy-agent/pkg/utils"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -53,7 +52,7 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 	// Enable logging and setup ring buffer
 	if mapFD <= 0 {
 		logger.Info("MapFD is invalid")
-		return fmt.Errorf("Invalid Ringbuffer FD: %d", mapFD)
+		return fmt.Errorf("invalid Ringbuffer FD: %d", mapFD)
 	}
 
 	var mapFDList []int
@@ -73,7 +72,7 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 			}
 		}
 		logger.Info("Configure Event loop ... ")
-		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
+		CapturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 	}
 	return nil
 }
@@ -156,7 +155,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 	return true
 }
 
-func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCloudWatchLogs bool, enableIPv6 bool) {
+func CapturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCloudWatchLogs bool, enableIPv6 bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
@@ -172,14 +171,19 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					continue
 				}
 
+				srcIP := utils.ConvByteToIPv6(rb.SourceIP).String()
+				srcN, srcNS := utils.GetPodMetadata(srcIP)
+				srcPort := int(rb.SourcePort)
+
+				destIP := utils.ConvByteToIPv6(rb.DestIP).String()
+				destN, destNS := utils.GetPodMetadata(destIP)
+				destPort := int(rb.DestPort)
+
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				utils.LogFlowInfo(log, &message, nodeName, srcIP, srcN, srcNS, srcPort, destIP, destN, destNS, destPort, protocol, verdict)
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -187,14 +191,18 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					log.Info("Failed to read from Ring buf", err)
 					continue
 				}
+				srcIP := utils.ConvByteArrayToIP(rb.SourceIP)
+				srcN, srcNS := utils.GetPodMetadata(srcIP)
+				srcPort := int(rb.SourcePort)
+
+				destIP := utils.ConvByteArrayToIP(rb.DestIP)
+				destN, destNS := utils.GetPodMetadata(destIP)
+				destPort := int(rb.DestPort)
+
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
-
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				utils.LogFlowInfo(log, &message, nodeName, srcIP, srcN, srcNS, srcPort, destIP, destN, destNS, destPort, protocol, verdict)
 			}
 
 			if enableCloudWatchLogs {

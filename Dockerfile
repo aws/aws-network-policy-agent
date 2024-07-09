@@ -1,10 +1,12 @@
 # Build the manager binary
-ARG golang_image
+ARG golang_image=golang:1.22.4
 
 FROM $golang_image as builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG GIT_USER
+ARG GIT_PAT
 
 # Env configuration
 ENV GOPROXY=direct
@@ -15,6 +17,7 @@ COPY go.mod go.sum ./
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
+
 
 COPY . ./
 
