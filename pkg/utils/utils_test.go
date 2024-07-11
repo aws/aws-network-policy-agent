@@ -330,7 +330,7 @@ func TestComputeTrieValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ComputeTrieValue(tt.args.Ports, test_utilsLogger, tt.args.allowAll, tt.args.denyAll)
+			got := ComputeTrieValue(tt.args.Ports, nil, test_utilsLogger, tt.args.allowAll, tt.args.denyAll)
 			assert.Equal(t, tt.want, got)
 		})
 	}

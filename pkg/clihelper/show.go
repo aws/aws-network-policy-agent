@@ -127,6 +127,7 @@ func MapWalk(mapID int) error {
 						fmt.Println("Protocol - ", utils.GetProtocol(int(iterValue[i].Protocol)))
 						fmt.Println("StartPort - ", iterValue[i].StartPort)
 						fmt.Println("Endport - ", iterValue[i].EndPort)
+						fmt.Println("Allow - ", iterValue[i].Allow)
 						fmt.Println("-------------------")
 					}
 					fmt.Println("*******************************")
@@ -238,6 +239,7 @@ func MapWalkv6(mapID int) error {
 						fmt.Println("Protocol - ", utils.GetProtocol(int(iterValue[i].Protocol)))
 						fmt.Println("StartPort - ", iterValue[i].StartPort)
 						fmt.Println("Endport - ", iterValue[i].EndPort)
+						fmt.Println("Allow - ", iterValue[i].Allow)
 						fmt.Println("-------------------")
 					}
 					fmt.Println("*******************************")

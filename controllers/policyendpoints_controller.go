@@ -19,14 +19,21 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	merge "github.com/aws/aws-network-policy-agent/pkg/utils/mergerules"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
+
 	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/go-logr/logr"
+	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 )
 
@@ -107,7 +115,9 @@ type PolicyEndpointsReconciler struct {
 	policyEndpointeBPFContext sync.Map
 	// Maps pod Identifier to list of PolicyEndpoint resources
 	podIdentifierToPolicyEndpointMap sync.Map
-	// Mutex for operations on PodIdentifierToPolicyEndpointMap
+	// Maps pod Identifier to list of global PolicyEndpoint resources
+	podIdentifierToGlobalPolicyEndpointMap sync.Map
+	// Mutex for operations on PodIdentifierToPolicyEndpointMap and PodIdentifierToGlobalPolicyEndpointMap
 	podIdentifierToPolicyEndpointMapMutex sync.Mutex
 	// Maps PolicyEndpoint resource with a list of local pods
 	policyEndpointSelectorMap sync.Map
@@ -249,7 +259,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		return err
 	}
 
-	for podIdentifier, _ := range podIdentifiers {
+	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace, policyEndpoint.Name, false)
@@ -326,7 +336,10 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
 	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
-	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+	_, foundPE := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+	_, foundGlobalPE := r.podIdentifierToGlobalPolicyEndpointMap.Load(podIdentifier)
+	ok := foundPE || foundGlobalPE
+	if ok {
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
 			policyEndpoint, isDeleteFlow)
 		if err != nil {
@@ -377,23 +390,274 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 	return nil
 }
 
+func mergeGlobalRulesHelper(rules []policyk8sawsv1.EndpointInfo, ipPorts map[string][]string, logger logr.Logger) map[string][]string {
+	allProtocol := "ALL"
+	for _, rule := range rules {
+		action := rule.Action
+		if rule.Ports == nil {
+			rule.Ports = append(rule.Ports, policyk8sawsv1.Port{
+				Protocol: (*v1.Protocol)(&allProtocol),
+				Port:     nil,
+				EndPort:  nil,
+			})
+		}
+		if val, ok := ipPorts[string(rule.CIDR)]; ok {
+			for _, prt := range rule.Ports {
+				modified := false
+				for i, port := range val {
+					split := strings.Split(port, "-")
+					action2 := split[0]
+					protocol := split[1]
+					portInt, _ := strconv.Atoi(split[2])
+					port := int32(portInt)
+					portFin := &port
+					if portInt == 0 {
+						portFin = nil
+					}
+					endportInt, _ := strconv.Atoi(split[3])
+					endport := int32(endportInt)
+					endPortFin := &endport
+					if endportInt == 0 {
+						endPortFin = nil
+					}
+					tempPort := policyk8sawsv1.Port{
+						Protocol: (*v1.Protocol)(&protocol),
+						Port:     portFin,
+						EndPort:  endPortFin,
+					}
+					if protocol == "ALL" || string(*prt.Protocol) == "ALL" || checkPortOverlap(prt, tempPort) {
+						modified = true
+						mergedPort := merge.MergePorts(tempPort, prt, action2, action, logger)
+						val[i] = mergedPort[0]
+						if len(mergedPort) > 1 {
+							val = append(val, mergedPort[1])
+						}
+						ipPorts[string(rule.CIDR)] = val
+					} else {
+						continue
+					}
+				}
+				if !modified {
+					zero := int32(0)
+					if prt.Port == nil {
+						prt.Port = &zero
+					}
+					if prt.EndPort == nil {
+						prt.EndPort = &zero
+					}
+					ipPorts[string(rule.CIDR)] = append(val, fmt.Sprintf("%s-%s-%d-%d", rule.Action, *prt.Protocol, *prt.Port, *prt.EndPort))
+				}
+			}
+		} else {
+			arr := []string{}
+			if rule.Ports == nil {
+				arr = append(arr, fmt.Sprintf("%s-%s-%d-%d", rule.Action, "ALL", 0, 0))
+			} else {
+				for _, port := range rule.Ports {
+					if port.EndPort == nil {
+						temp := int32(0)
+						port.EndPort = &temp
+					}
+					arr = append(arr, fmt.Sprintf("%s-%s-%d-%d", rule.Action, *port.Protocol, *port.Port, *port.EndPort))
+				}
+			}
+			ipPorts[string(rule.CIDR)] = arr
+		}
+	}
+	return ipPorts
+}
+
+func (r *PolicyEndpointsReconciler) mergeGlobalRules(currentPE *policyk8sawsv1.PolicyEndpoint, ipIngressPorts map[string][]string, ipEgressPorts map[string][]string) (map[string][]string, map[string][]string) {
+	ipIngressPorts = mergeGlobalRulesHelper(currentPE.Spec.Ingress, ipIngressPorts, r.log)
+	ipEgressPorts = mergeGlobalRulesHelper(currentPE.Spec.Egress, ipEgressPorts, r.log)
+	return ipIngressPorts, ipEgressPorts
+}
+
+func mergeLocalRulesHelper(rules []policyk8sawsv1.EndpointInfo, ipPorts map[string][]string) map[string][]string {
+	tempAll := "ALL"
+	portZero := int32(0)
+	for _, rule := range rules {
+		if rule.Ports == nil {
+			rule.Ports = append(rule.Ports, policyk8sawsv1.Port{
+				Protocol: (*v1.Protocol)(&tempAll),
+				Port:     &portZero,
+				EndPort:  &portZero,
+			})
+		}
+		for _, port := range rule.Ports {
+			endport := port.EndPort
+			if endport == nil {
+				endport = &portZero
+			}
+			if val, ok := ipPorts[string(rule.CIDR)]; ok {
+				val = append(val, fmt.Sprintf("%s-%s-%d-%d", "Allow", *port.Protocol, *port.Port, *endport))
+				ipPorts[string(rule.CIDR)] = val
+			} else {
+				val := []string{}
+				val = append(val, fmt.Sprintf("%s-%s-%d-%d", "Allow", *port.Protocol, *port.Port, *endport))
+				ipPorts[string(rule.CIDR)] = val
+			}
+		}
+		for _, except := range rule.Except {
+			if val, ok := ipPorts[string(except)]; ok {
+				val = append(val, fmt.Sprintf("%s-%s-%d-%d", "Deny", "ALL", 0, 0))
+				ipPorts[string(except)] = val
+			} else {
+				val := []string{}
+				val = append(val, fmt.Sprintf("%s-%s-%d-%d", "Deny", "ALL", 0, 0))
+				ipPorts[string(except)] = val
+			}
+		}
+	}
+	return ipPorts
+}
+
+func (r *PolicyEndpointsReconciler) mergeLocalRules(currentPE *policyk8sawsv1.PolicyEndpoint, ipIngressPorts map[string][]string, ipEgressPorts map[string][]string) (map[string][]string, map[string][]string) {
+	ipIngressPorts = mergeLocalRulesHelper(currentPE.Spec.Ingress, ipIngressPorts)
+	ipEgressPorts = mergeLocalRulesHelper(currentPE.Spec.Egress, ipEgressPorts)
+	return ipIngressPorts, ipEgressPorts
+}
+
+// If an IP or CIDR matches a NP but not an ANP, we will validate the packet using NP
+func (r *PolicyEndpointsReconciler) mergeGlobalLocalRules(ingress map[string][]string, egress map[string][]string, ingressLocal map[string][]string, egressLocal map[string][]string) (map[string][]string, map[string][]string) {
+	tempIngress := make(map[string][]string)
+	tempEgress := make(map[string][]string)
+	for localIP, localVal := range ingressLocal {
+		merged := false
+		for ip, val := range ingress {
+			if ip == localIP {
+				merged = true
+				val = merge.MergeGlobalLocalPorts(val, localVal)
+				ingress[ip] = val
+			} else {
+				continue
+			}
+		}
+		if !merged {
+			tempIngress[localIP] = localVal
+		}
+	}
+	for localIP, localVal := range egressLocal {
+		merged := false
+		for ip, val := range egress {
+			if ip == localIP {
+				merged = true
+				val = merge.MergeGlobalLocalPorts(val, localVal)
+				ingress[ip] = val
+			} else {
+				continue
+			}
+		}
+		if !merged {
+			tempEgress[localIP] = localVal
+		}
+	}
+	for ip, val := range tempIngress {
+		ingress[ip] = val
+	}
+
+	for ip, val := range tempEgress {
+		egress[ip] = val
+	}
+	return ingress, egress
+}
+
+func checkPortOverlap(ports, ports2 policyk8sawsv1.Port) bool {
+	if *ports.Protocol != *ports2.Protocol {
+		return false
+	}
+	if ports.EndPort != nil && ports2.EndPort != nil {
+		if *ports.EndPort < *ports2.Port || *ports.Port > *ports2.EndPort {
+			return false
+		}
+		return true
+	} else if ports.EndPort != nil {
+		if *ports2.Port >= *ports.Port && *ports2.Port <= *ports.EndPort {
+			return true
+		}
+		return false
+	} else if ports2.EndPort != nil {
+		if *ports.Port >= *ports2.Port && *ports.Port <= *ports2.EndPort {
+			return true
+		}
+		return false
+	}
+	return ports.Port == ports2.Port
+}
+
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
 	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
 	var ingressRules, egressRules []ebpf.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
+	globalRules, localRules := []policyk8sawsv1.PolicyEndpoint{}, []policyk8sawsv1.PolicyEndpoint{}
+	found := false
+
+	if policyEndpointList, ok := r.podIdentifierToGlobalPolicyEndpointMap.Load(podIdentifier); ok {
+		found = true
+		for _, policyEndpointResource := range policyEndpointList.([]string) {
+			peNamespacedName := types.NamespacedName{
+				Name:      policyEndpointResource,
+				Namespace: "kube-system",
+			}
+			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return nil, nil, isIngressIsolated, isEgressIsolated, err
+			}
+			globalRules = append(globalRules, *currentPE)
+		}
+
+		// Sort globalRules by priority for ease in merging
+		sort.SliceStable(globalRules, func(i, j int) bool {
+			return globalRules[i].Spec.Priority < globalRules[j].Spec.Priority
+		})
+	}
+
+	// Pod has global rules that apply to it, which means we must replace resourceNamespace since it might not be in kube-system
+	if len(globalRules) > 0 {
+		namespaces := globalRules[0].Spec.Namespaces
+		// Longest Prefix Match
+		sort.Sort(sort.Reverse(sort.StringSlice(namespaces)))
+		for _, ns := range namespaces {
+			if strings.HasSuffix(podIdentifier, ns) {
+				r.log.Info("Found correct namespace", "namespace", ns)
+				resourceNamespace = ns
+				break
+			}
+		}
+	}
+
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		r.log.Info("Total number of PolicyEndpoint resources for", "podIdentifier ", podIdentifier, " are ", len(policyEndpointList.([]string)))
+		found = true
 		for _, policyEndpointResource := range policyEndpointList.([]string) {
 			peNamespacedName := types.NamespacedName{
 				Name:      policyEndpointResource,
 				Namespace: resourceNamespace,
 			}
+			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return nil, nil, isIngressIsolated, isEgressIsolated, err
+			}
+			localRules = append(localRules, *currentPE)
+		}
+	}
 
+	ipIngressPorts := make(map[string][]string)
+	ipEgressPorts := make(map[string][]string)
+	ipLocalIngressPorts := make(map[string][]string)
+	ipLocalEgressPorts := make(map[string][]string)
+
+	if found {
+		r.log.Info("Total number of global PolicyEndpoint resources for", "podIdentifier ", podIdentifier, " are ", len(globalRules))
+		for _, policyEndpointResource := range globalRules {
 			if isDeleteFlow {
 				deletedPEParentNPName := utils.GetParentNPNameFromPEName(resourceName)
-				currentPEParentNPName := utils.GetParentNPNameFromPEName(policyEndpointResource)
+				currentPEParentNPName := utils.GetParentNPNameFromPEName(policyEndpointResource.Name)
 				if deletedPEParentNPName == currentPEParentNPName {
 					r.log.Info("PE belongs to same NP. Ignore and move on since it's a delete flow",
 						"deletedPE", resourceName, "currentPE", policyEndpointResource)
@@ -401,37 +665,122 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				}
 			}
 
-			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
-				if apierrors.IsNotFound(err) {
+			r.log.Info("Deriving Firewall rules for global PolicyEndpoint:", "Name: ", policyEndpointResource.Name)
+
+			ipIngressPorts, ipEgressPorts = r.mergeGlobalRules(&policyEndpointResource, ipIngressPorts, ipEgressPorts)
+		}
+
+		// Once global rules are processed, "Pass" rules are no longer needed
+		ipIngressPorts = removePassRules(ipIngressPorts)
+		ipEgressPorts = removePassRules(ipEgressPorts)
+		r.log.Info("Merged global ingress rules", "ipIngressPorts", ipIngressPorts)
+		r.log.Info("Merged global egress rules", "ipEgressPorts", ipEgressPorts)
+
+		r.log.Info("Total number of PolicyEndpoint resources for", "podIdentifier ", podIdentifier, " are ", len(localRules))
+
+		for _, policyEndpointResource := range localRules {
+			if isDeleteFlow {
+				deletedPEParentNPName := utils.GetParentNPNameFromPEName(resourceName)
+				currentPEParentNPName := utils.GetParentNPNameFromPEName(policyEndpointResource.Name)
+				if deletedPEParentNPName == currentPEParentNPName {
+					r.log.Info("PE belongs to same NP. Ignore and move on since it's a delete flow",
+						"deletedPE", resourceName, "currentPE", policyEndpointResource)
 					continue
 				}
-				return nil, nil, isIngressIsolated, isEgressIsolated, err
 			}
 			r.log.Info("Deriving Firewall rules for PolicyEndpoint:", "Name: ", currentPE.Name)
 
-			for _, endPointInfo := range currentPE.Spec.Ingress {
-				ingressRules = append(ingressRules,
-					ebpf.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
-					})
-			}
+			ipLocalIngressPorts, ipLocalEgressPorts = r.mergeLocalRules(&policyEndpointResource, ipLocalIngressPorts, ipLocalEgressPorts)
 
-			for _, endPointInfo := range currentPE.Spec.Egress {
-				egressRules = append(egressRules,
-					ebpf.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
-					})
-			}
-			r.log.Info("Total no.of - ", "ingressRules", len(ingressRules), "egressRules", len(egressRules))
-			ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(ctx, currentPE, len(ingressRules), len(egressRules))
+			ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(ctx, &policyEndpointResource, len(ipLocalIngressPorts), len(ipLocalEgressPorts))
 			isIngressIsolated = isIngressIsolated || ingressIsolated
 			isEgressIsolated = isEgressIsolated || egressIsolated
 		}
 	}
+	r.log.Info("Merged local ingress rules", "ipLocalIngressPorts", ipLocalIngressPorts)
+	r.log.Info("Merged local egress rules", "ipLocalEgressPorts", ipLocalEgressPorts)
+
+	ipIngressPorts, ipEgressPorts = r.mergeGlobalLocalRules(ipIngressPorts, ipEgressPorts, ipLocalIngressPorts, ipLocalEgressPorts)
+	r.log.Info("Merged total ingress rules", "ipIngressPorts", ipIngressPorts)
+	r.log.Info("Merged total egress rules", "ipEgressPortss", ipEgressPorts)
+
+	ingressAll := ebpf.EbpfFirewallRules{
+		IPCidr: "0.0.0.0/0",
+		Except: nil,
+		L4Info: nil,
+	}
+
+	egressAll := ebpf.EbpfFirewallRules{
+		IPCidr: "0.0.0.0/0",
+		Except: nil,
+		L4Info: nil,
+	}
+
+	for ip, ports := range ipIngressPorts {
+		if !strings.Contains(ip, "/") {
+			ip += "/32"
+		}
+		exceptDeny := false
+		portList := []policyk8sawsv1.Port{}
+		denyList := []policyk8sawsv1.Port{}
+		ports = dedupPorts(ports)
+		for _, port := range ports {
+			split := strings.Split(port, "-")
+			action := split[0]
+			protocol := split[1]
+			portInt, _ := strconv.Atoi(split[2])
+			port := int32(portInt)
+			endportInt, _ := strconv.Atoi(split[3])
+			endport := int32(endportInt)
+
+			if protocol == "ALL" {
+				if action == "Deny" {
+					exceptDeny = true
+					break
+				}
+				continue
+			}
+			if action == "Deny" {
+				denyList = append(denyList, policyk8sawsv1.Port{
+					Protocol: (*v1.Protocol)(&protocol),
+					Port:     &port,
+					EndPort:  &endport,
+				})
+			} else if action == "Allow" {
+				portList = append(portList, policyk8sawsv1.Port{
+					Protocol: (*v1.Protocol)(&protocol),
+					Port:     &port,
+					EndPort:  &endport,
+				})
+			}
+
+		}
+		if exceptDeny {
+			ingressRules = append(ingressRules,
+				ebpf.EbpfFirewallRules{
+					IPCidr: policyk8sawsv1.NetworkAddress(ip),
+					Except: []policyk8sawsv1.NetworkAddress{policyk8sawsv1.NetworkAddress(ip)},
+					L4Info: []policyk8sawsv1.Port{},
+					L4Deny: []policyk8sawsv1.Port{},
+				})
+		} else {
+			ingressRules = append(ingressRules,
+				ebpf.EbpfFirewallRules{
+					IPCidr: policyk8sawsv1.NetworkAddress(ip),
+					Except: []policyk8sawsv1.NetworkAddress{},
+					L4Info: portList,
+					L4Deny: denyList,
+				})
+		}
+	}
+
+	// Only append "all" traffic rule if global rules exist but local rules don't
+	if len(globalRules) != 0 && len(localRules) == 0 {
+		ingressRules = append(ingressRules, ingressAll)
+		egressRules = append(egressRules, egressAll)
+	}
+
+	r.log.Info("Total no.of - ", "ingressRules", len(ingressRules), "egressRules", len(egressRules))
 	if len(ingressRules) > 0 {
 		isIngressIsolated = false
 	}
@@ -439,6 +788,40 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 		isEgressIsolated = false
 	}
 	return ingressRules, egressRules, isIngressIsolated, isEgressIsolated, nil
+}
+
+func removePassRules(ipPorts map[string][]string) map[string][]string {
+	for ip, ports := range ipPorts {
+		tempPorts := []string{}
+		for _, port := range ports {
+			portSplit := strings.Split(port, "-")
+			if portSplit[0] != "Pass" {
+				tempPorts = append(tempPorts, port)
+			}
+		}
+		if len(tempPorts) == 0 {
+			delete(ipPorts, ip)
+		} else {
+			ipPorts[ip] = tempPorts
+		}
+	}
+	return ipPorts
+}
+
+func dedupPorts(ports []string) []string {
+	dedup := make(map[string]bool)
+	for _, port := range ports {
+		if _, ok := dedup[port]; ok {
+			continue
+		}
+		dedup[port] = true
+	}
+
+	dedupedPorts := []string{}
+	for port := range dedup {
+		dedupedPorts = append(dedupedPorts, port)
+	}
+	return dedupedPorts
 }
 
 func (r *PolicyEndpointsReconciler) deriveDefaultPodIsolation(ctx context.Context, policyEndpoint *policyk8sawsv1.PolicyEndpoint,
@@ -514,7 +897,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		currentTargetPods, currentPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
 		r.log.Info("Adding to current targetPods", "Total pods: ", len(currentTargetPods))
 		targetPods = append(targetPods, currentTargetPods...)
-		for podIdentifier, _ := range currentPodIdentifiers {
+		for podIdentifier := range currentPodIdentifiers {
 			podIdentifiers[podIdentifier] = true
 			targetPodIdentifiers = append(targetPodIdentifiers, podIdentifier)
 		}
@@ -566,7 +949,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 			podIdentifiers[podIdentifier] = true
 			r.log.Info("Derived ", "Pod identifier: ", podIdentifier)
 		}
-		r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList)
+		r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList, policyEndpoint.Spec.IsGlobal)
 	}
 	return targetPods, podIdentifiers
 }
@@ -594,10 +977,36 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 }
 
 func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Context, podIdentifier string,
-	parentPEList []string) {
+	parentPEList []string, isGlobal bool) {
 	r.podIdentifierToPolicyEndpointMapMutex.Lock()
 	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
 	var policyEndpoints []string
+
+	if isGlobal {
+		r.log.Info("Current Global PE Count for Parent NP:", "Count: ", len(parentPEList))
+		if currentPESet, ok := r.podIdentifierToGlobalPolicyEndpointMap.Load(podIdentifier); ok {
+			policyEndpoints = currentPESet.([]string)
+			for _, policyEndpointResourceName := range parentPEList {
+				r.log.Info("Global PE for parent NP", "name", policyEndpointResourceName)
+				addPEResource := true
+				for _, pe := range currentPESet.([]string) {
+					if pe == policyEndpointResourceName {
+						//Nothing to do if this PE is already tracked against this podIdentifier
+						addPEResource = false
+						break
+					}
+				}
+				if addPEResource {
+					r.log.Info("Adding PE", "name", policyEndpointResourceName, "for podIdentifier", podIdentifier)
+					policyEndpoints = append(policyEndpoints, policyEndpointResourceName)
+				}
+			}
+		} else {
+			policyEndpoints = append(policyEndpoints, parentPEList...)
+		}
+		r.podIdentifierToGlobalPolicyEndpointMap.Store(podIdentifier, policyEndpoints)
+		return
+	}
 
 	r.log.Info("Current PE Count for Parent NP:", "Count: ", len(parentPEList))
 	if currentPESet, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
@@ -621,7 +1030,6 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 		policyEndpoints = append(policyEndpoints, parentPEList...)
 	}
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, policyEndpoints)
-	return
 }
 
 func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Context, resourceName string,
@@ -662,6 +1070,17 @@ func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx
 		}
 		r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentPEList)
 	}
+
+	var currentGlobalPEList []string
+	if policyEndpointList, ok := r.podIdentifierToGlobalPolicyEndpointMap.Load(podIdentifier); ok {
+		for _, policyEndpointName := range policyEndpointList.([]string) {
+			if policyEndpointName == policyEndpoint {
+				continue
+			}
+			currentGlobalPEList = append(currentGlobalPEList, policyEndpointName)
+		}
+		r.podIdentifierToGlobalPolicyEndpointMap.Store(podIdentifier, currentGlobalPEList)
+	}
 }
 
 func (r *PolicyEndpointsReconciler) addCatchAllEntry(ctx context.Context, firewallRules *[]ebpf.EbpfFirewallRules) {
@@ -674,8 +1093,6 @@ func (r *PolicyEndpointsReconciler) addCatchAllEntry(ctx context.Context, firewa
 			IPCidr: catchAllRule.CIDR,
 			L4Info: catchAllRule.Ports,
 		})
-
-	return
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -738,6 +1155,12 @@ func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdent
 
 func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		if len(policyEndpointList.([]string)) > 0 {
+			r.log.Info("Active policies available against", "podIdentifier", podIdentifier)
+			return true
+		}
+	}
+	if policyEndpointList, ok := r.podIdentifierToGlobalPolicyEndpointMap.Load(podIdentifier); ok {
 		if len(policyEndpointList.([]string)) > 0 {
 			r.log.Info("Active policies available against", "podIdentifier", podIdentifier)
 			return true
