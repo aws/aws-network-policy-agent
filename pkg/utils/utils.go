@@ -165,6 +165,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 
 	for _, l4Entry := range l4Info {
 		if startOffset >= TRIE_VALUE_LENGTH {
+			log.Error(nil, "No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
 			return value
 		}
 		endPort = 0

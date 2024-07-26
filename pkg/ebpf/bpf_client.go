@@ -745,7 +745,8 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
 
-		prefixLen, _ := strconv.Atoi(prefixLenStr)
+		prefixSplit := strings.Split(prefixLenStr, "/")
+		prefixLen, _ := strconv.Atoi(prefixSplit[1])
 		prefixLenIp1 := prefixLen
 		prefixLenIp2 := prefixLen
 
