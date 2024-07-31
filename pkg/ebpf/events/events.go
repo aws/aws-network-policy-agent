@@ -9,7 +9,7 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"

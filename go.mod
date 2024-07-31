@@ -1,4 +1,4 @@
-module github.com/emilyhuaa/aws-network-policy-agent
+module github.com/aws/aws-network-policy-agent
 
 go 1.22.4
 

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,6 +15,8 @@ import (
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 var (
@@ -45,6 +48,31 @@ var (
 type Metadata struct {
 	Name      string
 	Namespace string
+}
+
+// get Service IP using DNS lookup
+// func GetServiceIP(serviceDNSName string, port int) (string, error) {
+// 	ips, err := net.LookupIP(serviceDNSName)
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	for _, ip := range ips {
+// 		if ipv4 := ip.To4(); ipv4 != nil {
+// 			return fmt.Sprintf("%s:%d", ipv4.String(), port), nil
+// 		} else if ipv6 := ip.To16(); ipv6 != nil {
+// 			return fmt.Sprintf("[%s]:%d", ipv6.String(), port), nil
+// 		}
+// 	}
+// 	return "", fmt.Errorf("no valid IP address found for service %s", serviceDNSName)
+// }
+
+func GetServiceIP(client *kubernetes.Clientset, serviceName, serviceNamespace string, log logr.Logger) (string, error) {
+	service, err := client.CoreV1().Services(serviceNamespace).Get(context.Background(), serviceName, metav1.GetOptions{})
+	if err != nil {
+		log.Info("helper: error getting service")
+		return "", err
+	}
+	return service.Spec.ClusterIP, nil
 }
 
 func UpdateLocalCache(newCache map[string]Metadata) {

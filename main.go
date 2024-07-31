@@ -19,9 +19,9 @@ package main
 import (
 	"os"
 
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/rpc"
+	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/logger"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -29,15 +29,17 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/controllers"
+	"github.com/aws/aws-network-policy-agent/pkg/config"
 	"github.com/aws/aws-network-policy-agent/pkg/metrics"
-	"github.com/emilyhuaa/aws-network-policy-agent/controllers"
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/config"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	//+kubebuilder:scaffold:imports
@@ -56,6 +58,7 @@ func init() {
 }
 
 func main() {
+	setupLog.Info("starting set up")
 	initLogger, _ := getLoggerWithLogLevel("info", "")
 
 	ctrlConfig, err := loadControllerConfig()
@@ -80,6 +83,18 @@ func main() {
 	mgr, err := ctrl.NewManager(restCFG, runtimeOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to create controller manager")
+		os.Exit(1)
+	}
+
+	k8sconfig, err := rest.InClusterConfig()
+	if err != nil {
+		setupLog.Error(err, "Failed to get in-cluster config")
+		os.Exit(1)
+	}
+
+	clientset, err := kubernetes.NewForConfig(k8sconfig)
+	if err != nil {
+		setupLog.Error(err, "Failed to create Kubernetes clientset")
 		os.Exit(1)
 	}
 
@@ -114,14 +129,14 @@ func main() {
 	}
 
 	go metrics.ServeMetrics()
-	go rpc.RunRPCHandler(policyEndpointController)
+
+	go rpc.RunRPCHandler(policyEndpointController, clientset)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-
 }
 
 // loadControllerConfig loads the controller configuration

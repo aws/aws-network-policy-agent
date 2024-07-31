@@ -16,10 +16,11 @@ package rpc
 import (
 	"context"
 	"net"
+	"os"
 	"time"
 
-	"github.com/emilyhuaa/aws-network-policy-agent/controllers"
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/controllers"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 
 	pb "github.com/emilyhuaa/policyLogsEnhancement/pkg/rpc"
 
@@ -32,13 +33,13 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const (
 	npgRPCaddress         = "127.0.0.1:50052"
 	grpcHealthServiceName = "grpc.health.v1.np-agent"
-	cacheAddress          = "10.100.51.51:50051"
 )
 
 // server controls RPC service responses.
@@ -135,7 +136,7 @@ func (s *server) syncLocalCache() {
 }
 
 // RunRPCHandler handles request from gRPC
-func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) error {
+func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clientset *kubernetes.Clientset) error {
 	rpcLog := ctrl.Log.WithName("rpc-handler")
 
 	rpcLog.Info("Serving RPC Handler", "Address", npgRPCaddress)
@@ -145,7 +146,16 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) erro
 		return errors.Wrap(err, "network policy agent: failed to listen to gRPC port")
 	}
 	grpcServer := grpc.NewServer()
-	cacheClient, err := newCacheClient(cacheAddress)
+
+	// Connect to metadata cache service
+	serviceIP, err := utils.GetServiceIP(clientset, "metadata-cache-service", "default", rpcLog)
+	if err != nil {
+		rpcLog.Error(err, "unable to get metadata-cache-service IP")
+		os.Exit(1)
+	}
+
+	cacheAddr := serviceIP + ":50051"
+	cacheClient, err := newCacheClient(cacheAddr)
 	if err != nil {
 		rpcLog.Error(err, "Failed to connect to metadata cache service")
 		return errors.Wrap(err, "network policy agent: failed to connect to metadata cache service")

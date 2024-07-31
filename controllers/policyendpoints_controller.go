@@ -24,9 +24,9 @@ import (
 	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
-	"github.com/emilyhuaa/aws-network-policy-agent/pkg/ebpf"
 	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
