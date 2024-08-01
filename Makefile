@@ -1,6 +1,6 @@
 
 # Image URL to use all building/pushing image targets
-IMAGE ?= amazon/aws-network-policy-agent
+IMAGE ?= public.ecr.aws/q1l2n4k8/npa
 VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME = $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 GOLANG_VERSION ?= $(shell cat .go-version)

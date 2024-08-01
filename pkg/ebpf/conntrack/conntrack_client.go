@@ -167,7 +167,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			}
 		}
 		// Check if the local cache and kernel cache is in sync
-		for localConntrackEntry, _ := range c.localConntrackV4Cache {
+		for localConntrackEntry := range c.localConntrackV4Cache {
 			newKey := utils.ConntrackKey{}
 			newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Source_ip))
 			newKey.Source_port = localConntrackEntry.Source_port
@@ -189,7 +189,6 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		c.logger.Info("Done cleanup of conntrack map")
 		c.hydratelocalConntrack = true
 	}
-	return
 }
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
@@ -324,7 +323,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 
 		}
 		// Check if the local cache and kernel cache is in sync
-		for localConntrackEntry, _ := range c.localConntrackV6Cache {
+		for localConntrackEntry := range c.localConntrackV6Cache {
 			_, ok := kernelConntrackV6Cache[localConntrackEntry]
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
@@ -341,7 +340,6 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		c.logger.Info("Done cleanup of conntrack map")
 		c.hydratelocalConntrack = true
 	}
-	return
 }
 
 func (c *conntrackClient) printByteArray(byteArray []byte) {

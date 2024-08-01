@@ -106,6 +106,7 @@ type EbpfFirewallRules struct {
 	IPCidr v1alpha1.NetworkAddress
 	Except []v1alpha1.NetworkAddress
 	L4Info []v1alpha1.Port
+	L4Deny []v1alpha1.Port
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
@@ -744,7 +745,6 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
-
 		prefixSplit := strings.Split(prefixLenStr, "/")
 		prefixLen, _ := strconv.Atoi(prefixSplit[1])
 		prefixLenIp1 := prefixLen
@@ -815,7 +815,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	_, mapKey, _ := net.ParseCIDR(l.nodeIP + l.hostMask)
 	key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-	value := utils.ComputeTrieValue([]v1alpha1.Port{}, l.logger, true, false)
+	value := utils.ComputeTrieValue([]v1alpha1.Port{}, []v1alpha1.Port{}, l.logger, true, false)
 	firewallMap[string(key)] = value
 
 	//Sort the rules
@@ -827,10 +827,9 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		//Add the Catch All IP entry
 		_, mapKey, _ := net.ParseCIDR("0.0.0.0/0")
 		key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-		value := utils.ComputeTrieValue(catchAllIPPorts, l.logger, allowAll, false)
+		value := utils.ComputeTrieValue(catchAllIPPorts, []v1alpha1.Port{}, l.logger, allowAll, false)
 		firewallMap[string(key)] = value
 	}
-
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
 
@@ -842,8 +841,8 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			continue
 		}
 
-		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
-			if len(firewallRule.L4Info) == 0 {
+		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) && len(firewallRule.Except) == 0 {
+			if len(firewallRule.L4Info) == 0 && len(firewallRule.L4Deny) == 0 {
 				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
 				l.addCatchAllL4Entry(&firewallRule)
 				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
@@ -888,7 +887,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 				firewallRule.L4Info = mergedL4Info
 
 			}
-			firewallValue := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
+			firewallValue := utils.ComputeTrieValue(firewallRule.L4Info, firewallRule.L4Deny, l.logger, allowAll, false)
 			firewallMap[string(firewallKey)] = firewallValue
 		}
 		if firewallRule.Except != nil {
@@ -900,7 +899,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 					mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
 					firewallRule.L4Info = mergedL4Info
 				}
-				value := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, false, true)
+				value := utils.ComputeTrieValue(firewallRule.L4Info, []v1alpha1.Port{}, l.logger, false, true)
 				firewallMap[string(key)] = value
 			}
 		}

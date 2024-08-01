@@ -39,6 +39,7 @@ struct lpm_trie_val {
     __u32 protocol;
     __u32 start_port;
     __u32 end_port;
+	__u32 allow;
 };
 
 struct conntrack_key {

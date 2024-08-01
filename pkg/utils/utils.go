@@ -23,7 +23,7 @@ var (
 	ANY_IP_PROTOCOL                 = 254
 	TRIE_KEY_LENGTH                 = 8
 	TRIE_V6_KEY_LENGTH              = 20
-	TRIE_VALUE_LENGTH               = 288
+	TRIE_VALUE_LENGTH               = 384
 	BPF_PROGRAMS_PIN_PATH_DIRECTORY = "/sys/fs/bpf/globals/aws/programs/"
 	BPF_MAPS_PIN_PATH_DIRECTORY     = "/sys/fs/bpf/globals/aws/maps/"
 	TC_INGRESS_PROG                 = "handle_ingress"
@@ -142,7 +142,7 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	return key
 }
 
-func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll bool) []byte {
+func ComputeTrieValue(l4Info []v1alpha1.Port, denyL4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll bool) []byte {
 	var startPort, endPort, protocol int
 
 	value := make([]byte, TRIE_VALUE_LENGTH)
@@ -160,7 +160,39 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log.Info("L4 values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
+		val := 1
+		if denyAll {
+			val = 0
+		}
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(val))
+		startOffset += 4
+		log.Info("L4 all values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
+	}
+
+	for _, denyL4 := range denyL4Info {
+		if startOffset >= TRIE_VALUE_LENGTH {
+			return value
+		}
+		endPort = 0
+		startPort = 0
+
+		protocol = deriveProtocolValue(denyL4, allowAll, denyAll)
+		if denyL4.Port != nil {
+			startPort = int(*denyL4.Port)
+		}
+
+		if denyL4.EndPort != nil {
+			endPort = int(*denyL4.EndPort)
+		}
+		log.Info("L4 deny values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(0))
+		startOffset += 4
 	}
 
 	for _, l4Entry := range l4Info {
@@ -185,6 +217,8 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(1))
 		startOffset += 4
 	}
 
@@ -371,6 +405,7 @@ type BPFTrieVal struct {
 	Protocol  uint32
 	StartPort uint32
 	EndPort   uint32
+	Allow     uint32
 }
 
 func ConvTrieV6ToByte(key BPFTrieKeyV6) []byte {
