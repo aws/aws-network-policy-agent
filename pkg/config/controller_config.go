@@ -3,7 +3,13 @@ package config
 import (
 	"errors"
 
+	"context"
+
 	"github.com/spf13/pflag"
+
+	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"google.golang.org/protobuf/types/known/emptypb"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const (
@@ -21,6 +27,8 @@ const (
 	flagEnableNetworkPolicy            = "enable-network-policy"
 	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
 	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
+	flagRunAsSystemProcess             = "run-as-system-process"
+	localIpamAddress                   = "127.0.0.1:50051"
 )
 
 // ControllerConfig contains the controller configuration
@@ -45,6 +53,8 @@ type ControllerConfig struct {
 	ConntrackCacheTableSize int
 	// Configurations for the Controller Runtime
 	RuntimeConfig RuntimeConfig
+	// Run the controller as a system process
+	RunAsSystemProcess bool
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -62,6 +72,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
 		"Table size for network policy agent conntrack cache")
+	fs.BoolVar(&cfg.RunAsSystemProcess, flagRunAsSystemProcess, false, "If enabled, Network Policy Agent will run as a systemd process")
 
 	cfg.RuntimeConfig.BindFlags(fs)
 }
@@ -72,5 +83,33 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
 	}
+
 	return nil
+}
+
+func (cfg *ControllerConfig) GetUpdatedControllerConfigsFromIPAM(ctx context.Context) {
+
+	if cfg.RunAsSystemProcess {
+
+		grpcLogger := ctrl.Log.WithName("grpcLogger")
+
+		grpcLogger.Info("Trying to establish GRPC connection to IPAM")
+		grpcConn, err := rpc.New().Dial(ctx, localIpamAddress, rpc.GetDefaultServiceRetryConfig(), rpc.GetInsecureConnectionType())
+		if err != nil {
+			grpcLogger.Error(err, "Failed to connect to IPAM server")
+		}
+		defer grpcConn.Close()
+
+		ipamd := rpc.NewConfigServerBackendClient(grpcConn)
+		resp, err := ipamd.GetNetworkPolicyAgentConfigs(ctx, &emptypb.Empty{})
+		if err != nil {
+			grpcLogger.Info("Failed to get controller configs, using the default values", "error", err)
+			return
+		}
+
+		// Validate if the values are within valid range (1 sec to 10 mins)
+		if resp.ConntrackCleanupInterval > 0 && resp.ConntrackCleanupInterval <= 600 {
+			cfg.ConntrackCacheCleanupPeriod = int(resp.ConntrackCleanupInterval)
+		}
+	}
 }
