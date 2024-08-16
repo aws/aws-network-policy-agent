@@ -16,7 +16,6 @@ package rpc
 import (
 	"context"
 	"net"
-	"os"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/controllers"
@@ -38,8 +37,10 @@ import (
 )
 
 const (
-	npgRPCaddress         = "127.0.0.1:50052"
-	grpcHealthServiceName = "grpc.health.v1.np-agent"
+	npgRPCaddress            = "127.0.0.1:50052"
+	grpcHealthServiceName    = "grpc.health.v1.np-agent"
+	metadataServiceName      = "aws-k8s-metadata-service"
+	metadataServiceNamespace = "default"
 )
 
 // server controls RPC service responses.
@@ -148,16 +149,13 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clie
 	grpcServer := grpc.NewServer()
 
 	// Connect to metadata cache service
-	serviceIP, err := utils.GetServiceIP(clientset, "metadata-cache-service", "default", rpcLog)
-	if err != nil {
-		rpcLog.Error(err, "unable to get metadata-cache-service IP")
-		os.Exit(1)
-	}
-
+	serviceIP, _ := utils.GetServiceIP(clientset, metadataServiceName, metadataServiceNamespace)
 	cacheClient, err := newCacheClient(serviceIP + ":50051")
 	if err != nil {
-		rpcLog.Error(err, "Failed to connect to metadata cache service")
-		return errors.Wrap(err, "network policy agent: failed to connect to metadata cache service")
+		rpcLog.Error(err, "unable to connect to aws-k8s-metadata service, continuing without")
+		utils.CacheClientConnected = false
+	} else {
+		utils.CacheClientConnected = true
 	}
 
 	s := &server{
@@ -169,6 +167,7 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clie
 	go s.syncLocalCache()
 
 	rpc.RegisterNPBackendServer(grpcServer, s)
+
 	healthServer := health.NewServer()
 	// No need to ever change this to HealthCheckResponse_NOT_SERVING since it's a local service only
 	healthServer.SetServingStatus(grpcHealthServiceName, healthpb.HealthCheckResponse_SERVING)
