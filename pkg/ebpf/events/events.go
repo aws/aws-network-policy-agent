@@ -172,14 +172,24 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					continue
 				}
 
+				srcIP := utils.ConvByteToIPv6(rb.SourceIP).String()
+				srcPort := int(rb.SourcePort)
+				destIP := utils.ConvByteToIPv6(rb.DestIP).String()
+				destPort := int(rb.DestPort)
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				if !utils.CacheClientConnected {
+					log.Info("Flow Info: ", "Src IP", srcIP, "Src Port", srcPort, "Dest IP", destIP, "Dest Port", destPort, "Proto", protocol, "Verdict", verdict)
+					message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(srcPort) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(destPort) + ";" +
+						"PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				} else {
+					srcName, srcNS := utils.GetPodMetadata(srcIP)
+					destName, destNS := utils.GetPodMetadata(destIP)
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+					utils.LogFlowInfo(log, &message, nodeName, srcIP, srcName, srcNS, srcPort, destIP, destName, destNS, destPort, protocol, verdict)
+				}
+
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -187,14 +197,23 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 					log.Info("Failed to read from Ring buf", err)
 					continue
 				}
+				srcIP := utils.ConvByteArrayToIP(rb.SourceIP)
+				srcPort := int(rb.SourcePort)
+				destIP := utils.ConvByteArrayToIP(rb.DestIP)
+				destPort := int(rb.DestPort)
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				if !utils.CacheClientConnected {
+					log.Info("Flow Info: ", "Src IP", srcIP, "Src Port", srcPort, "Dest IP", destIP, "Dest Port", destPort, "Proto", protocol, "Verdict", verdict)
+					message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(srcPort) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(destPort) + ";" +
+						"PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				} else {
+					srcName, srcNS := utils.GetPodMetadata(srcIP)
+					destName, destNS := utils.GetPodMetadata(destIP)
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+					utils.LogFlowInfo(log, &message, nodeName, srcIP, srcName, srcNS, srcPort, destIP, destName, destNS, destPort, protocol, verdict)
+				}
 			}
 
 			if enableCloudWatchLogs {
