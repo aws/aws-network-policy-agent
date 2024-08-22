@@ -164,7 +164,9 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clie
 		cacheClient:      cacheClient,
 	}
 
-	go s.syncLocalCache()
+	if utils.CacheClientConnected {
+		go s.syncLocalCache()
+	}
 
 	rpc.RegisterNPBackendServer(grpcServer, s)
 

@@ -97,9 +97,9 @@ func LogFlowInfo(log logr.Logger, message *string, nodeName, srcIP, srcName, src
 
 	case srcName != "" && srcNS != "" && destName == "" && destNS == "": // if no metadata for dest IP (assumming it is external)
 		log.Info("Flow Info: ", "Src IP", srcIP, "Src Name", srcName, "Src Namespace", srcName, "Src Port", srcPort,
-			"Dest Ext Srv IP", destIP, "Dest Port", destPort, "Proto", protocol, "Verdict", verdict)
+			"Dest Srv IP", destIP, "Dest Port", destPort, "Proto", protocol, "Verdict", verdict)
 		*message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SN" + srcName + ";" + "SNS" + srcName + ";" + "SPORT: " + strconv.Itoa(srcPort) + ";" +
-			"DEXTSRVIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(destPort) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+			"DESTSRVIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(destPort) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 
 	case srcName == "hostIP" && destName == "hostIP": // if source IP is host IP and dest IP is host IP
 		log.Info("Flow Info: ", "Src Host IP", srcIP, "Src Port", srcPort, "Dest Host IP", destIP, "Dest Port", destPort, "Proto", protocol, "Verdict", verdict)
