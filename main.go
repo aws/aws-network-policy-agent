@@ -85,6 +85,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO: instead of creating a new Kubernetes client to get cache service
+	//       IP, use existing policyEndpointController client.Client
 	k8sconfig, err := rest.InClusterConfig()
 	if err != nil {
 		setupLog.Error(err, "Failed to get in-cluster config")
