@@ -82,6 +82,29 @@ Network Policy agent can operate in either IPv4 or IPv6 mode. Setting this flag 
 
 **Note:** VPC CNI by default creates an egress only IPv4 interface for IPv6 pods and this network interface will not be secured by the Network policy feature. Network policies will only be enforced on the Pod's primary interface (i.e.,) `eth0`. If you want to block the egress IPv4 access, please disable the interface creation via [ENABLE_V4_EGRESS](https://github.com/aws/amazon-vpc-cni-k8s#enable_v4_egress-v1151) flag in VPC CNI. 
 
+#### `conntrack-cache-cleanup-period` (from v1.0.7+)
+
+Type: Integer
+
+Default: 300
+
+Network Policy agent maintains a local conntrack cache. This configuration (in seconds) will determine how fast the local conntrack cache should be cleaned up from stale/expired entries. Based on the time interval set, network policy agent checks every entry in the local conntrack cache with kernel conntrack table and determine if the entry has to be deleted.
+
+#### `conntrack-cache-table-size` (from v1.1.3+)
+
+Type: Integer
+
+Default: 1024 * 256
+
+Network Policy agent maintains a local conntrack cache. Ideally this should be of the same size as kernel conntrack table. Note, this should be configured on new nodes before enabling network policy or if network policy is already enabled the change in configuration would need a reload of the nodes. Dynamic update of conntrack map size would lead to traffic disruption and isn't supported. The value supported is between 32K and 1024K.
+
+**Note**: To check the maximum conntrack table size in your linux worker node, use the following command:
+
+```console
+$ cat /proc/sys/net/netfilter/nf_conntrack_max
+262144
+```
+
 ## Network Policy Agent CLI
 The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.
 
