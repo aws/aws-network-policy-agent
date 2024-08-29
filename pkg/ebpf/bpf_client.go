@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -109,7 +108,7 @@ type EbpfFirewallRules struct {
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -181,10 +180,19 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
+		var bpfSdkInputData goelf.BpfCustomData
+		bpfSdkInputData.FilePath = eventsProbe
+		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomMapSize = make(map[string]int)
+
+		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
+
+		ebpfClient.logger.Info("Setting conntrack cache map size: ", "max entries", conntrackTableSize)
+
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFileWithCustomData(bpfSdkInputData)
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
-			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
+			sdkAPIErr.WithLabelValues("LoadBpfFileWithCustomData").Inc()
 			return nil, err
 		}
 		ebpfClient.logger.Info("Successfully loaded events probe")
@@ -736,7 +744,8 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
 
-		prefixLen, _ := strconv.Atoi(prefixLenStr)
+		prefixSplit := strings.Split(prefixLenStr, "/")
+		prefixLen, _ := strconv.Atoi(prefixSplit[1])
 		prefixLenIp1 := prefixLen
 		prefixLenIp2 := prefixLen
 
@@ -793,10 +802,9 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	return result
 }
 
-func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string]uintptr, error) {
+func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 
 	firewallMap := make(map[string][]byte)
-	mapEntries := make(map[string]uintptr)
 	ipCIDRs := make(map[string][]v1alpha1.Port)
 	nonHostCIDRs := make(map[string][]v1alpha1.Port)
 	isCatchAllIPEntryPresent, allowAll := false, false
@@ -896,12 +904,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		}
 	}
 
-	//Add to mapEntries
-	for key, value := range firewallMap {
-		byteSlicePtr := unsafe.Pointer(&value[0])
-		mapEntries[key] = uintptr(byteSlicePtr)
-	}
-	return mapEntries, nil
+	return firewallMap, nil
 }
 
 func (l *bpfClient) checkAndDeriveCatchAllIPPorts(firewallRules []EbpfFirewallRules) ([]v1alpha1.Port, bool, bool) {
