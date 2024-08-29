@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -89,6 +88,7 @@ type BpfClient interface {
 	DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
+	IsMapUpdateRequired(podIdentifier string) bool
 }
 
 type EvProgram struct {
@@ -108,7 +108,7 @@ type EbpfFirewallRules struct {
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -180,10 +180,19 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
+		var bpfSdkInputData goelf.BpfCustomData
+		bpfSdkInputData.FilePath = eventsProbe
+		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomMapSize = make(map[string]int)
+
+		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
+
+		ebpfClient.logger.Info("Setting conntrack cache map size: ", "max entries", conntrackTableSize)
+
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFileWithCustomData(bpfSdkInputData)
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
-			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
+			sdkAPIErr.WithLabelValues("LoadBpfFileWithCustomData").Inc()
 			return nil, err
 		}
 		ebpfClient.logger.Info("Successfully loaded events probe")
@@ -226,10 +235,12 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	}
 
 	// Start Conntrack routines
+	duration := time.Duration(conntrackTTL) * time.Second
+	halfDuration := duration / 2
 	if enableIPv6 {
-		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.Cleanupv6ConntrackMap, halfDuration)
 	} else {
-		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, time.Duration(conntrackTTL)*time.Second)
+		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, halfDuration)
 	}
 
 	// Initializes prometheus metrics
@@ -440,7 +451,7 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 	start := time.Now()
 	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
-	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
 	if ingress {
 		err := l.detachIngressBPFProbe(hostVethName)
 		duration := msSince(start)
@@ -701,6 +712,15 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 	return ingress, egress
 }
 
+func (l *bpfClient) IsMapUpdateRequired(podIdentifier string) bool {
+	mapUpdateRequired := false
+	if _, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
+		l.logger.Info("No map instance found")
+		mapUpdateRequired = true
+	}
+	return mapUpdateRequired
+}
+
 func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []EbpfFirewallRules) error {
 	start := time.Now()
 	duration := msSince(start)
@@ -724,7 +744,8 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
 	sort.Slice(rules, func(i, j int) bool {
 
-		prefixLen, _ := strconv.Atoi(prefixLenStr)
+		prefixSplit := strings.Split(prefixLenStr, "/")
+		prefixLen, _ := strconv.Atoi(prefixSplit[1])
 		prefixLenIp1 := prefixLen
 		prefixLenIp2 := prefixLen
 
@@ -781,10 +802,9 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	return result
 }
 
-func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string]uintptr, error) {
+func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 
 	firewallMap := make(map[string][]byte)
-	mapEntries := make(map[string]uintptr)
 	ipCIDRs := make(map[string][]v1alpha1.Port)
 	nonHostCIDRs := make(map[string][]v1alpha1.Port)
 	isCatchAllIPEntryPresent, allowAll := false, false
@@ -860,6 +880,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			_, firewallMapKey, _ := net.ParseCIDR(string(firewallRule.IPCidr))
 			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 			firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
+
 			if len(firewallRule.L4Info) != 0 {
 				mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
 				firewallRule.L4Info = mergedL4Info
@@ -883,12 +904,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		}
 	}
 
-	//Add to mapEntries
-	for key, value := range firewallMap {
-		byteSlicePtr := unsafe.Pointer(&value[0])
-		mapEntries[key] = uintptr(byteSlicePtr)
-	}
-	return mapEntries, nil
+	return firewallMap, nil
 }
 
 func (l *bpfClient) checkAndDeriveCatchAllIPPorts(firewallRules []EbpfFirewallRules) ([]v1alpha1.Port, bool, bool) {

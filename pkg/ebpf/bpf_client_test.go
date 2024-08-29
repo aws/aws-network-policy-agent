@@ -576,7 +576,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		{
 			name:          "Ingress and Egress Attach - Existing probes",
 			testPod:       testPod,
-			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
+			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace, logr.New(&log.NullLogSink{})),
 			ingress:       true,
 			egress:        true,
 			wantErr:       nil,
@@ -831,6 +831,67 @@ func TestMergeDuplicateL4Info(t *testing.T) {
 			assert.Equal(t, len(tc.Expected), len(mergedPorts))
 		})
 	}
+}
+
+func TestIsMapUpdateRequired(t *testing.T) {
+	sampleIngressPgmInfo := goelf.BpfData{
+		Program: goebpfprogs.BpfProgram{
+			ProgID: 2,
+			ProgFD: 3,
+		},
+	}
+	sampleEgressPgmInfo := goelf.BpfData{
+		Program: goebpfprogs.BpfProgram{
+			ProgID: 4,
+			ProgFD: 5,
+		},
+	}
+
+	tests := []struct {
+		name                    string
+		podIdentifier           string
+		isIngressPgmInfoPresent bool
+		isEgressPgmInfoPresent  bool
+		want                    bool
+	}{
+		{
+			name:                    "PodIdentifier with existing maps",
+			podIdentifier:           "foo-bar",
+			isIngressPgmInfoPresent: true,
+			isEgressPgmInfoPresent:  true,
+			want:                    false,
+		},
+		{
+			name:          "PodIdentifier without existing maps",
+			podIdentifier: "foo-bar",
+			want:          true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				nodeIP:                    "10.1.1.1",
+				logger:                    logr.New(&log.NullLogSink{}),
+				enableIPv6:                false,
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			if tt.isIngressPgmInfoPresent || tt.isEgressPgmInfoPresent {
+				sampleBPFContext := BPFContext{
+					ingressPgmInfo: sampleIngressPgmInfo,
+					egressPgmInfo:  sampleEgressPgmInfo,
+				}
+				testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
+			}
+			gotIsMapUpdateRequired := testBpfClient.IsMapUpdateRequired(tt.podIdentifier)
+			assert.Equal(t, tt.want, gotIsMapUpdateRequired)
+		})
+	}
+
 }
 
 func Int32Ptr(i int32) *int32 {

@@ -72,7 +72,11 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + podNamespace
 }
 
-func GetPodIdentifier(podName, podNamespace string) string {
+func GetPodIdentifier(podName, podNamespace string, log logr.Logger) string {
+	if strings.Contains(podName, ".") {
+		log.Info("Replacing '.' character with '_' for pod pin path.")
+		podName = strings.Replace(podName, ".", "_", -1)
+	}
 	podIdentifierPrefix := podName
 	if strings.Contains(string(podName), "-") {
 		tmpName := strings.Split(podName, "-")
@@ -161,6 +165,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 
 	for _, l4Entry := range l4Info {
 		if startOffset >= TRIE_VALUE_LENGTH {
+			log.Error(nil, "No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
 			return value
 		}
 		endPort = 0

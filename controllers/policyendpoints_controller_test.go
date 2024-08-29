@@ -329,7 +329,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300)
+			false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -709,6 +709,312 @@ func TestDeriveDefaultPodIsolation(t *testing.T) {
 				&tt.policyendpoint, tt.ingressRuleCount, tt.egressRuleCount)
 			assert.Equal(t, tt.want.isIngressIsolated, gotIsIngressIsolated)
 			assert.Equal(t, tt.want.isEgressIsolated, gotIsEgressIsolated)
+		})
+	}
+}
+
+func TestArePoliciesAvailableInLocalCache(t *testing.T) {
+	type want struct {
+		activePoliciesAvailable bool
+	}
+
+	tests := []struct {
+		name               string
+		podIdentifier      string
+		policyEndpointName []string
+		want               want
+	}{
+		{
+			name:               "Active policies present against the PodIdentifier",
+			podIdentifier:      "foo-bar",
+			policyEndpointName: []string{"foo", "bar"},
+			want: want{
+				activePoliciesAvailable: true,
+			},
+		},
+
+		{
+			name:          "No Active policies present against the PodIdentifier",
+			podIdentifier: "foo-bar",
+			want: want{
+				activePoliciesAvailable: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
+			false, false, false, false, 300, 262144)
+		var policyEndpointsList []string
+		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
+		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
+
+		t.Run(tt.name, func(t *testing.T) {
+			activePoliciesAvailable := policyEndpointReconciler.ArePoliciesAvailableInLocalCache(tt.podIdentifier)
+			assert.Equal(t, tt.want.activePoliciesAvailable, activePoliciesAvailable)
+		})
+	}
+}
+
+func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	protocolUDP := corev1.ProtocolUDP
+	var port80 int32 = 80
+
+	type policyendpointGetCall struct {
+		peRef types.NamespacedName
+		pe    *policyendpoint.PolicyEndpoint
+		err   error
+	}
+
+	type want struct {
+		ingressRules      []ebpf.EbpfFirewallRules
+		egressRules       []ebpf.EbpfFirewallRules
+		isIngressIsolated bool
+		isEgressIsolated  bool
+	}
+
+	ingressAndEgressPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			Ingress: []policyendpoint.EndpointInfo{
+				{
+					CIDR: "1.1.1.1/32",
+					Ports: []policyendpoint.Port{
+						{
+							Port:     &port80,
+							Protocol: &protocolTCP,
+						},
+					},
+				},
+			},
+			Egress: []policyendpoint.EndpointInfo{
+				{
+					CIDR: "2.2.2.2/32",
+					Ports: []policyendpoint.Port{
+						{
+							Port:     &port80,
+							Protocol: &protocolUDP,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ingressRulesOnlyPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			PodIsolation: []networking.PolicyType{
+				networking.PolicyTypeIngress,
+				networking.PolicyTypeEgress,
+			},
+			Ingress: []policyendpoint.EndpointInfo{
+				{
+					CIDR: "1.1.1.1/32",
+					Ports: []policyendpoint.Port{
+						{
+							Port:     &port80,
+							Protocol: &protocolTCP,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	egressRulesOnlyPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			PodIsolation: []networking.PolicyType{
+				networking.PolicyTypeIngress,
+				networking.PolicyTypeEgress,
+			},
+			Egress: []policyendpoint.EndpointInfo{
+				{
+					CIDR: "2.2.2.2/32",
+					Ports: []policyendpoint.Port{
+						{
+							Port:     &port80,
+							Protocol: &protocolUDP,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name                  string
+		podIdentifier         string
+		resourceNamespace     string
+		policyEndpointName    string
+		policyendpointGetCall []policyendpointGetCall
+		want                  want
+		wantErr               error
+	}{
+		{
+			name:               "Ingress and Egress Policy",
+			podIdentifier:      "foo-bar",
+			resourceNamespace:  "bar",
+			policyEndpointName: "foo",
+			policyendpointGetCall: []policyendpointGetCall{
+				{
+					peRef: types.NamespacedName{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					pe: &ingressAndEgressPolicy,
+				},
+			},
+			want: want{
+				ingressRules: []ebpf.EbpfFirewallRules{
+					{
+						IPCidr: "1.1.1.1/32",
+						L4Info: []policyendpoint.Port{
+							{
+								Protocol: &protocolTCP,
+								Port:     &port80,
+							},
+						},
+					},
+				},
+				egressRules: []ebpf.EbpfFirewallRules{
+					{
+						IPCidr: "2.2.2.2/32",
+						L4Info: []policyendpoint.Port{
+							{
+								Protocol: &protocolUDP,
+								Port:     &port80,
+							},
+						},
+					},
+				},
+				isIngressIsolated: false,
+				isEgressIsolated:  false,
+			},
+			wantErr: nil,
+		},
+		{
+			name:               "Ingress Only Policy",
+			podIdentifier:      "foo-bar",
+			resourceNamespace:  "bar",
+			policyEndpointName: "foo",
+			policyendpointGetCall: []policyendpointGetCall{
+				{
+					peRef: types.NamespacedName{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					pe: &ingressRulesOnlyPolicy,
+				},
+			},
+			want: want{
+				ingressRules: []ebpf.EbpfFirewallRules{
+					{
+						IPCidr: "1.1.1.1/32",
+						L4Info: []policyendpoint.Port{
+							{
+								Protocol: &protocolTCP,
+								Port:     &port80,
+							},
+						},
+					},
+				},
+				isIngressIsolated: false,
+				isEgressIsolated:  true,
+			},
+			wantErr: nil,
+		},
+
+		{
+			name:               "Egress Only Policy",
+			podIdentifier:      "foo-bar",
+			resourceNamespace:  "bar",
+			policyEndpointName: "foo",
+			policyendpointGetCall: []policyendpointGetCall{
+				{
+					peRef: types.NamespacedName{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					pe: &egressRulesOnlyPolicy,
+				},
+			},
+			want: want{
+				egressRules: []ebpf.EbpfFirewallRules{
+					{
+						IPCidr: "2.2.2.2/32",
+						L4Info: []policyendpoint.Port{
+							{
+								Protocol: &protocolUDP,
+								Port:     &port80,
+							},
+						},
+					},
+				},
+				isIngressIsolated: true,
+				isEgressIsolated:  false,
+			},
+			wantErr: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
+			false, false, false, false, 300, 262144)
+		var policyEndpointsList []string
+		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
+		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
+		for _, item := range tt.policyendpointGetCall {
+			call := item
+			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any()).DoAndReturn(
+				func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+					if call.pe != nil {
+						*currentPE = *call.pe
+					}
+					return call.err
+				},
+			).AnyTimes()
+		}
+
+		t.Run(tt.name, func(t *testing.T) {
+			gotIngressRules, gotEgressRules, gotError := policyEndpointReconciler.DeriveFireWallRulesPerPodIdentifier(tt.podIdentifier, tt.resourceNamespace)
+			assert.Equal(t, tt.want.ingressRules, gotIngressRules)
+			assert.Equal(t, tt.want.egressRules, gotEgressRules)
+			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
 }

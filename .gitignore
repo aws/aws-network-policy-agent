@@ -9,3 +9,7 @@ bin/
 config/
 vendor/
 scripts/results.log
+amazon-network-policy-controller-k8s
+
+# Test build files
+test/build/

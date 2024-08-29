@@ -19,6 +19,8 @@ package main
 import (
 	"os"
 
+	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
 	"github.com/go-logr/logr"
@@ -81,10 +83,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	err = ctrlConfig.ValidControllerFlags()
+	if err != nil {
+		setupLog.Error(err, "Controller flags validation failed")
+		os.Exit(1)
+	}
+
 	ctx := ctrl.SetupSignalHandler()
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod)
+		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
 	if err != nil {
 		setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
 		os.Exit(1)
@@ -106,12 +114,14 @@ func main() {
 	}
 
 	go metrics.ServeMetrics()
+	go rpc.RunRPCHandler(policyEndpointController)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
 }
 
 // loadControllerConfig loads the controller configuration
@@ -129,6 +139,6 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 
 // getLoggerWithLogLevel returns logger with specific log level.
 func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
-	ctrlLogger := logger.New(logLevel, logFilePath, 2)
+	ctrlLogger := logger.New(logLevel, logFilePath)
 	return zapr.NewLogger(ctrlLogger), nil
 }
