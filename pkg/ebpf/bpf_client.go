@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -803,10 +802,9 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	return result
 }
 
-func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string]uintptr, error) {
+func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 
 	firewallMap := make(map[string][]byte)
-	mapEntries := make(map[string]uintptr)
 	ipCIDRs := make(map[string][]v1alpha1.Port)
 	nonHostCIDRs := make(map[string][]v1alpha1.Port)
 	isCatchAllIPEntryPresent, allowAll := false, false
@@ -906,12 +904,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		}
 	}
 
-	//Add to mapEntries
-	for key, value := range firewallMap {
-		byteSlicePtr := unsafe.Pointer(&value[0])
-		mapEntries[key] = uintptr(byteSlicePtr)
-	}
-	return mapEntries, nil
+	return firewallMap, nil
 }
 
 func (l *bpfClient) checkAndDeriveCatchAllIPPorts(firewallRules []EbpfFirewallRules) ([]v1alpha1.Port, bool, bool) {
