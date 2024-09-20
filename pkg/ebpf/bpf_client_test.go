@@ -609,6 +609,8 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			bpfTCClient:               mockTCClient,
 			IngressPodToProgMap:       new(sync.Map),
 			EgressPodToProgMap:        new(sync.Map),
+			IngressProgToPodsMap:      new(sync.Map),
+			EgressProgToPodsMap:       new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
