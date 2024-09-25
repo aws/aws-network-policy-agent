@@ -1,11 +1,11 @@
 module github.com/aws/aws-network-policy-agent
 
-go 1.22.0
+go 1.22.3
 
 toolchain go1.22.5
 
 require (
-	github.com/aws/amazon-vpc-cni-k8s v1.18.1
+	github.com/aws/amazon-vpc-cni-k8s v1.18.3
 	github.com/aws/aws-ebpf-sdk-go v1.0.10
 	github.com/aws/aws-sdk-go v1.55.3
 	github.com/go-logr/logr v1.4.2
@@ -70,7 +70,7 @@ require (
 	golang.org/x/oauth2 v0.21.0 // indirect
 	golang.org/x/term v0.21.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
-	golang.org/x/time v0.3.0 // indirect
+	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240701130421-f6361c86f094 // indirect
