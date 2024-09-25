@@ -152,21 +152,21 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:            "10.1.1.1",
-				logger:            logr.New(&log.NullLogSink{}),
-				enableIPv6:        false,
-				hostMask:          "/32",
-				IngressProgPodMap: new(sync.Map),
-				EgressProgPodMap:  new(sync.Map),
+				nodeIP:              "10.1.1.1",
+				logger:              logr.New(&log.NullLogSink{}),
+				enableIPv6:          false,
+				hostMask:            "/32",
+				IngressPodToProgMap: new(sync.Map),
+				EgressPodToProgMap:  new(sync.Map),
 			}
 
 			if tt.ingressAttached {
 				podIdentifier := utils.GetPodNamespacedName(tt.podName, tt.podNamespace)
-				testBpfClient.IngressProgPodMap.Store(podIdentifier, ingressProgFD)
+				testBpfClient.IngressPodToProgMap.Store(podIdentifier, ingressProgFD)
 			}
 			if tt.egressAttached {
 				podIdentifier := utils.GetPodNamespacedName(tt.podName, tt.podNamespace)
-				testBpfClient.EgressProgPodMap.Store(podIdentifier, egressProgFD)
+				testBpfClient.EgressPodToProgMap.Store(podIdentifier, egressProgFD)
 			}
 			gotIngress, gotEgress := testBpfClient.IsEBPFProbeAttached(tt.podName, tt.podNamespace)
 			assert.Equal(t, tt.want.ingress, gotIngress)
@@ -257,12 +257,12 @@ func TestBpfClient_CheckAndDeriveCatchAllIPPorts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:            "10.1.1.1",
-				logger:            logr.New(&log.NullLogSink{}),
-				enableIPv6:        false,
-				hostMask:          "/32",
-				IngressProgPodMap: new(sync.Map),
-				EgressProgPodMap:  new(sync.Map),
+				nodeIP:              "10.1.1.1",
+				logger:              logr.New(&log.NullLogSink{}),
+				enableIPv6:          false,
+				hostMask:            "/32",
+				IngressPodToProgMap: new(sync.Map),
+				EgressPodToProgMap:  new(sync.Map),
 			}
 			gotCatchAllL4Info, gotIsCatchAllIPEntryPresent, gotAllowAllPortAndProtocols := testBpfClient.checkAndDeriveCatchAllIPPorts(tt.firewallRules)
 			assert.Equal(t, tt.want.catchAllL4Info, gotCatchAllL4Info)
@@ -320,12 +320,12 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:            "10.1.1.1",
-				logger:            logr.New(&log.NullLogSink{}),
-				enableIPv6:        false,
-				hostMask:          "/32",
-				IngressProgPodMap: new(sync.Map),
-				EgressProgPodMap:  new(sync.Map),
+				nodeIP:              "10.1.1.1",
+				logger:              logr.New(&log.NullLogSink{}),
+				enableIPv6:          false,
+				hostMask:            "/32",
+				IngressPodToProgMap: new(sync.Map),
+				EgressPodToProgMap:  new(sync.Map),
 			}
 			gotMatchingCIDRL4Info := testBpfClient.checkAndDeriveL4InfoFromAnyMatchingCIDRs(tt.firewallRule, tt.nonHostCIDRs)
 			assert.Equal(t, tt.want.matchingCIDRL4Info, gotMatchingCIDRL4Info)
@@ -373,12 +373,12 @@ func TestBpfClient_AddCatchAllL4Entry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:            "10.1.1.1",
-				logger:            logr.New(&log.NullLogSink{}),
-				enableIPv6:        false,
-				hostMask:          "/32",
-				IngressProgPodMap: new(sync.Map),
-				EgressProgPodMap:  new(sync.Map),
+				nodeIP:              "10.1.1.1",
+				logger:              logr.New(&log.NullLogSink{}),
+				enableIPv6:          false,
+				hostMask:            "/32",
+				IngressPodToProgMap: new(sync.Map),
+				EgressPodToProgMap:  new(sync.Map),
 			}
 			testBpfClient.addCatchAllL4Entry(&tt.firewallRules)
 			assert.Equal(t, tt.firewallRules, l4InfoWithCatchAllL4Info)
@@ -607,8 +607,10 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			policyEndpointeBPFContext: new(sync.Map),
 			bpfSDKClient:              mockBpfClient,
 			bpfTCClient:               mockTCClient,
-			IngressProgPodMap:         new(sync.Map),
-			EgressProgPodMap:          new(sync.Map),
+			IngressPodToProgMap:       new(sync.Map),
+			EgressPodToProgMap:        new(sync.Map),
+			IngressProgToPodsMap:      new(sync.Map),
+			EgressProgToPodsMap:       new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -661,8 +663,8 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 			hostMask:                  "/32",
 			policyEndpointeBPFContext: new(sync.Map),
 			bpfTCClient:               mockTCClient,
-			IngressProgPodMap:         new(sync.Map),
-			EgressProgPodMap:          new(sync.Map),
+			IngressPodToProgMap:       new(sync.Map),
+			EgressPodToProgMap:        new(sync.Map),
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
