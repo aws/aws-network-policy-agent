@@ -2,7 +2,7 @@ module github.com/aws/aws-network-policy-agent
 
 go 1.22.3
 
-toolchain go1.23.1
+toolchain go1.22.5
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.18.3
