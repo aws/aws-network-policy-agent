@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/prometheus/client_golang/prometheus"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -31,6 +32,28 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
+var (
+	dropCountTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_count_total",
+			Help: "Total number of packets dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+
+	dropBytesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_bytes_total",
+			Help: "Total number of bytes dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(dropBytesTotal, dropCountTotal)
+}
+
 type ringBufferDataV4_t struct {
 	SourceIP   uint32
 	SourcePort uint32
@@ -38,6 +61,8 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint64
+	IsEgress   uint8
 }
 
 type ringBufferDataV6_t struct {
@@ -187,7 +212,14 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-
+				if rb.Verdict == uint32(0) {
+					direction := "egress"
+					if rb.IsEgress == 0 {
+						direction = "ingress"
+					}
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
 					"Proto", protocol, "Verdict", verdict)
