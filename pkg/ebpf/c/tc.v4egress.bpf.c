@@ -218,7 +218,8 @@ int handle_egress(struct __sk_buff *skb)
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
-
+		evt.is_egress = 1;
+		evt.packet_sz = skb->len; 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&egress_pod_state_map, &key);
 		// There should always be an entry in pod_state_map. pst returned in above line should never be null.

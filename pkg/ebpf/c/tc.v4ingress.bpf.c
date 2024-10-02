@@ -217,6 +217,8 @@ int handle_ingress(struct __sk_buff *skb)
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+		evt.packet_sz = skb->len
+		evt.is_egress = 0
 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&ingress_pod_state_map, &key);
