@@ -61,7 +61,7 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
-	PacketSz   uint64
+	PacketSz   uint32
 	IsEgress   uint8
 }
 
@@ -207,7 +207,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Info("Failed to read from Ring buf", err)
+					log.Info("Failed to read from Ring buf", "error", err)
 					continue
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
@@ -222,7 +222,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+					"Proto", protocol, "Verdict", verdict, "Packetlen", rb.PacketSz)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}
