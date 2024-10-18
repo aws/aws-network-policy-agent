@@ -256,6 +256,22 @@ func IsNodeIP(nodeIP string, ipCidr string) bool {
 	return false
 }
 
+func IsIpv4(ipCidr string) bool {
+	ipAddr, _, _ := net.ParseCIDR(ipCidr)
+	if ipAddr.To4() != nil {
+		return true
+	}
+	return false
+}
+
+func IsIpv6(ipCidr string) bool {
+	ipAddr, _, _ := net.ParseCIDR(ipCidr)
+	if ipAddr.To16() != nil {
+		return true
+	}
+	return false
+}
+
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
