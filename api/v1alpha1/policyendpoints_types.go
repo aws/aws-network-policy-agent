@@ -48,6 +48,9 @@ type Port struct {
 
 // EndpointInfo defines the network endpoint information for the policy ingress/egress
 type EndpointInfo struct {
+	// Action is the action to enforce on an IP/CIDR (Allow, Deny, Pass)
+	Action string `json:"action"`
+
 	// CIDR is the network address(s) of the endpoint
 	CIDR NetworkAddress `json:"cidr"`
 
@@ -72,6 +75,15 @@ type PodEndpoint struct {
 
 // PolicyEndpointSpec defines the desired state of PolicyEndpoint
 type PolicyEndpointSpec struct {
+	// IsGlobal specifies whether the parent policy is an admin policy
+	IsGlobal bool `json:"isGlobal"`
+
+	// Namespaces of the pod selector, will be empty for cluster wide
+	Namespaces []string `json:"namespaces"`
+
+	// Priority of the policy, lower value is higher priority
+	Priority int `json:"priority"`
+
 	// PodSelector is the podSelector from the policy resource
 	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 
