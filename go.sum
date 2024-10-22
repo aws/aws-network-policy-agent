@@ -1,9 +1,9 @@
-github.com/aws/amazon-vpc-cni-k8s v1.18.3 h1:qdkbo5yffFXg7FK/pmCHlxzXmEAFn+vDzzihFEkYbgM=
-github.com/aws/amazon-vpc-cni-k8s v1.18.3/go.mod h1:Xy7pF9qmE5mdiEkfgzr2HJNJmH3ARxKuOTWoxC1VO64=
+github.com/aws/amazon-vpc-cni-k8s v1.18.5 h1:hKG+EmpE49/eRYFcpf7cb/05sHTpsd4XSNG2rrHkIr4=
+github.com/aws/amazon-vpc-cni-k8s v1.18.5/go.mod h1:NNCsaQbRPDUfOhHU1MPz6RlTkOAC8/RjoK+hfmHzeqc=
 github.com/aws/aws-ebpf-sdk-go v1.0.10 h1:QBfNC2ZOoRZcEb9jeR4Nh8Uyw5fkI6Ckh9RTy1H6dBI=
 github.com/aws/aws-ebpf-sdk-go v1.0.10/go.mod h1:ac1t60OCFqHSPXRroKl6DUaZ4WDvo/CmKKD25K/pfO0=
-github.com/aws/aws-sdk-go v1.55.3 h1:0B5hOX+mIx7I5XPOrjrHlKSDQV/+ypFZpIHOx5LOk3E=
-github.com/aws/aws-sdk-go v1.55.3/go.mod h1:eRwEWoyTWFMVYVQzKMNHWP5/RV4xIUGMQfXQHfHkpNU=
+github.com/aws/aws-sdk-go v1.55.5 h1:KKUZBfBoyqy5d3swXyiC7Q76ic40rYcbqH7qjh59kzU=
+github.com/aws/aws-sdk-go v1.55.5/go.mod h1:eRwEWoyTWFMVYVQzKMNHWP5/RV4xIUGMQfXQHfHkpNU=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
