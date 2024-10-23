@@ -660,6 +660,7 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 			bpfTCClient:               mockTCClient,
 			IngressPodToProgMap:       new(sync.Map),
 			EgressPodToProgMap:        new(sync.Map),
+			PodToAttachProbesLock:     new(sync.Map),
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
