@@ -874,6 +874,16 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			continue
 		}
 
+		if l.enableIPv6 && !strings.Contains(string(firewallRule.IPCidr), "::") {
+			l.logger.Info("Skipping ipv4 rule in ipv6 cluster: ", "CIDR: ", string(firewallRule.IPCidr))
+			continue
+		}
+
+		if !l.enableIPv6 && strings.Contains(string(firewallRule.IPCidr), "::") {
+			l.logger.Info("Skipping ipv6 rule in ipv4 cluster: ", "CIDR: ", string(firewallRule.IPCidr))
+			continue
+		}
+
 		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
 			if len(firewallRule.L4Info) == 0 {
 				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
