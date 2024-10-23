@@ -449,7 +449,9 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	value, _ := l.PodToAttachProbesLock.LoadOrStore(podNamespacedName, &sync.Mutex{})
 	attachProbesLock := value.(*sync.Mutex)
 	attachProbesLock.Lock()
+	l.logger.Info("Got the attatchProbesLock for", "pod", pod.Name, " in namespace", pod.Namespace)
 	defer attachProbesLock.Unlock()
+
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
 	// If yes, then skip probe attach flow for this pod and update the relevant map entries.
 	isIngressProbeAttached, isEgressProbeAttached := l.IsEBPFProbeAttached(pod.Name, pod.Namespace)
