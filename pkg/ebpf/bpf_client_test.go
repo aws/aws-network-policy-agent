@@ -569,23 +569,17 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		name          string
 		testPod       types.NamespacedName
 		podIdentifier string
-		ingress       bool
-		egress        bool
 		wantErr       error
 	}{
 		{
 			name:          "Ingress and Egress Attach - Existing probes",
 			testPod:       testPod,
 			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace, logr.New(&log.NullLogSink{})),
-			ingress:       true,
-			egress:        true,
 			wantErr:       nil,
 		},
 		{
 			name:    "Ingress and Egress Attach - New probes",
 			testPod: testPod,
-			ingress: true,
-			egress:  true,
 			wantErr: nil,
 		},
 	}
@@ -611,6 +605,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			EgressPodToProgMap:        new(sync.Map),
 			IngressProgToPodsMap:      new(sync.Map),
 			EgressProgToPodsMap:       new(sync.Map),
+			PodToAttachProbesLock:     new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -620,7 +615,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.ingress, tt.egress)
+			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
