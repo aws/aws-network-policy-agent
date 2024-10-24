@@ -605,7 +605,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			EgressPodToProgMap:        new(sync.Map),
 			IngressProgToPodsMap:      new(sync.Map),
 			EgressProgToPodsMap:       new(sync.Map),
-			PodToAttachProbesLock:     new(sync.Map),
+			AttachProbesToPodLock:     new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -660,7 +660,7 @@ func TestBpfClient_DetacheBPFProbes(t *testing.T) {
 			bpfTCClient:               mockTCClient,
 			IngressPodToProgMap:       new(sync.Map),
 			EgressPodToProgMap:        new(sync.Map),
-			PodToAttachProbesLock:     new(sync.Map),
+			AttachProbesToPodLock:     new(sync.Map),
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
