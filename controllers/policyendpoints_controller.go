@@ -321,10 +321,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			continue
 		}
 
-		// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
-		// If yes, then skip probe attach flow for this pod and update the relevant map entries.
-		isIngressProbeAttached, isEgressProbeAttached := r.ebpfClient.IsEBPFProbeAttached(pod.Name, pod.Namespace)
-		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier, !isIngressProbeAttached, !isEgressProbeAttached)
+		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier)
 		if err != nil {
 			r.log.Info("Attaching eBPF probe failed for", "pod", pod.Name, "namespace", pod.Namespace)
 			return err
@@ -621,6 +618,7 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 			r.log.Info("Pod not active. Deleting from progPod caches", "podName: ", oldPod.Name, "podNamespace: ", oldPod.Namespace)
 			r.ebpfClient.DeletePodFromIngressProgPodCaches(oldPod.Name, oldPod.Namespace)
 			r.ebpfClient.DeletePodFromEgressProgPodCaches(oldPod.Name, oldPod.Namespace)
+			r.ebpfClient.DeletePodFromAttachProbesToPodLock(oldPod.Name, oldPod.Namespace)
 		}
 	}
 
