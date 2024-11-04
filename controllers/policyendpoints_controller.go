@@ -131,6 +131,7 @@ type PolicyEndpointsReconciler struct {
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 
 	if !r.enableNetworkPolicy {
+		r.log.Info("Skipping policy endpoint reconciliation as network policy agent is disabled")
 		return ctrl.Result{}, nil
 	}
 
