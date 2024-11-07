@@ -86,7 +86,10 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 		r.nodeIP, _ = imds.GetMetaData("ipv6")
 	}
 	r.log.Info("ConntrackTTL", "cleanupPeriod", conntrackTTL)
+
 	var err error
+	r.enableNetworkPolicy = enableNetworkPolicy
+
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
 			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL, conntrackTableSize)
@@ -116,6 +119,8 @@ type PolicyEndpointsReconciler struct {
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 
+	enableNetworkPolicy bool
+
 	//Logger
 	log logr.Logger
 }
@@ -124,6 +129,12 @@ type PolicyEndpointsReconciler struct {
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints/status,verbs=get
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+
+	if !r.enableNetworkPolicy {
+		r.log.Info("Skipping policy endpoint reconciliation as network policy agent is disabled")
+		return ctrl.Result{}, nil
+	}
+
 	r.log.Info("Received a new reconcile request", "req", req)
 	if err := r.reconcile(ctx, req); err != nil {
 		r.log.Error(err, "Reconcile error")
