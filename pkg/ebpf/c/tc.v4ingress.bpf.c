@@ -201,7 +201,9 @@ int handle_ingress(struct __sk_buff *skb)
 				return BPF_DROP;
 			}
 
-			if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->protocol &&
+			if ((trie_val->protocol == ANY_IP_PROTOCOL &&
+						((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+						 (l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port))) || (trie_val->protocol == ip->protocol &&
 						((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
 						 (l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 				//Inject in to conntrack map

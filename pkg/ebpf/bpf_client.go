@@ -49,6 +49,7 @@ var (
 	CONNTRACK_MAP_PIN_PATH                     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
+	DENY_ALL_PROTOCOL          corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	POD_VETH_PREFIX                            = "eni"
 )
 
@@ -856,10 +857,7 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 
 	firewallMap := make(map[string][]byte)
-	ipCIDRs := make(map[string][]v1alpha1.Port)
-	nonHostCIDRs := make(map[string][]v1alpha1.Port)
-	isCatchAllIPEntryPresent, allowAll := false, false
-	var catchAllIPPorts []v1alpha1.Port
+	cidrsMap := make(map[string]EbpfFirewallRules)
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	_, mapKey, _ := net.ParseCIDR(l.nodeIP + l.hostMask)
@@ -869,16 +867,6 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 
 	//Sort the rules
 	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
-
-	//Check and aggregate L4 Port Info for Catch All Entries.
-	catchAllIPPorts, isCatchAllIPEntryPresent, allowAll = l.checkAndDeriveCatchAllIPPorts(firewallRules)
-	if isCatchAllIPEntryPresent {
-		//Add the Catch All IP entry
-		_, mapKey, _ := net.ParseCIDR("0.0.0.0/0")
-		key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-		value := utils.ComputeTrieValue(catchAllIPPorts, l.logger, allowAll, false)
-		firewallMap[string(key)] = value
-	}
 
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
@@ -901,110 +889,94 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			continue
 		}
 
-		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
-			if len(firewallRule.L4Info) == 0 {
-				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
-				l.addCatchAllL4Entry(&firewallRule)
-				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
-			}
-			if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
-				existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]
-				if ok {
-					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
-				} else {
-					// Check if the /m entry is part of any /n CIDRs that we've encountered so far
-					// If found, we need to include the port and protocol combination against the current entry as well since
-					// we use LPM TRIE map and the /m will always win out.
-					cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
-					if len(cidrL4Info) > 0 {
-						firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
-					}
-				}
-				nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-			} else {
-				if existingL4Info, ok := ipCIDRs[string(firewallRule.IPCidr)]; ok {
-					firewallRule.L4Info = append(firewallRule.L4Info, existingL4Info...)
-				}
-				// Check if the /32 entry is part of any non host CIDRs that we've encountered so far
-				// If found, we need to include the port and protocol combination against the current entry as well since
-				// we use LPM TRIE map and the /32 will always win out.
-				cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
-				if len(cidrL4Info) > 0 {
-					firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
-				}
-				ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
-			}
-			//Include port and protocol combination paired with catch all entries
-			firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
-
-			l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
-			_, firewallMapKey, _ := net.ParseCIDR(string(firewallRule.IPCidr))
-			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-			firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
-
-			if len(firewallRule.L4Info) != 0 {
-				mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
-				firewallRule.L4Info = mergedL4Info
-
-			}
-			firewallValue := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
-			firewallMap[string(firewallKey)] = firewallValue
+		// If no L4 specified add catch all entry
+		if len(firewallRule.L4Info) == 0 {
+			l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
+			l.addCatchAllL4Entry(&firewallRule)
+			l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
 		}
+
+		if existingFirewallRuleInfo, ok := cidrsMap[string(firewallRule.IPCidr)]; ok {
+			l.logger.Info("[DEBUG] found existing entry appending")
+			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
+			firewallRule.Except = append(firewallRule.Except, existingFirewallRuleInfo.Except...)
+		} else {
+			// Check if the /m entry is part of any /n CIDRs that we've encountered so far
+			// If found, we need to include the port and protocol combination against the current entry as well since
+			// we use LPM TRIE map and the /m will always win out.
+			cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), cidrsMap)
+			if len(cidrL4Info) > 0 {
+				l.logger.Info("[DEBUG] found cidrl4info from cidr matching. appending")
+				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
+			}
+		}
+		cidrsMap[string(firewallRule.IPCidr)] = firewallRule
+	}
+
+	// Go through except CIDRs and append DENY all rule to the L4 info
+	for _, firewallRule := range firewallRules {
 		if firewallRule.Except != nil {
-			for _, exceptCIDR := range firewallRule.Except {
-				_, mapKey, _ := net.ParseCIDR(string(exceptCIDR))
-				key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-				l.logger.Info("Parsed Except CIDR", "IP Key: ", mapKey)
-				if len(firewallRule.L4Info) != 0 {
-					mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
-					firewallRule.L4Info = mergedL4Info
+			for _, exceptCidr := range firewallRule.Except {
+				exceptFirewall := EbpfFirewallRules{
+					IPCidr: exceptCidr,
+					Except: []v1alpha1.NetworkAddress{},
+					L4Info: []v1alpha1.Port{},
 				}
-				value := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, false, true)
-				firewallMap[string(key)] = value
+				if existingFirewallRuleInfo, ok := cidrsMap[string(exceptCidr)]; ok {
+					l.logger.Info("[DEBUG] found existing entry appending")
+					exceptFirewall.L4Info = existingFirewallRuleInfo.L4Info
+				}
+				l.addDenyAllL4Entry(&exceptFirewall)
+				cidrsMap[string(exceptCidr)] = exceptFirewall
+				l.logger.Info("Updating map with Except CIDR", "IP Key: ", string(exceptCidr))
 			}
 		}
+	}
+
+	for key, value := range cidrsMap {
+		l.logger.Info("Updating Map with ", "IP Key:", key)
+		_, firewallMapKey, _ := net.ParseCIDR(string(key))
+		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
+		firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
+
+		if len(value.L4Info) != 0 {
+			mergedL4Info := mergeDuplicateL4Info(value.L4Info)
+			value.L4Info = mergedL4Info
+
+		}
+		firewallValue := utils.ComputeTrieValue(value.L4Info, l.logger, false, false)
+		firewallMap[string(firewallKey)] = firewallValue
 	}
 
 	return firewallMap, nil
 }
 
-func (l *bpfClient) checkAndDeriveCatchAllIPPorts(firewallRules []EbpfFirewallRules) ([]v1alpha1.Port, bool, bool) {
-	var catchAllL4Info []v1alpha1.Port
-	isCatchAllIPEntryPresent := false
-	allowAllPortAndProtocols := false
-	for _, firewallRule := range firewallRules {
-		if !strings.Contains(string(firewallRule.IPCidr), "/") {
-			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
-		}
-		if !l.enableIPv6 && strings.Contains(string(firewallRule.IPCidr), "::") {
-			l.logger.Info("IPv6 catch all entry in IPv4 mode - skip ")
-			continue
-		}
-		if utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
-			catchAllL4Info = append(catchAllL4Info, firewallRule.L4Info...)
-			isCatchAllIPEntryPresent = true
-			if len(firewallRule.L4Info) == 0 {
-				//All ports and protocols
-				allowAllPortAndProtocols = true
-			}
-		}
-		l.logger.Info("Current L4 entry count for catch all entry: ", "count: ", len(catchAllL4Info))
-	}
-	l.logger.Info("Total L4 entry count for catch all entry: ", "count: ", len(catchAllL4Info))
-	return catchAllL4Info, isCatchAllIPEntryPresent, allowAllPortAndProtocols
-}
-
 func (l *bpfClient) checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
-	nonHostCIDRs map[string][]v1alpha1.Port) []v1alpha1.Port {
+	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
 	var matchingCIDRL4Info []v1alpha1.Port
 
 	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
-	for nonHostCIDR, l4Info := range nonHostCIDRs {
-		_, cidrEntry, _ := net.ParseCIDR(nonHostCIDR)
-		l.logger.Info("CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
+	for cidr, cidrFirewallInfo := range cidrsMap {
+		if !utils.IsNonHostCIDR(cidr) {
+			continue
+		}
+		_, cidrEntry, _ := net.ParseCIDR(cidr)
+		l.logger.Info("Checking CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", cidr)
 		if cidrEntry.Contains(ipToCheck.IP) {
-			l.logger.Info("Found a CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
-			matchingCIDRL4Info = append(matchingCIDRL4Info, l4Info...)
+			l.logger.Info("Found a CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", cidr)
+			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
+			foundInExcept := false
+			for _, except := range cidrFirewallInfo.Except {
+				_, exceptEntry, _ := net.ParseCIDR(string(except))
+				if exceptEntry.Contains(ipToCheck.IP) {
+					foundInExcept = true
+					l.logger.Info("Found IP: ", firewallRule, " in except block ", string(except), " of CIDR ", cidr, " . Skipping CIDR match")
+					break
+				}
+			}
+			if !foundInExcept {
+				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
+			}
 		}
 	}
 	return matchingCIDRL4Info
@@ -1015,6 +987,13 @@ func (l *bpfClient) addCatchAllL4Entry(firewallRule *EbpfFirewallRules) {
 		Protocol: &CATCH_ALL_PROTOCOL,
 	}
 	firewallRule.L4Info = append(firewallRule.L4Info, catchAllL4Entry)
+}
+
+func (l *bpfClient) addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
+	denyAllL4Entry := v1alpha1.Port{
+		Protocol: &DENY_ALL_PROTOCOL,
+	}
+	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
 func (l *bpfClient) DeletePodFromIngressProgPodCaches(podName string, podNamespace string) {

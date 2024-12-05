@@ -32,6 +32,7 @@ var (
 	TC_EGRESS_MAP                   = "egress_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
+	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
 	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
@@ -142,7 +143,7 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	return key
 }
 
-func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll bool) []byte {
+func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll bool, denyAll bool) []byte {
 	var startPort, endPort, protocol int
 
 	value := make([]byte, TRIE_VALUE_LENGTH)
@@ -161,6 +162,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
 		log.Info("L4 values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
+		return value
 	}
 
 	for _, l4Entry := range l4Info {
@@ -192,7 +194,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll, denyAll
 }
 
 func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
-	protocol := TCP_PROTOCOL_NUMBER //ProtocolTCP
+	protocol := ANY_IP_PROTOCOL
 
 	if denyAll {
 		return RESERVED_IP_PROTOCOL_NUMBER
@@ -203,7 +205,7 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	}
 
 	if l4Info.Protocol == nil {
-		return protocol //Protocol defaults TCP if not specified
+		return protocol //Protocol defaults to ANY_IP_PROTOCOL if not specified
 	}
 
 	if *l4Info.Protocol == corev1.ProtocolUDP {
@@ -212,6 +214,8 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 		protocol = SCTP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == CATCH_ALL_PROTOCOL {
 		protocol = ANY_IP_PROTOCOL
+	} else if *l4Info.Protocol == DENY_ALL_PROTOCOL {
+		protocol = RESERVED_IP_PROTOCOL_NUMBER
 	}
 
 	return protocol
@@ -240,14 +244,6 @@ func IsMissingFilterError(error string) bool {
 	return false
 }
 
-func IsCatchAllIPEntry(ipAddr string) bool {
-	ipSplit := strings.Split(ipAddr, "/")
-	if ipSplit[1] == "0" { //if ipSplit[0] == "0.0.0.0" && ipSplit[1] == "0" {
-		return true
-	}
-	return false
-}
-
 func IsNodeIP(nodeIP string, ipCidr string) bool {
 	ipAddr, _, _ := net.ParseCIDR(ipCidr)
 	if net.ParseIP(nodeIP).Equal(ipAddr) {
@@ -259,7 +255,7 @@ func IsNodeIP(nodeIP string, ipCidr string) bool {
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
-	if ipSplit[1] != "32" && ipSplit[1] != "128" && ipSplit[1] != "0" {
+	if ipSplit[1] != "32" && ipSplit[1] != "128" {
 		return true
 	}
 	return false
