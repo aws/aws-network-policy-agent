@@ -915,16 +915,15 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	for _, firewallRule := range firewallRules {
 		if firewallRule.Except != nil {
 			for _, exceptCidr := range firewallRule.Except {
-				exceptFirewall := EbpfFirewallRules{
-					IPCidr: exceptCidr,
-					Except: []v1alpha1.NetworkAddress{},
-					L4Info: []v1alpha1.Port{},
+				if _, ok := cidrsMap[string(exceptCidr)]; !ok {
+					exceptFirewall := EbpfFirewallRules{
+						IPCidr: exceptCidr,
+						Except: []v1alpha1.NetworkAddress{},
+						L4Info: []v1alpha1.Port{},
+					}
+					l.addDenyAllL4Entry(&exceptFirewall)
+					cidrsMap[string(exceptCidr)] = exceptFirewall
 				}
-				if existingFirewallRuleInfo, ok := cidrsMap[string(exceptCidr)]; ok {
-					exceptFirewall.L4Info = existingFirewallRuleInfo.L4Info
-				}
-				l.addDenyAllL4Entry(&exceptFirewall)
-				cidrsMap[string(exceptCidr)] = exceptFirewall
 				l.logger.Info("Parsed Except CIDR", "IP Key: ", string(exceptCidr))
 			}
 		}
