@@ -897,7 +897,6 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		}
 
 		if existingFirewallRuleInfo, ok := cidrsMap[string(firewallRule.IPCidr)]; ok {
-			l.logger.Info("[DEBUG] found existing entry appending")
 			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
 			firewallRule.Except = append(firewallRule.Except, existingFirewallRuleInfo.Except...)
 		} else {
@@ -906,7 +905,6 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 			// we use LPM TRIE map and the /m will always win out.
 			cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), cidrsMap)
 			if len(cidrL4Info) > 0 {
-				l.logger.Info("[DEBUG] found cidrl4info from cidr matching. appending")
 				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
 			}
 		}
@@ -923,12 +921,11 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 					L4Info: []v1alpha1.Port{},
 				}
 				if existingFirewallRuleInfo, ok := cidrsMap[string(exceptCidr)]; ok {
-					l.logger.Info("[DEBUG] found existing entry appending")
 					exceptFirewall.L4Info = existingFirewallRuleInfo.L4Info
 				}
 				l.addDenyAllL4Entry(&exceptFirewall)
 				cidrsMap[string(exceptCidr)] = exceptFirewall
-				l.logger.Info("Updating map with Except CIDR", "IP Key: ", string(exceptCidr))
+				l.logger.Info("Parsed Except CIDR", "IP Key: ", string(exceptCidr))
 			}
 		}
 	}
@@ -961,9 +958,8 @@ func (l *bpfClient) checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string
 			continue
 		}
 		_, cidrEntry, _ := net.ParseCIDR(cidr)
-		l.logger.Info("Checking CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", cidr)
 		if cidrEntry.Contains(ipToCheck.IP) {
-			l.logger.Info("Found a CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", cidr)
+			l.logger.Info("Found CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", cidr)
 			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
 			foundInExcept := false
 			for _, except := range cidrFirewallInfo.Except {

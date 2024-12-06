@@ -208,7 +208,9 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 		return protocol //Protocol defaults to ANY_IP_PROTOCOL if not specified
 	}
 
-	if *l4Info.Protocol == corev1.ProtocolUDP {
+	if *l4Info.Protocol == corev1.ProtocolTCP {
+		protocol = TCP_PROTOCOL_NUMBER
+	} else if *l4Info.Protocol == corev1.ProtocolUDP {
 		protocol = UDP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == corev1.ProtocolSCTP {
 		protocol = SCTP_PROTOCOL_NUMBER
