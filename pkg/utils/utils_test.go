@@ -554,46 +554,6 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 	}
 }
 
-func TestIsCatchAllIPEntry(t *testing.T) {
-	type args struct {
-		ipAddr string
-	}
-
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{
-			name: "IPv4 Catch All IP Entry",
-			args: args{
-				ipAddr: "0.0.0.0/0",
-			},
-			want: true,
-		},
-		{
-			name: "IPv4 Host IP Entry",
-			args: args{
-				ipAddr: "1.1.1.1/32",
-			},
-			want: false,
-		},
-		{
-			name: "Random /m IPv4 CIDR",
-			args: args{
-				ipAddr: "1.1.1.2/24",
-			},
-			want: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsCatchAllIPEntry(tt.args.ipAddr)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestIsNonHostCIDR(t *testing.T) {
 	type args struct {
 		ipAddr string
@@ -609,7 +569,7 @@ func TestIsNonHostCIDR(t *testing.T) {
 			args: args{
 				ipAddr: "0.0.0.0/0",
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name: "IPv4 Host IP Entry",
