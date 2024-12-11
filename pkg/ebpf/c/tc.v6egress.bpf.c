@@ -171,7 +171,7 @@ int handle_egress(struct __sk_buff *skb)
 	evt.dest_port = flow_key.dest_port;
 	evt.protocol = flow_key.protocol;
 	evt.is_egress = 1;
-	evt.packet_sz = skb->len
+	evt.packet_sz = skb->len;
 
 	//Check for the reverse flow entry in the conntrack table
 	flow_key.daddr = ip->saddr;
