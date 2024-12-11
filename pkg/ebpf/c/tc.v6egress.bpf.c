@@ -62,6 +62,8 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
+	__u32 packet_sz;
+	__u8 is_egress;
 };
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {
@@ -168,6 +170,8 @@ int handle_egress(struct __sk_buff *skb)
 	evt.src_port = flow_key.src_port;
 	evt.dest_port = flow_key.dest_port;
 	evt.protocol = flow_key.protocol;
+	evt.is_egress = 1;
+	evt.packet_sz = skb->len
 
 	//Check for the reverse flow entry in the conntrack table
 	flow_key.daddr = ip->saddr;
