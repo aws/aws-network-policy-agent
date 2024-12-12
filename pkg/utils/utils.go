@@ -386,3 +386,33 @@ func ConvByteToTrieV6(keyByte []byte) BPFTrieKeyV6 {
 	copy(byteArray[:], keyByte)
 	return v6key
 }
+
+func CheckCIDRContains(ipnet1, ipnet2 *net.IPNet) bool {
+	mask1, _ := ipnet1.Mask.Size()
+	mask2, _ := ipnet2.Mask.Size()
+
+	if !ipnet1.IP.Mask(ipnet1.Mask).Equal(ipnet2.IP.Mask(ipnet1.Mask)) {
+		return false
+	}
+
+	return mask1 <= mask2
+}
+
+func CheckSubExceptNotContains(subExcepts []v1alpha1.NetworkAddress, exceptCIDR *net.IPNet) bool {
+	for _, subExcept := range subExcepts {
+		_, subExceptCIDR, _ := net.ParseCIDR(string(subExcept))
+		if CheckCIDRContains(subExceptCIDR, exceptCIDR) {
+			return false
+		}
+	}
+	return true
+}
+
+func IsExceptInCIDR(item string, s []v1alpha1.NetworkAddress) bool {
+	for _, v := range s {
+		if item == string(v) {
+			return true
+		}
+	}
+	return false
+}
