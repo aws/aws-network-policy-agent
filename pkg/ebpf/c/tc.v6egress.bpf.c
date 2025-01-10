@@ -52,7 +52,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-	__u8 val;
+	__u8 val; // 1 => normal, 2 => default-allow
 };
 
 struct data_t {

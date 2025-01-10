@@ -13,6 +13,8 @@
 #define ANY_IP_PROTOCOL 254
 #define ANY_PORT 0
 #define MAX_PORT_PROTOCOL 24
+#define CT_VAL_DEFAULT_ALLOW 0
+#define CT_VAL_NORMAL        1
 
 struct bpf_map_def_pvt {
 	__u32 type;
@@ -51,7 +53,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-	__u8 val;
+	__u8 val; // 0 => default-allow, 1 => normal-policies-applied
 };
 
 struct data_t {
@@ -74,7 +76,7 @@ struct bpf_map_def_pvt SEC("maps") ingress_map = {
 
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
-
+struct bpf_map_def_pvt pod_state_map;
 
 SEC("tc_cls")
 int handle_ingress(struct __sk_buff *skb)
@@ -149,6 +151,12 @@ int handle_ingress(struct __sk_buff *skb)
 		dest_ip[2] = (ip->daddr >> 16) & 0xff;
 		dest_ip[3] = (ip->daddr >> 24) & 0xff;
 
+		// Check if dest pod is in default allow state
+		__u32 pod_ip = ip->daddr; 
+		struct pod_state *pst = bpf_map_lookup_elem(&pod_state_map, &pod_ip);
+		// Every pod should have an entry in pod_state_map. pst returned in above line should never be null.
+		__u8 default_allow_active = (pst && pst->default_allow_active) ? 1 : 0;
+
 		//Check for the an existing flow in the conntrack table
 		flow_key.src_ip = ip->saddr;
 		flow_key.src_port = l4_src_port;
@@ -157,19 +165,34 @@ int handle_ingress(struct __sk_buff *skb)
 		flow_key.protocol = ip->protocol;
 		flow_key.owner_ip = ip->daddr;
 
-
-		//Check if it's an existing flow
-		flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
-		if (flow_val != NULL) {
-			return BPF_OK;
-		}
-
 		struct data_t evt = {};
 		evt.src_ip = flow_key.src_ip;
 		evt.src_port = flow_key.src_port;
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+
+
+		//Check if it's an existing flow
+		flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
+		if (flow_val != NULL) {
+			// If it's a "default allow" flow, check if pod has flipped to "policies applied" state
+			if (flow_val->val == CT_VAL_DEFAULT_ALLOW && !default_allow_active) {
+				// we must re-evaluate this flow against updated policies
+				trie_val = bpf_map_lookup_elem(&egress_map, &trie_key);
+				if (trie_val == NULL) {
+					// remove the conntrack flow entry and drop
+					bpf_map_delete_elem(&aws_conntrack_map, &flow_key);
+					evt.verdict = 0;
+					bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+					return BPF_DROP;
+				}
+				// flow can be allowed per updated policies, upgrade the flow val
+				flow_val->val = CT_VAL_NORMAL;
+				bpf_map_update_elem(&aws_conntrack_map, &flow_key, flow_val, 0); // 0 -> BPF_ANY
+			}
+			return BPF_OK;
+		}
 
 		//Check for the reverse flow entry in the conntrack table
 		reverse_flow_key.src_ip = ip->daddr;
@@ -206,7 +229,11 @@ int handle_ingress(struct __sk_buff *skb)
 						 (l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 				//Inject in to conntrack map
 				struct conntrack_value new_flow_val = {};
-				new_flow_val.val = 1;
+				if (default_allow_active) {
+					new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
+				} else {
+					new_flow_val.val = CT_VAL_NORMAL;
+				}
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 				evt.verdict = 1;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
