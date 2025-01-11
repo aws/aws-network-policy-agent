@@ -25,7 +25,7 @@ struct data_t {
 	__u32  protocol;
 	__u32  verdict;
 	__u32 packet_sz;
-    __u8 is_egress;
+	__u8 is_egress;
 };
 
 struct conntrack_key {
