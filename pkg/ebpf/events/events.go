@@ -61,7 +61,7 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 	eventsClient := goebpfevents.New()
 	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
 	if err != nil {
-		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
+		logger.V(1).Info("Failed to Initialize Ring Buffer", "err:", err)
 		return err
 	} else {
 		if enableCloudWatchLogs {
@@ -72,7 +72,7 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 				return err
 			}
 		}
-		logger.Info("Configure Event loop ... ")
+		logger.V(1).Info("Configure Event loop ... ")
 		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
 	}
 	return nil
@@ -97,7 +97,7 @@ func setupCW(logger logr.Logger) error {
 	if clusterName == utils.DEFAULT_CLUSTER_NAME {
 		customlogGroupName = NON_EKS_CW_PATH + clusterName + "/cluster"
 	}
-	logger.Info("Setup CW", "Setting loggroup Name", customlogGroupName)
+	logger.V(1).Info("Setup CW", "Setting loggroup Name", customlogGroupName)
 	err = ensureLogGroupExists(customlogGroupName)
 	if err != nil {
 		logger.Error(err, "unable to validate log group presence. Please check IAM permissions")
