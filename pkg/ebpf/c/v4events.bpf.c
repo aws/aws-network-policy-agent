@@ -14,7 +14,6 @@ struct bpf_map_def_pvt {
 };
 
 #define PIN_GLOBAL_NS	2
-
 #define BPF_MAP_TYPE_RINGBUF 27
 
 struct data_t {
@@ -51,18 +50,6 @@ struct bpf_map_def_pvt SEC("maps") policy_events = {
     .type = BPF_MAP_TYPE_RINGBUF,
     .max_entries = 256 * 1024,
     .pinning = PIN_GLOBAL_NS,
-};
-
-struct pod_state {
-    __u8 default_allow_active; // 1 => default allow, 0 => policies applied
-};
-
-struct bpf_map_def SEC("maps") pod_state_map = {
-    .type        = BPF_MAP_TYPE_HASH,
-    .key_size    = sizeof(__u32), // PodIP as key
-    .value_size  = sizeof(struct pod_state),
-    .max_entries = 256 * 1024, // Max pods on any node should not exceed this number
-    .pinning     = PIN_GLOBAL_NS,
 };
 
 char _license[] SEC("license") = "GPL";
