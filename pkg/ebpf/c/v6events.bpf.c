@@ -44,14 +44,14 @@ struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
     .type = BPF_MAP_TYPE_LRU_HASH,
     .key_size =sizeof(struct conntrack_key),
     .value_size = sizeof(struct conntrack_value),
-    .max_entries = 256 * 1024,
+    .max_entries = 512 * 1024,
     .pinning = PIN_GLOBAL_NS,
 };
 
 
 struct bpf_map_def_pvt SEC("maps") policy_events = {
     .type = BPF_MAP_TYPE_RINGBUF,
-    .max_entries = 256 * 1024,
+    .max_entries = 512 * 1024,
     .pinning = PIN_GLOBAL_NS,
 };
 

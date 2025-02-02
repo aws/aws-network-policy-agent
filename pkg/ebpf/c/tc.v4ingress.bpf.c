@@ -14,7 +14,7 @@
 #define ANY_PORT 0
 #define MAX_PORT_PROTOCOL 24
 #define CT_VAL_DEFAULT_ALLOW 0
-#define CT_VAL_NORMAL        1
+#define CT_VAL_POLICIES_APPLIED 1 
 #define POLICIES_APPLIED 0
 #define DEFAULT_ALLOW 1
 #define DEFAULT_DENY 2
@@ -56,7 +56,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-	__u8 val; // 0 => default-allow, 1 => normal-policies-applied
+	__u8 val; // 0 => default-allow, 1 => policies-applied
 };
 
 struct data_t {
@@ -66,6 +66,8 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
+	__u32  logTest;
+	__u32  dir;
 };
 
 struct bpf_map_def_pvt SEC("maps") ingress_map = {
@@ -99,13 +101,15 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 	trie_val = bpf_map_lookup_elem(&ingress_map, &trie_key);
 	if (trie_val == NULL) {
 		evt.verdict = 0;		    
+		evt.logTest = evt.logTest + 100;
 		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 		return BPF_DROP;
 	}
 
 	for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
-			evt.verdict = 0;		    
+			evt.verdict = 0;	
+			evt.logTest = evt.logTest + 200;	    
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
@@ -118,15 +122,17 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 			if (pst->state == DEFAULT_ALLOW) {
 				new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
 			} else {
-				new_flow_val.val = CT_VAL_NORMAL;
+				new_flow_val.val = CT_VAL_POLICIES_APPLIED;
 			}
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
+			evt.logTest = evt.logTest + 300;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
 		}
 	}
 	evt.verdict = 0;		    
+	evt.logTest = evt.logTest + 400;
 	bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 	return BPF_DROP;
 }
@@ -218,18 +224,21 @@ int handle_ingress(struct __sk_buff *skb)
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+		evt.dir = 1;
 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&ingress_pod_state_map, &key);
 		// There should always be an entry in pod_state_map. pst returned in above line should never be null.
 		if (pst == NULL) {
 			evt.verdict = 0;
+			evt.logTest = 4;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
 
 		if (pst->state == DEFAULT_DENY) {
 			evt.verdict = 0;
+			evt.logTest = 5;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
@@ -237,36 +246,36 @@ int handle_ingress(struct __sk_buff *skb)
 		//Check if it's an existing flow
 		flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
 
-		if (flow_val == NULL && pst->state == DEFAULT_ALLOW) {
-			struct conntrack_value new_flow_val = {};
-			new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
-			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
-			evt.verdict = 1;
-			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
-			return BPF_OK;
-		}
-
 		if (flow_val != NULL) {
 			// If it's a "default allow" flow, check if pod has flipped to "policies applied" state
 			if (flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == DEFAULT_ALLOW) {
 				evt.verdict = 1;
+				evt.logTest = 7;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (flow_val->val == CT_VAL_NORMAL && pst->state == POLICIES_APPLIED) {
+			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
 				evt.verdict = 1;
+				evt.logTest = 8;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (flow_val->val == CT_VAL_NORMAL && pst->state == DEFAULT_ALLOW) {
+			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == DEFAULT_ALLOW) {
 				flow_val->val = CT_VAL_DEFAULT_ALLOW;
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, flow_val, 0); // 0 -> BPF_ANY
 				evt.verdict = 1;
+				evt.logTest = 9;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
 			if (flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == POLICIES_APPLIED) {
-				return evaluateByLookUp(trie_key, flow_key, pst, evt, ip, l4_dst_port);
+				evt.logTest = 0;
+				int ret = evaluateByLookUp(trie_key, flow_key, pst, evt, ip, l4_dst_port);
+				if (ret == BPF_DROP) {
+					bpf_map_delete_elem(&aws_conntrack_map, &flow_key);
+					return BPF_DROP;
+				} 
+				return BPF_OK;
 			}
 		}
 
@@ -290,25 +299,44 @@ int handle_ingress(struct __sk_buff *skb)
 		if (reverse_flow_val != NULL) { 
 			if (reverse_flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == DEFAULT_ALLOW) {
 				evt.verdict = 1;
+				evt.logTest = 10;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (reverse_flow_val->val == CT_VAL_NORMAL && pst->state == POLICIES_APPLIED) {
+			if (reverse_flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
 				evt.verdict = 1;
+				evt.logTest = 11;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (reverse_flow_val->val == CT_VAL_NORMAL && pst->state == DEFAULT_ALLOW) {
+			if (reverse_flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == DEFAULT_ALLOW) {
 				reverse_flow_val->val = CT_VAL_DEFAULT_ALLOW;
 				bpf_map_update_elem(&aws_conntrack_map, &reverse_flow_key, reverse_flow_val, 0); // 0 -> BPF_ANY
 				evt.verdict = 1;
+				evt.logTest = 12;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
 			if (reverse_flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == POLICIES_APPLIED) {
-				return evaluateByLookUp(reverse_trie_key, reverse_flow_key, pst, evt, ip, l4_src_port);
+				evt.verdict = 1;
+				evt.logTest = 13;
+				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+				return BPF_OK;
+				// return evaluateByLookUp(reverse_trie_key, reverse_flow_key, pst, evt, ip, l4_src_port);
 			}
 		}
+
+		if (pst->state == DEFAULT_ALLOW) {
+			struct conntrack_value new_flow_val = {};
+			new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
+			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
+			evt.verdict = 1;
+			evt.logTest = 6;
+			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+			return BPF_OK;
+		}
+
+		evt.logTest = 1;
 		return evaluateByLookUp(trie_key, flow_key, pst, evt, ip, l4_dst_port);
 	}
 	return BPF_OK;

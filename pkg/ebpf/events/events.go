@@ -38,6 +38,8 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	LogTest    uint32
+	Dir        uint32
 }
 
 type ringBufferDataV6_t struct {
@@ -192,7 +194,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+					"Proto", protocol, "Verdict", verdict, "LogTest", rb.LogTest, "Dir", rb.Dir)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}

@@ -93,7 +93,6 @@ func prometheusRegister() {
 
 type BpfClient interface {
 	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string) error
-	// DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
 	UpdatePodStateEbpfMaps(podIdentifier string, state int) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
@@ -311,15 +310,6 @@ type bpfClient struct {
 	DeletePodLock *sync.Map
 }
 
-type Event_t struct {
-	SourceIP   uint32
-	SourcePort uint32
-	DestIP     uint32
-	DestPort   uint32
-	Protocol   uint32
-	Verdict    uint32
-}
-
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
 	log := ctrl.Log.WithName("ebpf-client-init") //TODO - reuse the logger
 	updateIngressProbe, updateEgressProbe, updateEventsProbe := false, false, false
@@ -461,7 +451,7 @@ func (l *bpfClient) GetDeletePodLockMap() *sync.Map {
 }
 
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string) error {
-	// In strict mode two go routines can try to attach the probes at the same time
+	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.AttachProbesToPodLock.LoadOrStore(podIdentifier, &sync.Mutex{})
 	attachProbesLock := value.(*sync.Mutex)
@@ -513,60 +503,6 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 	return nil
 }
-
-// func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error {
-// 	start := time.Now()
-// 	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
-// 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
-// 	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
-// 	if ingress {
-// 		err := l.detachIngressBPFProbe(hostVethName)
-// 		duration := msSince(start)
-// 		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-// 		if err != nil {
-// 			l.logger.Info("Failed to Detach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-// 			sdkAPIErr.WithLabelValues("detachIngressBPFProbe").Inc()
-// 		}
-// 		l.logger.Info("Successfully detached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-
-// 		if deletePinPath {
-// 			err = l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
-// 			duration = msSince(start)
-// 			sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
-// 			if err != nil {
-// 				l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
-// 			}
-// 		}
-// 		l.DeletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
-// 	}
-
-// 	if egress {
-// 		err := l.detachEgressBPFProbe(hostVethName)
-// 		duration := msSince(start)
-// 		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-// 		if err != nil {
-// 			l.logger.Info("Failed to Detach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-// 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
-// 		}
-// 		l.logger.Info("Successfully detached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-
-// 		if deletePinPath {
-// 			err = l.deleteBPFProgramAndMaps(podIdentifier, "egress")
-// 			duration = msSince(start)
-// 			sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
-// 			if err != nil {
-// 				l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
-// 				sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
-// 			}
-// 			l.policyEndpointeBPFContext.Delete(podIdentifier)
-// 			if _, ok := l.AttachProbesToPodLock.Load(podIdentifier); ok {
-// 				l.AttachProbesToPodLock.Delete(podIdentifier)
-// 			}
-// 		}
-// 		l.DeletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
-// 	}
-// 	return nil
-// }
 
 func (l *bpfClient) CheckIfProbeExists(pod types.NamespacedName) (bool, error) {
 	start := time.Now()
