@@ -66,8 +66,6 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
-	__u32  logTest;
-	__u32  dir;
 };
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {
@@ -101,7 +99,6 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 	trie_val = bpf_map_lookup_elem(&egress_map, &trie_key);
 	if (trie_val == NULL) {
 		evt.verdict = 0;
-		evt.logTest = evt.logTest + 100;
 		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 		return BPF_DROP;
 	}
@@ -109,7 +106,6 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 	for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
 			evt.verdict = 0;
-			evt.logTest = evt.logTest + 200;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
@@ -126,7 +122,6 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 			}
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
-			evt.logTest = evt.logTest + 300;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
 		}
@@ -255,7 +250,7 @@ int handle_egress(struct __sk_buff *skb)
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (flow_val->val = CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
+			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
 				evt.verdict = 1;
 				evt.logTest = 8;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);

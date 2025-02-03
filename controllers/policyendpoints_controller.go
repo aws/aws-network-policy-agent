@@ -249,17 +249,14 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 	// 1. If the pods are already deleted, we move on.
 	// 2. If the pods have another policy or policies active against them, we update the maps to purge the entries
 	//    introduced by the current policy.
-	// 3. If there are no more active policies against this pod. Detach and delete the probes and
-	//    corresponding BPF maps. We will also clean up eBPF pin paths under BPF FS.
+	// 3. If there are no more active policies against this pod, we update pod_state to default deny/allow
 	for _, targetPod := range targetPods {
 		r.log.Info("Updating Pod: ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
 
 		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace, r.log)
 		r.log.Info("Derived ", "Pod identifier to check if update is needed : ", podIdentifier)
-		// check if ebpf progs are being shared by any other pods
-		//	progFdShared := r.isProgFdShared(ctx, targetPod.Name, targetPod.Namespace)
 
-		cleanupErr := r.cleanupeBPFProbes(ctx, targetPod, policyEndpointName, isDeleteFlow)
+		cleanupErr := r.cleanupPod(ctx, targetPod, policyEndpointName, isDeleteFlow)
 		if cleanupErr != nil {
 			r.log.Info("Cleanup/Update unsuccessful for Pod ", "Name: ", targetPod.Name, "Namespace: ", targetPod.Namespace)
 			err = errors.Join(err, cleanupErr)
@@ -352,7 +349,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 	return nil
 }
 
-func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targetPod types.NamespacedName,
+func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod types.NamespacedName,
 	policyEndpoint string, isDeleteFlow bool) error {
 
 	var err error
@@ -379,33 +376,23 @@ func (r *PolicyEndpointsReconciler) cleanupeBPFProbes(ctx context.Context, targe
 			noActiveEgressPolicies = true
 		}
 
-		// We only detach probes if there are no policyendpoint resources on both the
-		// directions
+		// We update pod_state to default allow/deny if there are no other policies applied
 		if noActiveIngressPolicies && noActiveEgressPolicies {
-			// probeExists, err := r.GeteBPFClient().CheckIfProbeExists(targetPod)
-			// if err != nil {
-			// 	return err
-			// }
-			// if !progFdShared && !probeExists {
-			// 	// delete bpf program and maps
-			// 	r.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
-			// } else {
-			if utils.IsStandardMode(r.networkPolicyMode) {
-				r.log.Info("No active policies. Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
-				if err != nil {
-					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
-					return err
-				}
-			} else {
+			if utils.IsStrictMode(r.networkPolicyMode) {
 				r.log.Info("No active policies. Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
 				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY)
 				if err != nil {
 					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return err
 				}
+			} else {
+				r.log.Info("No active policies. Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
+				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
+				if err != nil {
+					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
+					return err
+				}
 			}
-			//	}
 		} else {
 			// We've additional PolicyEndpoint resources configured against this pod
 			// Update the Maps and move on
@@ -649,11 +636,6 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
 			// When pod is deleted and this is not the last pod in podIdentifier, we are just updating the podName and progFD local caches
 		}
-		//  else if !activePod {
-		// 	r.log.Info("Pod not active. Deleting from progPod caches", "podName: ", oldPod.Name, "podNamespace: ", oldPod.Namespace)
-		// 	r.ebpfClient.DeletePodFromIngressProgPodCaches(oldPod.Name, oldPod.Namespace)
-		// 	r.ebpfClient.DeletePodFromEgressProgPodCaches(oldPod.Name, oldPod.Namespace)
-		// }
 	}
 
 	return podsToBeCleanedUp

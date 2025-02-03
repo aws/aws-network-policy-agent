@@ -69,6 +69,8 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
+	__u32  logTest;
+	__u32  dir;
 };
 
 struct bpf_map_def_pvt SEC("maps") ingress_map = {
@@ -80,10 +82,23 @@ struct bpf_map_def_pvt SEC("maps") ingress_map = {
 	.pinning = PIN_GLOBAL_NS,
 };
 
+struct pod_state {
+    __u8 state; // 0 => POLICIES_APPLIED, 1 => DEFAULT_ALLOW, 2 => DEFAULT_DENY
+};
+
+struct bpf_map_def_pvt SEC("maps") ingress_pod_state_map = {
+    .type        = BPF_MAP_TYPE_HASH,
+    .key_size    = sizeof(__u32), // default key = 0. We are storing a single state per pod identifier
+    .value_size  = sizeof(struct pod_state),
+    .max_entries = 1,
+	.map_flags = BPF_F_NO_PREALLOC,
+    .pinning     = PIN_GLOBAL_NS,
+};
+
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
-static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, struct pod_state *pst, struct data_t evt, struct iphdr *ip, __u32 l4_dst_port) {
+static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, struct pod_state *pst, struct data_t evt, struct ipv6hdr *ip, __u32 l4_dst_port) {
 	struct lpm_trie_val *trie_val;
 	//Check if it's in the allowed list
 	trie_val = bpf_map_lookup_elem(&ingress_map, &trie_key);
@@ -102,7 +117,7 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 			return BPF_DROP;
 		}
 
-		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->protocol &&
+		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->nexthdr &&
 					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
 						(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
@@ -129,7 +144,6 @@ SEC("tc_cls")
 int handle_ingress(struct __sk_buff *skb)
 {
 	struct keystruct trie_key;
-	struct keystruct reverse_trie_key;
 	struct lpm_trie_val *trie_val;
 	__u16 l4_src_port = 0;
 	__u16 l4_dst_port = 0;
@@ -142,6 +156,7 @@ int handle_ingress(struct __sk_buff *skb)
 	struct data_t evt = {};
 
     __builtin_memset(&flow_key, 0, sizeof(flow_key));
+	__builtin_memset(&reverse_flow_key, 0, sizeof(reverse_flow_key));
 
 	struct ethhdr *ether = data;
 	if (data + sizeof(*ether) > data_end) {
@@ -211,6 +226,7 @@ int handle_ingress(struct __sk_buff *skb)
 		evt.src_port = flow_key.src_port;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+		evt.dir = 1;
 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&ingress_pod_state_map, &key);
@@ -264,23 +280,17 @@ int handle_ingress(struct __sk_buff *skb)
 			}
 		}
 
-		reverse_trie_key.prefix_len = 128;
-		//Fill the IP Key to be used for lookup
-		for (int i=0; i<16; i++){
-			reverse_trie_key.ip[i] = ip->daddr.in6_u.u6_addr8[i];
-		}
-
 		//Swap to check reverse flow
-		reverse_flow_key.daddr = ip->saddr;
 		reverse_flow_key.saddr = ip->daddr;
-		reverse_flow_key.src_port =  flow_key.dest_port;
+		reverse_flow_key.daddr = ip->saddr;
+		reverse_flow_key.src_port =  l4_dst_port;
 		reverse_flow_key.dest_port =  l4_src_port;
 		reverse_flow_key.protocol = ip->nexthdr;
 		reverse_flow_key.owner_addr = ip->daddr;
 		
 
 		//Check if it's a response packet
-		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
+		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
 		if (reverse_flow_val != NULL) { 
 			if (reverse_flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == DEFAULT_ALLOW) {
 				evt.verdict = 1;

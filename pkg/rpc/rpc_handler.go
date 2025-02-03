@@ -80,7 +80,8 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 	// Check if there are active policies against the new pod and if there are other pods on the local node that share
 	// the eBPF firewall maps with the newly launched pod, if already present we can skip the map update and return
-	if s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier) && isFirstPodInPodIdentifier {
+	policiesAvailableInLocalCache := s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier)
+	if policiesAvailableInLocalCache && isFirstPodInPodIdentifier {
 		// If we're here, then the local agent knows the list of active policies that apply to this pod and
 		// this is the first pod of it's type to land on the local node/cluster
 		s.log.Info("Active policies present against this pod and this is a new Pod to the local node, configuring firewall rules....")
@@ -96,18 +97,18 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		}
 	} else {
 		// If no active policies present against this pod identifier, set pod_state to default_allow or default_deny
-		if !s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier) {
+		if !policiesAvailableInLocalCache {
 			s.log.Info("No active policies present for ", "podIdentifier: ", podIdentifier)
-			if utils.IsStandardMode(in.NETWORK_POLICY_MODE) {
-				s.log.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
+			if utils.IsStrictMode(in.NETWORK_POLICY_MODE) {
+				s.log.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY)
 				if err != nil {
 					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return nil, err
 				}
 			} else {
-				s.log.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY)
+				s.log.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
 				if err != nil {
 					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return nil, err
@@ -147,7 +148,7 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	s.policyReconciler.GeteBPFClient().DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	if !isProgFdShared {
-		err := s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
+		err = s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
 		if err != nil {
 			s.log.Error(err, "BPF programs and Maps delete failed for ", "podIdentifier ", podIdentifier)
 		}
@@ -157,7 +158,7 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 		deletePodLock.Unlock()
 	}
 	resp := rpc.DeleteNpReply{
-		Success: err == nil,
+		Success: true,
 	}
 	return &resp, nil
 }

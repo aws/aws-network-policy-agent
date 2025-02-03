@@ -73,7 +73,7 @@ struct data_t {
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {
 	.type = BPF_MAP_TYPE_LPM_TRIE,
-	.key_size =sizeof(struct lpm_trie_key),
+	.key_size = sizeof(struct lpm_trie_key),
 	.value_size = sizeof(struct lpm_trie_val[MAX_PORT_PROTOCOL]),
 	.max_entries = 65536,
 	.map_flags = BPF_F_NO_PREALLOC,
@@ -96,7 +96,7 @@ struct bpf_map_def_pvt SEC("maps") egress_pod_state_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
-static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, struct pod_state *pst, struct data_t evt, struct iphdr *ip, __u32 l4_dst_port) {
+static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, struct pod_state *pst, struct data_t evt, struct ipv6hdr *ip, __u32 l4_dst_port) {
 	struct lpm_trie_val *trie_val;
 	//Check if it's in the allowed list
 	trie_val = bpf_map_lookup_elem(&egress_map, &trie_key);
@@ -143,7 +143,6 @@ int handle_egress(struct __sk_buff *skb)
 {
 	
 	struct keystruct trie_key;
-	struct keystruct reverse_trie_key;
 	struct lpm_trie_val *trie_val;
 	__u16 l4_src_port = 0;
 	__u16 l4_dst_port = 0;
@@ -156,6 +155,7 @@ int handle_egress(struct __sk_buff *skb)
 	void *data = (void *)(long)skb->data;
 
  	__builtin_memset(&flow_key, 0, sizeof(flow_key));
+	__builtin_memset(&reverse_flow_key, 0, sizeof(reverse_flow_key));
 
 	struct ethhdr *ether = data;
 	if (data + sizeof(*ether) > data_end) {
@@ -213,11 +213,20 @@ int handle_egress(struct __sk_buff *skb)
 			trie_key.ip[i] = ip->daddr.in6_u.u6_addr8[i];
 		}
 
+		//Check for the an existing flow in the conntrack table
+		flow_key.saddr = ip->saddr;
+		flow_key.daddr = ip->daddr;
+		flow_key.src_port = l4_src_port;
+		flow_key.dest_port = l4_dst_port;
+		flow_key.protocol = ip->nexthdr;
+		flow_key.owner_addr = ip->saddr;
+
 		evt.src_ip = ip->saddr;
 		evt.dest_ip = ip->daddr;	
 		evt.src_port = flow_key.src_port;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+		evt.dir = 0;
 		
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&egress_pod_state_map, &key);
@@ -236,14 +245,6 @@ int handle_egress(struct __sk_buff *skb)
 			return BPF_DROP;
 		}
 
-		//Check for the an existing flow in the conntrack table
-		flow_key.saddr = ip->saddr;
-		flow_key.daddr = ip->daddr;
-		flow_key.src_port = l4_src_port;
-		flow_key.dest_port = l4_dst_port;
-		flow_key.protocol = ip->nexthdr;
-		flow_key.owner_addr = ip->saddr;
-
 		//Check if it's an existing flow
 		flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
 		if (flow_val != NULL) { 
@@ -254,7 +255,7 @@ int handle_egress(struct __sk_buff *skb)
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 				return BPF_OK;
 			}
-			if (flow_val->val = CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
+			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
 				evt.verdict = 1;
 				evt.logTest = 8;
 				bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
@@ -279,23 +280,16 @@ int handle_egress(struct __sk_buff *skb)
 			}
 		}
 
-		reverse_trie_key.prefix_len = 128;
-			
-		//Fill the IP Key to be used for lookup
-		for (int i=0; i<16; i++){
-			reverse_trie_key.ip[i] = ip->saddr.in6_u.u6_addr8[i];
-		}
-
 		//Check for the reverse flow entry in the conntrack table
-		reverse_flow_key.daddr = ip->saddr;
 		reverse_flow_key.saddr = ip->daddr;
-		reverse_flow_key.src_port = flow_key.dest_port;
+		reverse_flow_key.daddr = ip->saddr;
+		reverse_flow_key.src_port = l4_dst_port;
 		reverse_flow_key.dest_port = l4_src_port;
 		reverse_flow_key.protocol = ip->nexthdr;
 		reverse_flow_key.owner_addr = ip->saddr;
 			
 		//Check if it's a response packet
-		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
+		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
 		if (reverse_flow_val != NULL) { 
 			if (reverse_flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == DEFAULT_ALLOW) {
 				evt.verdict = 1;

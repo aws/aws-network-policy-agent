@@ -103,7 +103,6 @@ type BpfClient interface {
 	GetEgressProgToPodsMap() *sync.Map
 	DeletePodFromIngressProgPodCaches(podName string, podNamespace string)
 	DeletePodFromEgressProgPodCaches(podName string, podNamespace string)
-	CheckIfProbeExists(pod types.NamespacedName) (bool, error)
 	DeleteBPFProgramAndMaps(podIdentifier string) error
 	GetDeletePodLockMap() *sync.Map
 }
@@ -504,20 +503,6 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	return nil
 }
 
-func (l *bpfClient) CheckIfProbeExists(pod types.NamespacedName) (bool, error) {
-	start := time.Now()
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
-	l.logger.Info("CheckIfProbeExists for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
-	exists, err := l.bpfTCClient.CheckTCFilterExists(hostVethName)
-	duration := msSince(start)
-	sdkAPILatency.WithLabelValues("CheckIfProbeExists", fmt.Sprint(err != nil)).Observe(duration)
-	if err != nil {
-		l.logger.Error(err, "Failed to CheckIfProbeExists for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-		sdkAPIErr.WithLabelValues("CheckIfProbeExists").Inc()
-	}
-	return exists, err
-}
-
 func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (int, error) {
 	// We will re-use the same eBPF program instance for pods belonging to same replicaset
 	// Check if we've already loaded an ELF file for this PolicyEndpoint resource and re-use
@@ -587,39 +572,14 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
-// func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
-// 	l.logger.Info("Attempting to do an Ingress Detach")
-// 	var err error
-// 	err = l.bpfTCClient.TCEgressDetach(hostVethName)
-// 	if err != nil &&
-// 		!utils.IsMissingFilterError(err.Error()) {
-// 		l.logger.Info("Ingress Detach failed:", "error", err)
-// 		return err
-// 	}
-// 	return nil
-// }
-
-// func (l *bpfClient) detachEgressBPFProbe(hostVethName string) error {
-// 	l.logger.Info("Attempting to do an Egress Detach")
-// 	var err error
-// 	err = l.bpfTCClient.TCIngressDetach(hostVethName)
-// 	if err != nil &&
-// 		!utils.IsMissingFilterError(err.Error()) {
-// 		l.logger.Info("Ingress Detach failed:", "error", err)
-// 		return err
-// 	}
-// 	return nil
-// }
-
 func (l *bpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
 	start := time.Now()
 	err := l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
-		l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
+		l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
 		sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
-		return err
 	}
 
 	start = time.Now()
@@ -627,9 +587,8 @@ func (l *bpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
 	duration = msSince(start)
 	sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
-		l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
+		l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
 		sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
-		return err
 	}
 
 	l.policyEndpointeBPFContext.Delete(podIdentifier)
@@ -686,7 +645,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
-	// Load a new instance of the ingres program
+	// Load a new instance of the program
 	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
