@@ -144,9 +144,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 		resp, err := cwl.PutLogEvents(&input)
 		if err != nil {
 			log.Info("Push log events", "Failed ", err)
-		}
-
-		if resp != nil {
+		} else if resp != nil && resp.NextSequenceToken != nil {
 			sequenceToken = *resp.NextSequenceToken
 		}
 
