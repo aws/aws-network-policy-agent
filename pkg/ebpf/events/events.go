@@ -189,6 +189,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 		for record := range ringbufferdata {
 			var logQueue []*cloudwatchlogs.InputLogEvent
 			var message string
+			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
 				buf := bytes.NewBuffer(record)
@@ -200,7 +201,6 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 				if rb.Verdict == uint32(0) {
-					direction := "egress"
 					if rb.IsEgress == 0 {
 						direction = "ingress"
 					}
@@ -209,7 +209,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict, "Packetlen", rb.PacketSz)
+					"Proto", protocol, "Verdict", verdict, "Direction", direction)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
@@ -222,7 +222,6 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 				if rb.Verdict == uint32(0) {
-					direction := "egress"
 					if rb.IsEgress == 0 {
 						direction = "ingress"
 					}
@@ -231,7 +230,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict, "Packetlen", rb.PacketSz)
+					"Proto", protocol, "Verdict", verdict, "Direction", direction)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}
