@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -217,30 +218,22 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 }
 
 func (r *PolicyEndpointsReconciler) IsProgFdShared(targetPodName string,
-	targetPodNamespace string) bool {
+	targetPodNamespace string) (bool, error) {
 	targetpodNamespacedName := utils.GetPodNamespacedName(targetPodName, targetPodNamespace)
-	var foundSharedIngress bool
-	var foundSharedEgress bool
-	if targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName); ok {
-		if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
-			podsList, ok := currentList.(map[string]struct{})
-			if ok && len(podsList) > 1 {
-				foundSharedIngress = true
-				r.log.Info("isProgFdShared", "Found shared ingress progFD for target: ", targetPodName, "progFD: ", targetProgFD)
-			}
+	foundSharedIngress := false
+	targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName)
+	if !ok {
+		r.log.Info("isProgFdShared", "Pod not found in IngressPodToProgMap ", targetpodNamespacedName)
+		return foundSharedIngress, fmt.Errorf("pod not found in IngressPodToProgMap", targetpodNamespacedName)
+	}
+	if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
+		podsList, ok := currentList.(map[string]struct{})
+		if ok && len(podsList) > 1 {
+			foundSharedIngress = true
+			r.log.Info("isProgFdShared", "Found shared ingress progFD for target: ", targetPodName, "progFD: ", targetProgFD)
 		}
 	}
-
-	if targetProgFD, ok := r.ebpfClient.GetEgressPodToProgMap().Load(targetpodNamespacedName); ok {
-		if currentList, ok := r.ebpfClient.GetEgressProgToPodsMap().Load(targetProgFD); ok {
-			podsList, ok := currentList.(map[string]struct{})
-			if ok && len(podsList) > 1 {
-				foundSharedEgress = true
-				r.log.Info("isProgFdShared", "Found shared egress progFD for target: ", targetPodName, "progFD: ", targetProgFD)
-			}
-		}
-	}
-	return foundSharedIngress || foundSharedEgress
+	return foundSharedIngress, nil
 }
 
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,

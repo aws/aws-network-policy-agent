@@ -144,10 +144,10 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	deletePodLock.Lock()
 	s.log.Info("Got the deletePodLock for", "Pod: ", in.K8S_POD_NAME, " Namespace: ", in.K8S_POD_NAMESPACE, " PodIdentifier: ", podIdentifier)
 
-	isProgFdShared := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	isProgFdShared, err := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	s.policyReconciler.GeteBPFClient().DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	if !isProgFdShared {
+	if err == nil && !isProgFdShared {
 		err = s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
 		if err != nil {
 			s.log.Error(err, "BPF programs and Maps delete failed for ", "podIdentifier ", podIdentifier)
