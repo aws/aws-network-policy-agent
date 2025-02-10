@@ -61,6 +61,8 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
+	__u32 packet_sz;
+	__u8 is_egress;
 };
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {
@@ -163,7 +165,8 @@ int handle_egress(struct __sk_buff *skb)
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
-
+		evt.is_egress = 1;
+		evt.packet_sz = skb->len; 
 
 		//Check if it's an existing flow
 		flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
