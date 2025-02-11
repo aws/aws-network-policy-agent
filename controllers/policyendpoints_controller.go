@@ -373,14 +373,14 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 		if noActiveIngressPolicies && noActiveEgressPolicies {
 			if utils.IsStrictMode(r.networkPolicyMode) {
 				r.log.Info("No active policies. Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY)
+				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, true, true)
 				if err != nil {
 					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return err
 				}
 			} else {
 				r.log.Info("No active policies. Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
+				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, true, true)
 				if err != nil {
 					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return err

@@ -101,14 +101,14 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 			s.log.Info("No active policies present for ", "podIdentifier: ", podIdentifier)
 			if utils.IsStrictMode(in.NETWORK_POLICY_MODE) {
 				s.log.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, true, true)
 				if err != nil {
 					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return nil, err
 				}
 			} else {
 				s.log.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, true, true)
 				if err != nil {
 					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
 					return nil, err

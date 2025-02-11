@@ -94,7 +94,7 @@ func prometheusRegister() {
 type BpfClient interface {
 	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
-	UpdatePodStateEbpfMaps(podIdentifier string, state int) error
+	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
 	IsFirstPodInPodIdentifier(podIdentifier string) bool
 	GetIngressPodToProgMap() *sync.Map
@@ -708,7 +708,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 				sdkAPIErr.WithLabelValues("updateEbpfMap-egress").Inc()
 			}
 		}
-		err := l.UpdatePodStateEbpfMaps(podIdentifier, POLICIES_APPLIED)
+		err := l.UpdatePodStateEbpfMaps(podIdentifier, POLICIES_APPLIED, true, true)
 		if err != nil {
 			l.logger.Info("Pod State Map update failed: ", "error: ", err)
 		}
@@ -716,7 +716,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 	return nil
 }
 
-func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int) error {
+func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error {
 
 	var ingressProgFD, egressProgFD int
 	var mapToUpdate goebpfmaps.BpfMap
@@ -730,7 +730,7 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int) erro
 		key := uint32(0)                        // pod_state_map key
 		value := pod_state{state: uint8(state)} // pod_state_map value
 
-		if ingressProgInfo.Program.ProgFD != 0 {
+		if updateIngress && ingressProgInfo.Program.ProgFD != 0 {
 			ingressProgFD = ingressProgInfo.Program.ProgFD
 			mapToUpdate = ingressProgInfo.Maps[TC_INGRESS_POD_STATE_MAP]
 			l.logger.Info("Pod has an Ingress hook attached. Update the corresponding map", "progFD: ", ingressProgFD,
@@ -743,7 +743,7 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int) erro
 				sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
 			}
 		}
-		if egressProgInfo.Program.ProgFD != 0 {
+		if updateEgress && egressProgInfo.Program.ProgFD != 0 {
 			egressProgFD = egressProgInfo.Program.ProgFD
 			mapToUpdate = egressProgInfo.Maps[TC_EGRESS_POD_STATE_MAP]
 
