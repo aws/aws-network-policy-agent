@@ -50,6 +50,7 @@ var (
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                            = "eni"
+	BRANCH_ENI_VETH_PREFIX                     = "vlan"
 )
 
 var (
@@ -143,7 +144,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
-	ebpfClient.bpfTCClient = tc.New(POD_VETH_PREFIX)
+	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
@@ -458,7 +459,13 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
 	// name from the Name and Namespace of the Pod.
 	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
+	hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+
+	if err != nil {
+		l.logger.Info("Failed to find host interface for", "pod: ", pod.Name, " in namespace", pod.Namespace, "error", err)
+		return err
+	}
+
 	l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
@@ -491,13 +498,18 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(progFD, make(map[string]struct{}))
 		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	}
-
 	return nil
 }
 
 func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error {
 	start := time.Now()
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
+	hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+
+	if err != nil {
+		l.logger.Info("Failed to find host interface for", "pod: ", pod.Name, " in namespace", pod.Namespace, "error", err)
+		return err
+	}
+
 	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
 	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
 	if ingress {
@@ -507,8 +519,9 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 		if err != nil {
 			l.logger.Info("Failed to Detach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 			sdkAPIErr.WithLabelValues("detachIngressBPFProbe").Inc()
+		} else {
+			l.logger.Info("Successfully detached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 		}
-		l.logger.Info("Successfully detached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 
 		if deletePinPath {
 			err = l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
@@ -528,8 +541,9 @@ func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egr
 		if err != nil {
 			l.logger.Info("Failed to Detach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+		} else {
+			l.logger.Info("Successfully detached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 		}
-		l.logger.Info("Successfully detached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
 
 		if deletePinPath {
 			err = l.deleteBPFProgramAndMaps(podIdentifier, "egress")
