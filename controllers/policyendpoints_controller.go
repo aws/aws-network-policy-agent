@@ -224,7 +224,7 @@ func (r *PolicyEndpointsReconciler) IsProgFdShared(targetPodName string,
 	targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName)
 	if !ok {
 		r.log.Info("isProgFdShared", "Pod not found in IngressPodToProgMap ", targetpodNamespacedName)
-		return foundSharedIngress, fmt.Errorf("pod not found in IngressPodToProgMap", targetpodNamespacedName)
+		return foundSharedIngress, fmt.Errorf("pod not found in IngressPodToProgMap %s", targetpodNamespacedName)
 	}
 	if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
 		podsList, ok := currentList.(map[string]struct{})

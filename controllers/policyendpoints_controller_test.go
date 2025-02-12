@@ -63,13 +63,13 @@ func TestIsProgFdShared(t *testing.T) {
 			false, false, false, false, 300, 262144)
 		policyEndpointReconciler.ebpfClient = ebpf.NewMockBpfClient()
 		for pod, progFd := range podToProgFd {
-			policyEndpointReconciler.ebpfClient.GetEgressPodToProgMap().Store(pod, progFd)
-			currentPodSet, _ := policyEndpointReconciler.ebpfClient.GetEgressProgToPodsMap().LoadOrStore(progFd, make(map[string]struct{}))
+			policyEndpointReconciler.ebpfClient.GetIngressPodToProgMap().Store(pod, progFd)
+			currentPodSet, _ := policyEndpointReconciler.ebpfClient.GetIngressProgToPodsMap().LoadOrStore(progFd, make(map[string]struct{}))
 			currentPodSet.(map[string]struct{})[pod] = struct{}{}
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			isProgFdShared := policyEndpointReconciler.IsProgFdShared(tt.podName, tt.podNamespace)
+			isProgFdShared, _ := policyEndpointReconciler.IsProgFdShared(tt.podName, tt.podNamespace)
 			assert.Equal(t, tt.want.isProgFdShared, isProgFdShared)
 		})
 	}

@@ -551,7 +551,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 				egressPgmInfo:  sampleEgressPgmInfo,
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
-			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, tt.state)
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, tt.state, true, true)
 			assert.Equal(t, gotErr, tt.wantErr)
 		})
 	}

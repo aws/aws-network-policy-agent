@@ -88,3 +88,7 @@ require (
 )
 
 replace golang.org/x/net => golang.org/x/net v0.23.0
+
+// This is to make unit tests and build pass for the PR. 
+// Once we merge the fix in CNI repo, I will update the go dependency with a rc image tag before merging this PR
+replace github.com/aws/amazon-vpc-cni-k8s => github.com/Pavani-Panakanti/amazon-vpc-cni-k8s v0.0.0-20250206004828-41aa1a1d5d22
