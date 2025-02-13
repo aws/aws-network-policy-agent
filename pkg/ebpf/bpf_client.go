@@ -54,7 +54,7 @@ var (
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                            = "eni"
-	POLICIES_APPLIED 						   = 0
+	POLICIES_APPLIED                           = 0
 	DEFAULT_ALLOW                              = 1
 	DEFAULT_DENY                               = 2
 	LOCAL_IPAMD_ADDRESS                        = "127.0.0.1:50051"
@@ -384,7 +384,7 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	eventsMapFD := 0
 	var interfaceNametoIngressPinPath = make(map[string]string)
-	var interfaceNametoEgressPinPath  = make(map[string]string)
+	var interfaceNametoEgressPinPath = make(map[string]string)
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
@@ -502,11 +502,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		}
 	}
 
-	var state := DEFAULT_ALLOW
+	state := DEFAULT_ALLOW
 	if utils.IsStrictMode(networkPolicyMode) {
 		state = DEFAULT_DENY
 	}
-
 
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
