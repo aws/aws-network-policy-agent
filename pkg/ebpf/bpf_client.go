@@ -54,6 +54,7 @@ var (
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                            = "eni"
 	POLICIES_APPLIED                           = 0
+	POD_STATE_MAP_KEY                          = 0
 )
 
 var (
@@ -104,7 +105,7 @@ type BpfClient interface {
 	DeletePodFromIngressProgPodCaches(podName string, podNamespace string)
 	DeletePodFromEgressProgPodCaches(podName string, podNamespace string)
 	DeleteBPFProgramAndMaps(podIdentifier string) error
-	GetDeletePodLockMap() *sync.Map
+	GetDeletePodIdentifierLockMap() *sync.Map
 }
 
 type EvProgram struct {
@@ -137,7 +138,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		IngressProgToPodsMap:      new(sync.Map),
 		EgressProgToPodsMap:       new(sync.Map),
 		AttachProbesToPodLock:     new(sync.Map),
-		DeletePodLock:             new(sync.Map),
+		DeletePodIdentifierLock:   new(sync.Map),
 	}
 	ebpfClient.logger = ctrl.Log.WithName("ebpf-client")
 	ingressBinary, egressBinary, eventsBinary,
@@ -306,7 +307,7 @@ type bpfClient struct {
 	// Stores podIdentifier to attachprobes lock mapping
 	AttachProbesToPodLock *sync.Map
 	// Stores podIdentifier to deletepod lock mapping
-	DeletePodLock *sync.Map
+	DeletePodIdentifierLock *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -445,8 +446,8 @@ func (l *bpfClient) GetEgressProgToPodsMap() *sync.Map {
 	return l.EgressProgToPodsMap
 }
 
-func (l *bpfClient) GetDeletePodLockMap() *sync.Map {
-	return l.DeletePodLock
+func (l *bpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
+	return l.DeletePodIdentifierLock
 }
 
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string) error {
@@ -727,7 +728,7 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, upda
 		peBPFContext := value.(BPFContext)
 		ingressProgInfo := peBPFContext.ingressPgmInfo
 		egressProgInfo := peBPFContext.egressPgmInfo
-		key := uint32(0)                        // pod_state_map key
+		key := uint32(POD_STATE_MAP_KEY)        // pod_state_map key
 		value := pod_state{state: uint8(state)} // pod_state_map value
 
 		if updateIngress && ingressProgInfo.Program.ProgFD != 0 {

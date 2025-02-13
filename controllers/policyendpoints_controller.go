@@ -59,9 +59,12 @@ var (
 		[]string{"name", "namespace"},
 	)
 	prometheusRegistered = false
-	POLICIES_APPLIED     = 0
-	DEFAULT_ALLOW        = 1
-	DEFAULT_DENY         = 2
+)
+
+const (
+	POLICIES_APPLIED = 0
+	DEFAULT_ALLOW    = 1
+	DEFAULT_DENY     = 2
 )
 
 func msSince(start time.Time) float64 {
@@ -220,20 +223,35 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 func (r *PolicyEndpointsReconciler) IsProgFdShared(targetPodName string,
 	targetPodNamespace string) (bool, error) {
 	targetpodNamespacedName := utils.GetPodNamespacedName(targetPodName, targetPodNamespace)
-	foundSharedIngress := false
-	targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName)
-	if !ok {
-		r.log.Info("isProgFdShared", "Pod not found in IngressPodToProgMap ", targetpodNamespacedName)
-		return foundSharedIngress, fmt.Errorf("pod not found in IngressPodToProgMap %s", targetpodNamespacedName)
-	}
-	if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
-		podsList, ok := currentList.(map[string]struct{})
-		if ok && len(podsList) > 1 {
-			foundSharedIngress = true
-			r.log.Info("isProgFdShared", "Found shared ingress progFD for target: ", targetPodName, "progFD: ", targetProgFD)
+	foundShared := false
+	// check ingress caches
+	if targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName); ok {
+		if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
+			podsList, ok := currentList.(map[string]struct{})
+			if ok && len(podsList) > 1 {
+				foundShared = true
+				r.log.Info("isProgFdShared", "Found shared ingress progFD for target: ", targetPodName, "progFD: ", targetProgFD)
+			}
 		}
 	}
-	return foundSharedIngress, nil
+
+	// Check Egress Maps if not found in Ingress
+	if targetProgFD, ok := r.ebpfClient.GetEgressPodToProgMap().Load(targetpodNamespacedName); ok {
+		if currentList, ok := r.ebpfClient.GetEgressProgToPodsMap().Load(targetProgFD); ok {
+			podsList, ok := currentList.(map[string]struct{})
+			if ok && len(podsList) > 1 {
+				foundShared = true
+				r.log.Info("IsProgFdShared", "Found shared egress progFD for target:", targetPodName, "progFD:", targetProgFD)
+			}
+		}
+	}
+
+	// If not found in both maps, return an error
+	if !foundShared {
+		r.log.Info("IsProgFdShared", "Pod not found in either IngressPodToProgMap or EgressPodToProgMap:", targetpodNamespacedName)
+		return false, fmt.Errorf("pod not found in either IngressPodToProgMap or EgressPodToProgMap: %s", targetpodNamespacedName)
+	}
+	return true, nil
 }
 
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,
@@ -371,20 +389,15 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 
 		// We update pod_state to default allow/deny if there are no other policies applied
 		if noActiveIngressPolicies && noActiveEgressPolicies {
+			state := DEFAULT_ALLOW
 			if utils.IsStrictMode(r.networkPolicyMode) {
-				r.log.Info("No active policies. Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, true, true)
-				if err != nil {
-					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
-					return err
-				}
-			} else {
-				r.log.Info("No active policies. Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-				err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, true, true)
-				if err != nil {
-					r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
-					return err
-				}
+				state = DEFAULT_DENY
+			}
+			r.log.Info("No active policies. Updating pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", r.networkPolicyMode)
+			err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, state, true, true)
+			if err != nil {
+				r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
+				return err
 			}
 		} else {
 			// We've additional PolicyEndpoint resources configured against this pod
@@ -621,13 +634,11 @@ func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.Na
 				break
 			}
 		}
-		// We want to clean up the pod and detach ebpf probes in two cases
-		// 1. When pod is still running but pod is not an active pod against policy endpoint which implies policy endpoint is no longer applied to the podIdentifier
-		// 2. When pod is deleted and is the last pod in the PodIdentifier
+		// We want to clean up the pod when pod is still running but pod is not an active pod against policy endpoint
+		// This implies policy endpoint is no longer applied to the podIdentifier
 		if !activePod && !podIdentifiers[oldPodIdentifier] {
 			r.log.Info("Pod to cleanup: ", "name: ", oldPod.Name, "namespace: ", oldPod.Namespace)
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
-			// When pod is deleted and this is not the last pod in podIdentifier, we are just updating the podName and progFD local caches
 		}
 	}
 

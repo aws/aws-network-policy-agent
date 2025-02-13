@@ -139,10 +139,10 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	var err error
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, s.log)
 
-	value, _ := s.policyReconciler.GeteBPFClient().GetDeletePodLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
-	deletePodLock := value.(*sync.Mutex)
-	deletePodLock.Lock()
-	s.log.Info("Got the deletePodLock for", "Pod: ", in.K8S_POD_NAME, " Namespace: ", in.K8S_POD_NAMESPACE, " PodIdentifier: ", podIdentifier)
+	value, _ := s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
+	deletePodIdentifierLock := value.(*sync.Mutex)
+	deletePodIdentifierLock.Lock()
+	s.log.Info("Got the deletePodIdentifierLock for", "Pod: ", in.K8S_POD_NAME, " Namespace: ", in.K8S_POD_NAMESPACE, " PodIdentifier: ", podIdentifier)
 
 	isProgFdShared, err := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
@@ -152,10 +152,10 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 		if err != nil {
 			s.log.Error(err, "BPF programs and Maps delete failed for ", "podIdentifier ", podIdentifier)
 		}
-		deletePodLock.Unlock()
-		s.policyReconciler.GeteBPFClient().GetDeletePodLockMap().Delete(podIdentifier)
+		deletePodIdentifierLock.Unlock()
+		s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().Delete(podIdentifier)
 	} else {
-		deletePodLock.Unlock()
+		deletePodIdentifierLock.Unlock()
 	}
 	resp := rpc.DeleteNpReply{
 		Success: true,
