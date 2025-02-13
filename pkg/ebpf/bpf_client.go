@@ -440,13 +440,14 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 		}
 	}
 
-	//If update required, cleanup probes and gather data to re attach prpbes with new programs
+	//If update required, cleanup probes and gather data to re attach probes with new programs
 	if updateIngressProbe || updateEgressProbe {
 		// Get all loaded programs and maps
 		bpfState, err := eBPFSDKClient.GetAllBpfProgramsAndMaps()
 		if err != nil {
 			log.Info("GetAllBpfProgramsAndMaps failed: ", "error: ", err)
 			sdkAPIErr.WithLabelValues("GetAllBpfProgramsAndMaps").Inc()
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
 		}
 		log.Info("GetAllBpfProgramsAndMaps ", "returned", len(bpfState))
 		progIdToPinPath := make(map[int]string)
@@ -464,6 +465,7 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 		//cleanup all existing filters
 		cleanupErr := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
 		if cleanupErr != nil {
+			// log the error and continue. Attaching new probes will cleanup the old ones
 			log.Info("Probe cleanup failed ", "error: ", cleanupErr)
 			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
 		}
@@ -490,7 +492,7 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	var networkPolicyMode string
 	var err error
 
-	// If we have any links for which we need to reattach the probes, fetcg NP mode from ipamd
+	// If we have any links for which we need to reattach the probes, fetch NP mode from ipamd
 	if len(l.interfaceNametoIngressPinPath) > 0 || len(l.interfaceNametoEgressPinPath) > 0 {
 		// get network policy mode from ipamd
 		networkPolicyMode, err = l.GetNetworkPolicyModeFromIpamd()
@@ -500,6 +502,12 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		}
 	}
 
+	var state := DEFAULT_ALLOW
+	if utils.IsStrictMode(networkPolicyMode) {
+		state = DEFAULT_DENY
+	}
+
+
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		l.logger.Info("ReattachEbpfProbes ", "attaching ingress for ", podIdentifier, "interface ", interfaceName)
@@ -508,19 +516,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 			l.logger.Info("Failed to Attach Ingress TC probe for", "interface: ", interfaceName, " podidentifier", podIdentifier)
 			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
 		}
-
-		if utils.IsStrictMode(networkPolicyMode) {
-			l.logger.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-			err = l.UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, true, false)
-			if err != nil {
-				l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
-			}
-		} else {
-			l.logger.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-			err = l.UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, true, false)
-			if err != nil {
-				l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
-			}
+		l.logger.Info("Updating ingress_pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", networkPolicyMode)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, state, true, false)
+		if err != nil {
+			l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
 		}
 	}
 
@@ -533,18 +532,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
 		}
 
-		if utils.IsStrictMode(networkPolicyMode) {
-			l.logger.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
-			err = l.UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, false, true)
-			if err != nil {
-				l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
-			}
-		} else {
-			l.logger.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
-			err = l.UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, false, true)
-			if err != nil {
-				l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
-			}
+		l.logger.Info("Updating egress_pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", networkPolicyMode)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, state, false, true)
+		if err != nil {
+			l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
 		}
 	}
 	return nil
@@ -560,6 +551,7 @@ func (l *bpfClient) GetNetworkPolicyModeFromIpamd() (string, error) {
 	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
 	if err != nil {
 		grpcLogger.Error(err, "Failed to connect to ipamd")
+		return "", err
 	}
 	defer grpcConn.Close()
 
