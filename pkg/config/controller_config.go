@@ -14,7 +14,7 @@ const (
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
-	defaultConntrackCacheTableSize     = 256 * 1024
+	defaultConntrackCacheTableSize     = 512 * 1024
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
 	flagEnableCloudWatchLogs           = "enable-cloudwatch-logs"
 	flagEnableIPv6                     = "enable-ipv6"

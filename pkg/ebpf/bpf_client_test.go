@@ -26,6 +26,11 @@ import (
 	// "unsafe"
 )
 
+var (
+	DEFAULT_ALLOW = 1
+	DEFAULT_DENY  = 2
+)
+
 func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 	test_bpfClientLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
@@ -492,6 +497,66 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	}
 }
 
+func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
+	ingressPodStateMapFD, ingressPodStateMapID, egressPodStateMapFD, egressPodStateMapID := 11, 12, 13, 14
+
+	sampleIngressPgmInfo := goelf.BpfData{
+		Maps: map[string]goebpfmaps.BpfMap{
+			TC_INGRESS_POD_STATE_MAP: {
+				MapFD: uint32(ingressPodStateMapFD),
+				MapID: uint32(ingressPodStateMapID),
+			},
+		},
+	}
+	sampleEgressPgmInfo := goelf.BpfData{
+		Maps: map[string]goebpfmaps.BpfMap{
+			TC_EGRESS_POD_STATE_MAP: {
+				MapFD: uint32(egressPodStateMapFD),
+				MapID: uint32(egressPodStateMapID),
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		podIdentifier string
+		state         int
+		wantErr       error
+	}{
+		{
+			name:          "Sample Pod State Map Update",
+			podIdentifier: "sample_pod_identifier",
+			state:         DEFAULT_ALLOW,
+			wantErr:       nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				nodeIP:                    "10.1.1.1",
+				logger:                    logr.New(&log.NullLogSink{}),
+				enableIPv6:                false,
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockMapClient := mock_bpfmaps.NewMockBpfMapAPIs(ctrl)
+			mockMapClient.EXPECT().CreateUpdateMapEntry(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+
+			sampleBPFContext := BPFContext{
+				ingressPgmInfo: sampleIngressPgmInfo,
+				egressPgmInfo:  sampleEgressPgmInfo,
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, tt.state, true, true)
+			assert.Equal(t, gotErr, tt.wantErr)
+		})
+	}
+}
+
 func TestCheckAndUpdateBPFBinaries(t *testing.T) {
 	testBpfBinaries := []string{TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY}
 
@@ -616,55 +681,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier)
-			assert.Equal(t, tt.wantErr, gotError)
-		})
-	}
-}
-
-func TestBpfClient_DetacheBPFProbes(t *testing.T) {
-	testPod := types.NamespacedName{
-		Name:      "testPod",
-		Namespace: "testNS",
-	}
-
-	tests := []struct {
-		name          string
-		testPod       types.NamespacedName
-		ingress       bool
-		egress        bool
-		deletePinPath bool
-		wantErr       error
-	}{
-		{
-			name:          "Ingress and Egress Detach",
-			testPod:       testPod,
-			ingress:       true,
-			egress:        true,
-			deletePinPath: true,
-			wantErr:       nil,
-		},
-	}
-	for _, tt := range tests {
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-		mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-		mockTCClient.EXPECT().TCIngressDetach(gomock.Any()).AnyTimes()
-		mockTCClient.EXPECT().TCEgressDetach(gomock.Any()).AnyTimes()
-
-		testBpfClient := &bpfClient{
-			nodeIP:                    "10.1.1.1",
-			logger:                    logr.New(&log.NullLogSink{}),
-			enableIPv6:                false,
-			hostMask:                  "/32",
-			policyEndpointeBPFContext: new(sync.Map),
-			bpfTCClient:               mockTCClient,
-			IngressPodToProgMap:       new(sync.Map),
-			EgressPodToProgMap:        new(sync.Map),
-			AttachProbesToPodLock:     new(sync.Map),
-		}
-
-		t.Run(tt.name, func(t *testing.T) {
-			gotError := testBpfClient.DetacheBPFProbes(tt.testPod, tt.ingress, tt.egress, tt.deletePinPath)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
@@ -831,7 +847,7 @@ func TestMergeDuplicateL4Info(t *testing.T) {
 	}
 }
 
-func TestIsMapUpdateRequired(t *testing.T) {
+func TestIsFirstPodInPodIdentifier(t *testing.T) {
 	sampleIngressPgmInfo := goelf.BpfData{
 		Program: goebpfprogs.BpfProgram{
 			ProgID: 2,
@@ -885,7 +901,7 @@ func TestIsMapUpdateRequired(t *testing.T) {
 				}
 				testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			}
-			gotIsMapUpdateRequired := testBpfClient.IsMapUpdateRequired(tt.podIdentifier)
+			gotIsMapUpdateRequired := testBpfClient.IsFirstPodInPodIdentifier(tt.podIdentifier)
 			assert.Equal(t, tt.want, gotIsMapUpdateRequired)
 		})
 	}
