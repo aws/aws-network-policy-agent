@@ -23,7 +23,7 @@ require (
 	github.com/vishvananda/netlink v1.3.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/sys v0.28.0
-	google.golang.org/grpc v1.69.2
+	google.golang.org/grpc v1.70.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.31.3
 	k8s.io/apimachinery v0.31.3
@@ -73,7 +73,7 @@ require (
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.28.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20241015192408-796eee8c2d53 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20241202173237-19429a94021a // indirect
 	google.golang.org/protobuf v1.36.1 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
@@ -89,6 +89,6 @@ require (
 
 replace golang.org/x/net => golang.org/x/net v0.23.0
 
-// This is to make unit tests and build pass for the PR. 
+// This is to make unit tests and build pass for the PR.
 // Once we merge the fix in CNI repo, I will update the go dependency with a rc image tag before merging this PR
 replace github.com/aws/amazon-vpc-cni-k8s => github.com/Pavani-Panakanti/amazon-vpc-cni-k8s v0.0.0-20250206004828-41aa1a1d5d22
