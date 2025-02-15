@@ -13,7 +13,7 @@ require (
 	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.22.1
+	github.com/onsi/ginkgo/v2 v2.22.2
 	github.com/onsi/gomega v1.36.2
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.20.5
@@ -89,6 +89,6 @@ require (
 
 replace golang.org/x/net => golang.org/x/net v0.23.0
 
-// This is to make unit tests and build pass for the PR. 
+// This is to make unit tests and build pass for the PR.
 // Once we merge the fix in CNI repo, I will update the go dependency with a rc image tag before merging this PR
 replace github.com/aws/amazon-vpc-cni-k8s => github.com/Pavani-Panakanti/amazon-vpc-cni-k8s v0.0.0-20250206004828-41aa1a1d5d22
