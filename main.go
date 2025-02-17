@@ -114,7 +114,13 @@ func main() {
 	}
 
 	go metrics.ServeMetrics()
-	go rpc.RunRPCHandler(policyEndpointController)
+
+	go func() {
+		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
+			setupLog.Error(err, "Failed to set up gRPC Handler")
+			os.Exit(1)
+		}
+	}()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {

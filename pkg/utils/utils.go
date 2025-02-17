@@ -30,6 +30,8 @@ var (
 	TC_EGRESS_PROG                  = "handle_egress"
 	TC_INGRESS_MAP                  = "ingress_map"
 	TC_EGRESS_MAP                   = "egress_map"
+	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
+	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
@@ -37,6 +39,28 @@ var (
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
+
+// NetworkPolicyEnforcingMode is the mode of network policy enforcement
+type NetworkPolicyEnforcingMode string
+
+const (
+	// None : no network policy enforcement
+	None NetworkPolicyEnforcingMode = "none"
+	// Strict : strict network policy enforcement
+	Strict NetworkPolicyEnforcingMode = "strict"
+	// Standard :standard network policy enforcement
+	Standard NetworkPolicyEnforcingMode = "standard"
+)
+
+// IsStrictMode checks if NP enforcing mode is strict
+func IsStrictMode(input string) bool {
+	return strings.ToLower(input) == string(Strict)
+}
+
+// IsStandardMode checks if NP enforcing mode is standard
+func IsStandardMode(input string) bool {
+	return strings.ToLower(input) == string(Standard)
+}
 
 func GetProtocol(protocolNum int) string {
 	protocolStr := "UNKNOWN"
@@ -104,6 +128,15 @@ func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) s
 	mapName := TC_INGRESS_MAP
 	if direction == "egress" {
 		mapName = TC_EGRESS_MAP
+	}
+	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
+	return pinPath
+}
+
+func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
+	mapName := TC_INGRESS_POD_STATE_MAP
+	if direction == "egress" {
+		mapName = TC_EGRESS_POD_STATE_MAP
 	}
 	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
 	return pinPath
