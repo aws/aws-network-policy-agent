@@ -100,6 +100,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
 			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL, conntrackTableSize)
+		r.ebpfClient.ReAttachEbpfProbes()
 
 		// Start prometheus
 		prometheusRegister()

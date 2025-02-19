@@ -26,11 +26,6 @@ import (
 	// "unsafe"
 )
 
-var (
-	DEFAULT_ALLOW = 1
-	DEFAULT_DENY  = 2
-)
-
 func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 	test_bpfClientLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
@@ -601,7 +596,7 @@ func TestCheckAndUpdateBPFBinaries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bpfTCClient := tc.New(POD_VETH_PREFIX)
+			bpfTCClient := tc.New([]string{POD_VETH_PREFIX})
 			gotUpdateIngressProbe, gotUpdateEgressProbe, gotUpdateEventsProbe, gotError := checkAndUpdateBPFBinaries(bpfTCClient, tt.bpfBinaries, tt.hostBinaryPath)
 			assert.Equal(t, tt.want.updateIngressProbe, gotUpdateIngressProbe)
 			assert.Equal(t, tt.want.updateEgressProbe, gotUpdateEgressProbe)
@@ -769,6 +764,7 @@ func TestRecoverBPFState(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+		mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 
 		mockBpfClient.EXPECT().RecoverGlobalMaps().DoAndReturn(
 			func() (map[string]goebpfmaps.BpfMap, error) {
@@ -781,7 +777,7 @@ func TestRecoverBPFState(t *testing.T) {
 		globapMaps := new(sync.Map)
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, gotError := recoverBPFState(mockBpfClient, policyEndpointeBPFContext, globapMaps,
+			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, _, _, gotError := recoverBPFState(mockTCClient, mockBpfClient, policyEndpointeBPFContext, globapMaps,
 				tt.updateIngressProbe, tt.updateEgressProbe, tt.updateEventsProbe)
 			assert.Equal(t, tt.want.isConntrackMapPresent, gotIsConntrackMapPresent)
 			assert.Equal(t, tt.want.isPolicyEventsMapPresent, gotIsPolicyEventsMapPresent)
