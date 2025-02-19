@@ -163,7 +163,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
-	ebpfClient.bpfTCClient = tc.New(POD_VETH_PREFIX)
+	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX})
 
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
@@ -191,6 +191,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 
 	var interfaceNametoIngressPinPath map[string]string
 	var interfaceNametoEgressPinPath map[string]string
+	eventBufferFD := 0
 	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err = recoverBPFState(ebpfClient.bpfTCClient, ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
 		ebpfClient.GlobalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
