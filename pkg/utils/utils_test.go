@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -643,9 +644,14 @@ func TestIsNonHostCIDR(t *testing.T) {
 
 func TestGetHostVethName(t *testing.T) {
 	type args struct {
-		podName      string
-		podNamespace string
+		podName         string
+		podNamespace    string
+		interfacePrefix []string
+		mockNetlink     bool
 	}
+
+	originalFunc := getLinkByNameFunc                   // Save original function
+	defer func() { getLinkByNameFunc = originalFunc }() // Restore after test
 
 	tests := []struct {
 		name string
@@ -653,17 +659,45 @@ func TestGetHostVethName(t *testing.T) {
 		want string
 	}{
 		{
-			name: "Sample Pod",
+			name: "host interface not found",
 			args: args{
-				podName:      "foo",
-				podNamespace: "bar",
+				podName:         "foo",
+				podNamespace:    "bar",
+				interfacePrefix: []string{"eni", "vlan"},
+				mockNetlink:     false,
+			},
+			want: "",
+		},
+		{
+			name: "Pod with host interface starting as eni",
+			args: args{
+				podName:         "foo",
+				podNamespace:    "bar",
+				interfacePrefix: []string{"eni"},
+				mockNetlink:     true,
 			},
 			want: "eni9cfdfc6963c",
 		},
+		{
+			name: "Pod with host interface starting as vlan",
+			args: args{
+				podName:         "foo",
+				podNamespace:    "bar",
+				interfacePrefix: []string{"vlan"},
+				mockNetlink:     true,
+			},
+			want: "vlan9cfdfc6963c",
+		},
 	}
 	for _, tt := range tests {
+		if tt.args.mockNetlink {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+			}
+		}
+
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetHostVethName(tt.args.podName, tt.args.podNamespace)
+			got := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix, logr.New(&log.NullLogSink{}))
 			assert.Equal(t, tt.want, got)
 		})
 	}

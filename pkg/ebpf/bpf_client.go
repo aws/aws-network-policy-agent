@@ -2,8 +2,10 @@ package ebpf
 
 import (
 	"context"
+
 	"fmt"
 	"io/ioutil"
+
 	"net"
 	"sort"
 	"strconv"
@@ -62,6 +64,7 @@ var (
 	DEFAULT_DENY                               = 2
 	LOCAL_IPAMD_ADDRESS                        = "127.0.0.1:50051"
 	POD_STATE_MAP_KEY                          = 0
+	BRANCH_ENI_VETH_PREFIX                     = "vlan"
 )
 
 var (
@@ -163,7 +166,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
-	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX})
+	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
@@ -606,7 +609,8 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
 	// name from the Name and Namespace of the Pod.
 	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
+	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+
 	l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
@@ -639,7 +643,6 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(progFD, make(map[string]struct{}))
 		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	}
-
 	return nil
 }
 
