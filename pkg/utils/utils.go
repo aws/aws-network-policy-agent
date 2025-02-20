@@ -11,6 +11,8 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/go-logr/logr"
+	multierror "github.com/hashicorp/go-multierror"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -30,6 +32,8 @@ var (
 	TC_EGRESS_PROG                  = "handle_egress"
 	TC_INGRESS_MAP                  = "ingress_map"
 	TC_EGRESS_MAP                   = "egress_map"
+	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
+	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
@@ -37,6 +41,28 @@ var (
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
+
+// NetworkPolicyEnforcingMode is the mode of network policy enforcement
+type NetworkPolicyEnforcingMode string
+
+const (
+	// None : no network policy enforcement
+	None NetworkPolicyEnforcingMode = "none"
+	// Strict : strict network policy enforcement
+	Strict NetworkPolicyEnforcingMode = "strict"
+	// Standard :standard network policy enforcement
+	Standard NetworkPolicyEnforcingMode = "standard"
+)
+
+// IsStrictMode checks if NP enforcing mode is strict
+func IsStrictMode(input string) bool {
+	return strings.ToLower(input) == string(Strict)
+}
+
+// IsStandardMode checks if NP enforcing mode is standard
+func IsStandardMode(input string) bool {
+	return strings.ToLower(input) == string(Standard)
+}
 
 func GetProtocol(protocolNum int) string {
 	protocolStr := "UNKNOWN"
@@ -55,6 +81,8 @@ func GetProtocol(protocolNum int) string {
 	}
 	return protocolStr
 }
+
+var getLinkByNameFunc = netlink.LinkByName
 
 type VerdictType int
 
@@ -109,6 +137,15 @@ func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) s
 	return pinPath
 }
 
+func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
+	mapName := TC_INGRESS_POD_STATE_MAP
+	if direction == "egress" {
+		mapName = TC_EGRESS_POD_STATE_MAP
+	}
+	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
+	return pinPath
+}
+
 func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
 	return policyName + policyNamespace
 }
@@ -117,10 +154,28 @@ func GetParentNPNameFromPEName(policyEndpointName string) string {
 	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
 }
 
-func GetHostVethName(podName, podNamespace string) string {
+func getHostLinkByName(name string) (netlink.Link, error) {
+	return getLinkByNameFunc(name)
+}
+
+func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) string {
+	var interfaceName string
+	var errors error
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
-	return fmt.Sprintf("%s%s", "eni", hex.EncodeToString(h.Sum(nil))[:11])
+
+	for _, prefix := range interfacePrefixes {
+		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
+		if _, err := getHostLinkByName(interfaceName); err == nil {
+			logger.Info("host veth interface found", "interface name", interfaceName)
+			return interfaceName
+		} else {
+			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
+		}
+	}
+
+	logger.Error(errors, "Not found any interface starting with prefixes and the hash", "prefixes searched", interfacePrefixes, "hash", hex.EncodeToString(h.Sum(nil))[:11])
+	return ""
 }
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {

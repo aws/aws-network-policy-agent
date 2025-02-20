@@ -16,6 +16,7 @@ package rpc
 import (
 	"context"
 	"net"
+	"sync"
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
@@ -29,6 +30,12 @@ import (
 	"google.golang.org/grpc/reflection"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+)
+
+var (
+	POLICIES_APPLIED = 0
+	DEFAULT_ALLOW    = 1
+	DEFAULT_DENY     = 2
 )
 
 const (
@@ -52,11 +59,12 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		return &success, nil
 	}
 
-	s.log.Info("Received Enforce Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE)
+	s.log.Info("Received Enforce Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE, "Mode", in.NETWORK_POLICY_MODE)
 	var err error
 
+	s.policyReconciler.SetNetworkPolicyMode(in.NETWORK_POLICY_MODE)
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, s.log)
-	isMapUpdateRequired := s.policyReconciler.GeteBPFClient().IsMapUpdateRequired(podIdentifier)
+	isFirstPodInPodIdentifier := s.policyReconciler.GeteBPFClient().IsFirstPodInPodIdentifier(podIdentifier)
 	err = s.policyReconciler.GeteBPFClient().AttacheBPFProbes(types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE},
 		podIdentifier)
 	if err != nil {
@@ -66,12 +74,14 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 	// We attempt to program eBPF firewall map entries for this pod, if the local agent is aware of the policies
 	// configured against it. For example, if this is a new replica of an existing pod/deployment then the local
-	// node agent will have the policy information available to it. If not, we will leave the pod in default deny state
-	// until the Network Policy controller reconciles existing policies against this pod.
+	// node agent will have the policy information available to it. If not, we will leave the pod in default allow
+	// or default deny state based on NP mode until the Network Policy controller reconciles existing policies
+	// against this pod.
 
 	// Check if there are active policies against the new pod and if there are other pods on the local node that share
 	// the eBPF firewall maps with the newly launched pod, if already present we can skip the map update and return
-	if s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier) && isMapUpdateRequired {
+	policiesAvailableInLocalCache := s.policyReconciler.ArePoliciesAvailableInLocalCache(podIdentifier)
+	if policiesAvailableInLocalCache && isFirstPodInPodIdentifier {
 		// If we're here, then the local agent knows the list of active policies that apply to this pod and
 		// this is the first pod of it's type to land on the local node/cluster
 		s.log.Info("Active policies present against this pod and this is a new Pod to the local node, configuring firewall rules....")
@@ -86,11 +96,69 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 			return nil, err
 		}
 	} else {
-		s.log.Info("Pod either has no active policies or shares the eBPF firewall maps with other local pods. No Map update required..")
+		// If no active policies present against this pod identifier, set pod_state to default_allow or default_deny
+		if !policiesAvailableInLocalCache {
+			s.log.Info("No active policies present for ", "podIdentifier: ", podIdentifier)
+			if utils.IsStrictMode(in.NETWORK_POLICY_MODE) {
+				s.log.Info("Updating pod_state map to default_deny for ", "podIdentifier: ", podIdentifier)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_DENY, true, true)
+				if err != nil {
+					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
+					return nil, err
+				}
+			} else {
+				s.log.Info("Updating pod_state map to default_allow for ", "podIdentifier: ", podIdentifier)
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, DEFAULT_ALLOW, true, true)
+				if err != nil {
+					s.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
+					return nil, err
+				}
+			}
+		} else {
+			s.log.Info("Pod shares the eBPF firewall maps with other local pods. No Map update required..")
+		}
 	}
 
 	resp := rpc.EnforceNpReply{
 		Success: err == nil,
+	}
+	return &resp, nil
+}
+
+// DeletePodNp processes CNI Delete Pod NP network request
+func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc.DeleteNpReply, error) {
+	if s.policyReconciler.GeteBPFClient() == nil {
+		s.log.Info("Network policy is disabled, returning success")
+		success := rpc.DeleteNpReply{
+			Success: true,
+		}
+		return &success, nil
+	}
+
+	s.log.Info("Received Delete Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE)
+	var err error
+	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, s.log)
+
+	value, _ := s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
+	deletePodIdentifierLock := value.(*sync.Mutex)
+	deletePodIdentifierLock.Lock()
+	s.log.Info("Got the deletePodIdentifierLock for", "Pod: ", in.K8S_POD_NAME, " Namespace: ", in.K8S_POD_NAMESPACE, " PodIdentifier: ", podIdentifier)
+
+	isProgFdShared, err := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	s.policyReconciler.GeteBPFClient().DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	if err == nil && !isProgFdShared {
+		err = s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
+		if err != nil {
+			s.log.Error(err, "BPF programs and Maps delete failed for ", "podIdentifier ", podIdentifier)
+		}
+		deletePodIdentifierLock.Unlock()
+		s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().Delete(podIdentifier)
+	} else {
+		deletePodIdentifierLock.Unlock()
+	}
+	resp := rpc.DeleteNpReply{
+		Success: true,
 	}
 	return &resp, nil
 }
