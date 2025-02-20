@@ -11,6 +11,8 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/go-logr/logr"
+	multierror "github.com/hashicorp/go-multierror"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -79,6 +81,8 @@ func GetProtocol(protocolNum int) string {
 	}
 	return protocolStr
 }
+
+var getLinkByNameFunc = netlink.LinkByName
 
 type VerdictType int
 
@@ -150,10 +154,28 @@ func GetParentNPNameFromPEName(policyEndpointName string) string {
 	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
 }
 
-func GetHostVethName(podName, podNamespace string) string {
+func getHostLinkByName(name string) (netlink.Link, error) {
+	return getLinkByNameFunc(name)
+}
+
+func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) string {
+	var interfaceName string
+	var errors error
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
-	return fmt.Sprintf("%s%s", "eni", hex.EncodeToString(h.Sum(nil))[:11])
+
+	for _, prefix := range interfacePrefixes {
+		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
+		if _, err := getHostLinkByName(interfaceName); err == nil {
+			logger.Info("host veth interface found", "interface name", interfaceName)
+			return interfaceName
+		} else {
+			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
+		}
+	}
+
+	logger.Error(errors, "Not found any interface starting with prefixes and the hash", "prefixes searched", interfacePrefixes, "hash", hex.EncodeToString(h.Sum(nil))[:11])
+	return ""
 }
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
