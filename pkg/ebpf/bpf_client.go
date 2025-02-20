@@ -372,17 +372,6 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 			}
 		}
 	}
-
-	//Clean up probes
-	if updateIngressProbe || updateEgressProbe {
-		err := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
-		if err != nil {
-			log.Error(err, "Probe cleanup failed")
-			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
-			return updateIngressProbe, updateEgressProbe, updateEventsProbe, err
-		}
-	}
-
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
