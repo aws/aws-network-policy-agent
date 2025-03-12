@@ -53,7 +53,7 @@ func leakedMapsFound() error {
 
 	for _, v := range files {
 		if v.Name() != "global_aws_conntrack_map" && v.Name() != "global_policy_events" && !strings.HasPrefix(v.Name(), getPodPrefix()) && !strings.HasPrefix(v.Name(), coreDnsPrefix) {
-            return fmt.Errorf("BPF Maps folder is not cleaned up (except conntrack, policy_events, coreDNS): %v", v.Name())
+			return fmt.Errorf("BPF Maps folder is not cleaned up (except conntrack, policy_events, coreDNS): %v", v.Name())
 		}
 	}
 
