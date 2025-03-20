@@ -5,7 +5,7 @@ go 1.22.3
 toolchain go1.22.5
 
 require (
-	github.com/aws/amazon-vpc-cni-k8s v1.19.3-rc1
+	github.com/aws/amazon-vpc-cni-k8s v1.19.3
 	github.com/aws/aws-ebpf-sdk-go v1.0.12
 	github.com/aws/aws-sdk-go v1.55.5
 	github.com/go-logr/logr v1.4.2
