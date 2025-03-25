@@ -49,7 +49,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: us-west-2
-          role-duration-seconds: 18000 # 5 hours
+          role-duration-seconds: 21600 # 6 hours
       - name: Run e2e conformance test
         env:
           RUN_CONFORMANCE_TESTS: true

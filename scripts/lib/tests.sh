@@ -34,6 +34,9 @@ EOF
 
 function run_cyclonus_tests(){
 
+    TIMEOUT=$((5 * 60 * 60))  # 5 hours timeout in seconds
+    START_TIME=$(date +%s)
+
     kubectl create ns netpol
     kubectl create clusterrolebinding cyclonus --clusterrole=cluster-admin --serviceaccount=netpol:cyclonus
     kubectl create sa cyclonus -n netpol
@@ -41,9 +44,25 @@ function run_cyclonus_tests(){
     generate_manifest_and_apply
 
     echo "Executing cyclonus suite"
-    kubectl wait --for=condition=complete --timeout=300m -n netpol job.batch/cyclonus || echo "Job timed out after 4 hrs"
-    kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
 
+    while true; do
+      STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
+      if [ "$STATUS" == "True" ]; then
+        echo "Job $JOB_NAME has failed. Exiting."
+        break
+      fi
+
+      CURRENT_TIME=$(date +%s)
+      ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+      if [ "$ELAPSED_TIME" -ge "$TIMEOUT" ]; then
+          echo "Timeout reached (5 hours). Exiting."
+          break
+      fi
+
+      kubectl wait --for=condition=complete job.batch/cyclonus -n netpol --timeout=60s > /dev/null 2>&1 && break
+    done
+
+    kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
     kubectl get pods -A -owide
 
     # Cleanup after test finishes
