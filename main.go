@@ -90,18 +90,31 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
-	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
-		ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-		ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
-	if err != nil {
-		setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
-		os.Exit(1)
+
+	if ctrlConfig.EnableNetworkPolicy {
+		setupLog.Info("Network Policy is enabled, registering the policyEndpointController...")
+		policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
+			ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
+			ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
+		if err != nil {
+			setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
+			os.Exit(1)
+		}
+
+		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "PolicyEndpoints")
+			os.Exit(1)
+		}
+		go func() {
+			if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
+				setupLog.Error(err, "Failed to set up gRPC Handler")
+				os.Exit(1)
+			}
+		}()
+	} else {
+		setupLog.Info("Network Policy is disabled, skip the policyEndpointController registration")
 	}
 
-	if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "PolicyEndpoints")
-		os.Exit(1)
-	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -114,13 +127,6 @@ func main() {
 	}
 
 	go metrics.ServeMetrics()
-
-	go func() {
-		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
-			setupLog.Error(err, "Failed to set up gRPC Handler")
-			os.Exit(1)
-		}
-	}()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
