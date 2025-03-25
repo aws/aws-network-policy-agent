@@ -51,7 +51,7 @@ type server struct {
 
 // EnforceNpToPod processes CNI Enforce NP network request
 func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (*rpc.EnforceNpReply, error) {
-	if s.policyReconciler.GeteBPFClient() == nil {
+	if s.policyReconciler == nil || s.policyReconciler.GeteBPFClient() == nil {
 		s.log.Info("Network policy is disabled, returning success")
 		success := rpc.EnforceNpReply{
 			Success: true,
@@ -127,7 +127,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 // DeletePodNp processes CNI Delete Pod NP network request
 func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc.DeleteNpReply, error) {
-	if s.policyReconciler.GeteBPFClient() == nil {
+	if s.policyReconciler == nil || s.policyReconciler.GeteBPFClient() == nil {
 		s.log.Info("Network policy is disabled, returning success")
 		success := rpc.DeleteNpReply{
 			Success: true,
