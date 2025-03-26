@@ -1,5 +1,5 @@
-github.com/aws/amazon-vpc-cni-k8s v1.19.3-rc1 h1:xhW7QKlgA5fWK8zLmRU0R47eunOH7DL6IU/mWVSDjwQ=
-github.com/aws/amazon-vpc-cni-k8s v1.19.3-rc1/go.mod h1:WzIsGmsfmDQa6NG+9kQhHZ+Ot1sClEzjNsxcmQnnOHg=
+github.com/aws/amazon-vpc-cni-k8s v1.19.3 h1:n40jaSsviUlkKcIIeqmwgD+pjw25rFLDOFkTruyaY6Y=
+github.com/aws/amazon-vpc-cni-k8s v1.19.3/go.mod h1:DKnrp67NFzPgwKcNHXj0Zy2Thv3MSknzV7bHlB9cVzM=
 github.com/aws/aws-ebpf-sdk-go v1.0.12 h1:ceFVCvTptFZKm9PToVQJZY4uZx9dt5Thj0ZinKhw6GI=
 github.com/aws/aws-ebpf-sdk-go v1.0.12/go.mod h1:iOJ9wFCFfBJK1UGFwIY6KR/xXtESnPPUf5mLJGyJus0=
 github.com/aws/aws-sdk-go v1.55.5 h1:KKUZBfBoyqy5d3swXyiC7Q76ic40rYcbqH7qjh59kzU=
