@@ -17,9 +17,8 @@ limitations under the License.
 package main
 
 import (
-	"os"
-
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"os"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
@@ -90,7 +89,7 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
-
+	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
 		setupLog.Info("Network Policy is enabled, registering the policyEndpointController...")
 		policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
@@ -105,12 +104,6 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "PolicyEndpoints")
 			os.Exit(1)
 		}
-		go func() {
-			if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
-				setupLog.Error(err, "Failed to set up gRPC Handler")
-				os.Exit(1)
-			}
-		}()
 	} else {
 		setupLog.Info("Network Policy is disabled, skip the policyEndpointController registration")
 	}
@@ -125,6 +118,15 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
+
+	// CNI makes rpc calls to NP agent regardless NP is enabled or not
+	// need to start rpc always
+	go func() {
+		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
+			setupLog.Error(err, "Failed to set up gRPC Handler")
+			os.Exit(1)
+		}
+	}()
 
 	go metrics.ServeMetrics()
 
