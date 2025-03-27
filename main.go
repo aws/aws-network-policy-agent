@@ -17,8 +17,9 @@ limitations under the License.
 package main
 
 import (
-	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"os"
+
+	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
