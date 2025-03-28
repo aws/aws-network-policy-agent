@@ -97,6 +97,7 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
 	var err error
 	r.enableNetworkPolicy = enableNetworkPolicy
 
+	// keep the check here for UT TestIsProgFdShared
 	if enableNetworkPolicy {
 		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
 			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL, conntrackTableSize)
@@ -142,12 +143,6 @@ func (r *PolicyEndpointsReconciler) SetNetworkPolicyMode(mode string) {
 }
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-
-	if !r.enableNetworkPolicy {
-		r.log.Info("Skipping policy endpoint reconciliation as network policy agent is disabled")
-		return ctrl.Result{}, nil
-	}
-
 	r.log.Info("Received a new reconcile request", "req", req)
 	if err := r.reconcile(ctx, req); err != nil {
 		r.log.Error(err, "Reconcile error")
