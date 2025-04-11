@@ -3,6 +3,7 @@ package ebpf
 import (
 	"context"
 
+	"errors"
 	"fmt"
 	"io/ioutil"
 
@@ -554,10 +555,15 @@ func (l *bpfClient) GetNetworkPolicyModeFromIpamd() (string, error) {
 	ipamd := rpc.NewConfigServerBackendClient(grpcConn)
 	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
 	if err != nil {
-		grpcLogger.Info("Failed to get network policy configs", "error", err)
+		grpcLogger.Error(err, "Failed to get network policy configs")
 		return "", err
 	}
 	grpcLogger.Info("Connected to ipamd grpc endpoint and got response for ", "NetworkPolicyMode", resp.NetworkPolicyMode)
+	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
+		err = errors.New("Invalid Network Policy Mode")
+		grpcLogger.Error(err, "Invalid Network Policy Mode ", resp.NetworkPolicyMode)
+		return "", err
+	}
 	return resp.NetworkPolicyMode, nil
 }
 
