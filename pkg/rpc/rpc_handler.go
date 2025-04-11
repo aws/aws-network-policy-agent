@@ -63,7 +63,8 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 	var err error
 
 	if !utils.IsValidNetworkPolicyEnforcingMode(in.NETWORK_POLICY_MODE) {
-		s.log.Error(err, "Invalid Network Policy Mode ", in.NETWORK_POLICY_MODE)
+		err = errors.New("Invalid Network Policy Mode")
+		s.log.Error(err, "Network Policy Mode validation failed ", in.NETWORK_POLICY_MODE)
 		return nil, err
 	}
 
