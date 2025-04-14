@@ -46,13 +46,21 @@ var (
 type NetworkPolicyEnforcingMode string
 
 const (
-	// None : no network policy enforcement
-	None NetworkPolicyEnforcingMode = "none"
 	// Strict : strict network policy enforcement
 	Strict NetworkPolicyEnforcingMode = "strict"
 	// Standard :standard network policy enforcement
 	Standard NetworkPolicyEnforcingMode = "standard"
 )
+
+// IsValidNetworkPolicyEnforcingMode checks if the input string matches any of the enum values
+func IsValidNetworkPolicyEnforcingMode(input string) bool {
+	switch strings.ToLower(input) {
+	case string(Strict), string(Standard):
+		return true
+	default:
+		return false
+	}
+}
 
 // IsStrictMode checks if NP enforcing mode is strict
 func IsStrictMode(input string) bool {

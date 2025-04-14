@@ -93,7 +93,7 @@ func main() {
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
 		setupLog.Info("Network Policy is enabled, registering the policyEndpointController...")
-		policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
+		policyEndpointController, err = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
 			ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 			ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
 		if err != nil {
