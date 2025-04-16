@@ -51,7 +51,7 @@ type server struct {
 
 // EnforceNpToPod processes CNI Enforce NP network request
 func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (*rpc.EnforceNpReply, error) {
-	if s.policyReconciler.GeteBPFClient() == nil {
+	if s.policyReconciler == nil || s.policyReconciler.GeteBPFClient() == nil {
 		s.log.Info("Network policy is disabled, returning success")
 		success := rpc.EnforceNpReply{
 			Success: true,
@@ -61,6 +61,12 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 	s.log.Info("Received Enforce Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE, "Mode", in.NETWORK_POLICY_MODE)
 	var err error
+
+	if !utils.IsValidNetworkPolicyEnforcingMode(in.NETWORK_POLICY_MODE) {
+		err = errors.New("Invalid Network Policy Mode")
+		s.log.Error(err, "Network Policy Mode validation failed ", in.NETWORK_POLICY_MODE)
+		return nil, err
+	}
 
 	s.policyReconciler.SetNetworkPolicyMode(in.NETWORK_POLICY_MODE)
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, s.log)
@@ -127,7 +133,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 // DeletePodNp processes CNI Delete Pod NP network request
 func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc.DeleteNpReply, error) {
-	if s.policyReconciler.GeteBPFClient() == nil {
+	if s.policyReconciler == nil || s.policyReconciler.GeteBPFClient() == nil {
 		s.log.Info("Network policy is disabled, returning success")
 		success := rpc.DeleteNpReply{
 			Success: true,
