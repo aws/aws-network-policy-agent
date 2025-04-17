@@ -93,26 +93,25 @@ struct bpf_map_def_pvt SEC("maps") ingress_pod_state_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
-static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, struct pod_state *pst, struct data_t evt, struct iphdr *ip, __u32 l4_dst_port) {
-	struct lpm_trie_val *trie_val;
+static __always_inline int evaluateByLookUp(struct keystruct *trie_key, struct conntrack_key *flow_key, struct pod_state *pst, struct data_t *evt) {	
 	//Check if it's in the allowed list
-	trie_val = bpf_map_lookup_elem(&ingress_map, &trie_key);
+	struct lpm_trie_val *trie_val = bpf_map_lookup_elem(&ingress_map, trie_key);
 	if (trie_val == NULL) {
-		evt.verdict = 0;		    
+		evt->verdict = 0;		    
 		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 		return BPF_DROP;
 	}
 
 	for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
-			evt.verdict = 0;	
+			evt->verdict = 0;	
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
 
-		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->protocol &&
-					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
-						(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
+		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == flow_key->protocol &&
+					((trie_val->start_port == ANY_PORT) || (flow_key->dest_port == trie_val->start_port) ||
+						(flow_key->dest_port > trie_val->start_port && flow_key->dest_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
 			struct conntrack_value new_flow_val = {};
 			if (pst->state == DEFAULT_ALLOW) {
@@ -121,12 +120,12 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 				new_flow_val.val = CT_VAL_POLICIES_APPLIED;
 			}
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
-			evt.verdict = 1;
+			evt->verdict = 1;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
 		}
 	}
-	evt.verdict = 0;		    
+	evt->verdict = 0;		    
 	bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 	return BPF_DROP;
 }
@@ -250,7 +249,7 @@ int handle_ingress(struct __sk_buff *skb)
 				return BPF_OK;
 			}
 			if (flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == POLICIES_APPLIED) {
-				int ret = evaluateByLookUp(trie_key, flow_key, pst, evt, ip, l4_dst_port);
+				int ret = evaluateByLookUp(&trie_key, &flow_key, pst, &evt);
 				if (ret == BPF_DROP) {
 					bpf_map_delete_elem(&aws_conntrack_map, &flow_key);
 					return BPF_DROP;
@@ -283,7 +282,7 @@ int handle_ingress(struct __sk_buff *skb)
 			return BPF_OK;
 		}
 
-		return evaluateByLookUp(trie_key, flow_key, pst, evt, ip, l4_dst_port);
+		return evaluateByLookUp(&trie_key, &flow_key, pst, &evt);
 	}
 	return BPF_OK;
 }
