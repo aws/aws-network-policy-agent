@@ -24,14 +24,22 @@ type Logger interface {
 }
 
 var (
-	DEFAULT_LOG_LEVEL    = "info"
-	DEFAULT_LOG_LOCATION = "/var/log/aws-routed-eni/network-policy-agent.log"
+	DEFAULT_LOG_LEVEL            = "info"
+	DEFAULT_LOG_LOCATION         = "/var/log/aws-routed-eni/network-policy-agent.log"
+	DEFAULT_LOG_FILE_MAX_SIZE    = 200
+	DEFAULT_LOG_FILE_MAX_BACKUPS = 8
+	DEFAULT_LOG_FILE_MAX_AGE     = 30
+	DEFAULT_LOG_FILE_COMPRESS    = true
 )
 
-func New(logLevel string, logLocation string) Logger {
+func New(logLevel string, logLocation string, logFileMaxSize int, logFileMaxBackups int, logFileMaxAge int, logFileCompress bool) Logger {
 	inputLogConfig := &Configuration{
-		LogLevel:    logLevel,
-		LogLocation: logLocation,
+		LogLevel:          logLevel,
+		LogLocation:       logLocation,
+		LogFileMaxSize:    logFileMaxSize,
+		LogFileMaxBackups: logFileMaxBackups,
+		LogFileMaxAge:     logFileMaxAge,
+		LogFileCompress:   logFileCompress,
 	}
 	log = inputLogConfig.newZapLogger()
 	return log
@@ -39,7 +47,8 @@ func New(logLevel string, logLocation string) Logger {
 
 func Get() Logger {
 	if log == nil {
-		log = New(DEFAULT_LOG_LEVEL, DEFAULT_LOG_LOCATION)
+		log = New(DEFAULT_LOG_LEVEL, DEFAULT_LOG_LOCATION,
+			DEFAULT_LOG_FILE_MAX_SIZE, DEFAULT_LOG_FILE_MAX_BACKUPS, DEFAULT_LOG_FILE_MAX_AGE, DEFAULT_LOG_FILE_COMPRESS)
 		log.Warn("Logger was not initialized explicitly, using default logger.")
 	}
 	return log
