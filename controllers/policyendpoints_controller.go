@@ -27,7 +27,6 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -80,33 +79,15 @@ func prometheusRegister() {
 }
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
-func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
-	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool, conntrackTTL int, conntrackTableSize int) (*PolicyEndpointsReconciler, error) {
+func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger, nodeIP string, ebpfClient ebpf.BpfClient) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
-		k8sClient: k8sClient,
-		log:       log,
+		k8sClient:  k8sClient,
+		log:        log,
+		nodeIP:     nodeIP,
+		ebpfClient: ebpfClient,
 	}
-
-	if !enableIPv6 {
-		r.nodeIP, _ = imds.GetMetaData("local-ipv4")
-	} else {
-		r.nodeIP, _ = imds.GetMetaData("ipv6")
-	}
-	r.log.Info("ConntrackTTL", "cleanupPeriod", conntrackTTL)
-
-	var err error
-	r.enableNetworkPolicy = enableNetworkPolicy
-
-	// keep the check here for UT TestIsProgFdShared
-	if enableNetworkPolicy {
-		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
-			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL, conntrackTableSize)
-		r.ebpfClient.ReAttachEbpfProbes()
-
-		// Start prometheus
-		prometheusRegister()
-	}
-	return r, err
+	prometheusRegister()
+	return r
 }
 
 // PolicyEndpointsReconciler reconciles a PolicyEndpoints object
@@ -115,8 +96,6 @@ type PolicyEndpointsReconciler struct {
 	scheme    *runtime.Scheme
 	//Primary IP of EC2 instance
 	nodeIP string
-	// Maps PolicyEndpoint resource to it's eBPF context
-	policyEndpointeBPFContext sync.Map
 	// Maps pod Identifier to list of PolicyEndpoint resources
 	podIdentifierToPolicyEndpointMap sync.Map
 	// Mutex for operations on PodIdentifierToPolicyEndpointMap
@@ -127,8 +106,6 @@ type PolicyEndpointsReconciler struct {
 	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
-	// NetworkPolicy enabled/disabled
-	enableNetworkPolicy bool
 	// NetworkPolicy mode standard/strict
 	networkPolicyMode string
 	//Logger

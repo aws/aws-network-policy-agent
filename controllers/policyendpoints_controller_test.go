@@ -59,8 +59,7 @@ func TestIsProgFdShared(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}), "", nil)
 		policyEndpointReconciler.ebpfClient = ebpf.NewMockBpfClient()
 		for pod, progFd := range podToProgFd {
 			policyEndpointReconciler.ebpfClient.GetIngressPodToProgMap().Store(pod, progFd)
@@ -385,8 +384,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}), "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -804,8 +802,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}), "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1050,8 +1047,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}), "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
