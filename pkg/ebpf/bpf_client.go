@@ -1,28 +1,36 @@
 package ebpf
 
 import (
+	"context"
+
+	"errors"
 	"fmt"
 	"io/ioutil"
+
 	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/aws/amazon-vpc-cni-k8s/rpc"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
+	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,6 +47,8 @@ var (
 	TC_EGRESS_PROG                             = "handle_egress"
 	TC_INGRESS_MAP                             = "ingress_map"
 	TC_EGRESS_MAP                              = "egress_map"
+	TC_INGRESS_POD_STATE_MAP                   = "ingress_pod_state_map"
+	TC_EGRESS_POD_STATE_MAP                    = "egress_pod_state_map"
 	AWS_CONNTRACK_MAP                          = "aws_conntrack_map"
 	AWS_EVENTS_MAP                             = "policy_events"
 	EKS_CLI_BINARY                             = "aws-eks-na-cli"
@@ -50,6 +60,12 @@ var (
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                            = "eni"
+	POLICIES_APPLIED                           = 0
+	DEFAULT_ALLOW                              = 1
+	DEFAULT_DENY                               = 2
+	LOCAL_IPAMD_ADDRESS                        = "127.0.0.1:50051"
+	POD_STATE_MAP_KEY                          = 0
+	BRANCH_ENI_VETH_PREFIX                     = "vlan"
 )
 
 var (
@@ -71,6 +87,10 @@ var (
 	prometheusRegistered = false
 )
 
+type pod_state struct {
+	state uint8
+}
+
 func msSince(start time.Time) float64 {
 	return float64(time.Since(start) / time.Millisecond)
 }
@@ -85,16 +105,19 @@ func prometheusRegister() {
 
 type BpfClient interface {
 	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string) error
-	DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
+	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
-	IsMapUpdateRequired(podIdentifier string) bool
+	IsFirstPodInPodIdentifier(podIdentifier string) bool
 	GetIngressPodToProgMap() *sync.Map
 	GetEgressPodToProgMap() *sync.Map
 	GetIngressProgToPodsMap() *sync.Map
 	GetEgressProgToPodsMap() *sync.Map
 	DeletePodFromIngressProgPodCaches(podName string, podNamespace string)
 	DeletePodFromEgressProgPodCaches(podName string, podNamespace string)
+	ReAttachEbpfProbes() error
+	DeleteBPFProgramAndMaps(podIdentifier string) error
+	GetDeletePodIdentifierLockMap() *sync.Map
 }
 
 type EvProgram struct {
@@ -127,6 +150,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		IngressProgToPodsMap:      new(sync.Map),
 		EgressProgToPodsMap:       new(sync.Map),
 		AttachProbesToPodLock:     new(sync.Map),
+		DeletePodIdentifierLock:   new(sync.Map),
 	}
 	ebpfClient.logger = ctrl.Log.WithName("ebpf-client")
 	ingressBinary, egressBinary, eventsBinary,
@@ -143,7 +167,7 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
-	ebpfClient.bpfTCClient = tc.New(POD_VETH_PREFIX)
+	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
@@ -169,8 +193,10 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	}
 	ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 
+	var interfaceNametoIngressPinPath map[string]string
+	var interfaceNametoEgressPinPath map[string]string
 	eventBufferFD := 0
-	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
+	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err = recoverBPFState(ebpfClient.bpfTCClient, ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
 		ebpfClient.GlobalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
 		//Log the error and move on
@@ -178,6 +204,8 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		sdkAPIErr.WithLabelValues("RecoverBPFState").Inc()
 	}
 	ebpfClient.logger.Info("Successfully recovered BPF state")
+	ebpfClient.interfaceNametoIngressPinPath = interfaceNametoIngressPinPath
+	ebpfClient.interfaceNametoEgressPinPath = interfaceNametoEgressPinPath
 
 	// Load the current events binary, if ..
 	// - Current events binary packaged with network policy agent is different than the one installed
@@ -294,15 +322,12 @@ type bpfClient struct {
 	EgressProgToPodsMap *sync.Map
 	// Stores podIdentifier to attachprobes lock mapping
 	AttachProbesToPodLock *sync.Map
-}
-
-type Event_t struct {
-	SourceIP   uint32
-	SourcePort uint32
-	DestIP     uint32
-	DestPort   uint32
-	Protocol   uint32
-	Verdict    uint32
+	// This is only updated and used for probe binary updates during initialization
+	interfaceNametoIngressPinPath map[string]string
+	// This is only updated and used for probe binary updates during initialization
+	interfaceNametoEgressPinPath map[string]string
+	// Stores podIdentifier to deletepod lock mapping
+	DeletePodIdentifierLock *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -348,25 +373,16 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 			}
 		}
 	}
-
-	//Clean up probes
-	if updateIngressProbe || updateEgressProbe {
-		err := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
-		if err != nil {
-			log.Error(err, "Probe cleanup failed")
-			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
-			return updateIngressProbe, updateEgressProbe, updateEventsProbe, err
-		}
-	}
-
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
-func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
-	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, error) {
+func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
+	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, map[string]string, map[string]string, error) {
 	log := ctrl.Log.WithName("ebpf-client") //TODO reuse logger
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	eventsMapFD := 0
+	var interfaceNametoIngressPinPath = make(map[string]string)
+	var interfaceNametoEgressPinPath = make(map[string]string)
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
@@ -375,7 +391,7 @@ func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext
 		if err != nil {
 			log.Error(err, "failed to recover global maps..")
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, nil
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
 		}
 		log.Info("Total no.of  global maps recovered...", "count: ", len(recoveredGlobalMaps))
 		for globalMapName, globalMap := range recoveredGlobalMaps {
@@ -393,7 +409,7 @@ func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext
 		}
 	}
 
-	// Recover BPF Programs and Maps from BPF_FS. We only aim to recover programs and maps
+	// If no updates required to probes, Recover BPF Programs and Maps from BPF_FS. We only aim to recover programs and maps
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
 		bpfState, err := eBPFSDKClient.RecoverAllBpfProgramsAndMaps()
@@ -422,7 +438,133 @@ func recoverBPFState(eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext
 		}
 	}
 
-	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, nil
+	//If update required, cleanup probes and gather data to re attach probes with new programs
+	if updateIngressProbe || updateEgressProbe {
+		// Get all loaded programs and maps
+		bpfState, err := eBPFSDKClient.GetAllBpfProgramsAndMaps()
+		if err != nil {
+			log.Info("GetAllBpfProgramsAndMaps failed: ", "error: ", err)
+			sdkAPIErr.WithLabelValues("GetAllBpfProgramsAndMaps").Inc()
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
+		}
+		log.Info("GetAllBpfProgramsAndMaps ", "returned", len(bpfState))
+		progIdToPinPath := make(map[int]string)
+		for pinPath, bpfData := range bpfState {
+			progId := bpfData.Program.ProgID
+			if progId > 0 {
+				progIdToPinPath[progId] = pinPath
+			}
+		}
+
+		// Get attached progIds
+		interfaceToIngressProgIds, interfaceToEgressProgIds, err := bpfTCClient.GetAllAttachedProgIds()
+		log.Info("Got attached ", "ingressprogIds ", len(interfaceToIngressProgIds), " egressprogIds ", len(interfaceToEgressProgIds))
+
+		//cleanup all existing filters
+		cleanupErr := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
+		if cleanupErr != nil {
+			// log the error and continue. Attaching new probes will cleanup the old ones
+			log.Info("Probe cleanup failed ", "error: ", cleanupErr)
+			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
+		}
+
+		for interfaceName, existingIngressProgId := range interfaceToIngressProgIds {
+			pinPath, ok := progIdToPinPath[existingIngressProgId]
+			if ok && updateIngressProbe {
+				interfaceNametoIngressPinPath[interfaceName] = pinPath
+			}
+		}
+		for interfaceName, existingEgressProgId := range interfaceToEgressProgIds {
+			pinPath, ok := progIdToPinPath[existingEgressProgId]
+			if ok && updateEgressProbe {
+				interfaceNametoEgressPinPath[interfaceName] = pinPath
+			}
+		}
+		log.Info("Collected all data for reattaching probes")
+	}
+
+	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
+}
+
+func (l *bpfClient) ReAttachEbpfProbes() error {
+	var networkPolicyMode string
+	var err error
+
+	// If we have any links for which we need to reattach the probes, fetch NP mode from ipamd
+	if len(l.interfaceNametoIngressPinPath) > 0 || len(l.interfaceNametoEgressPinPath) > 0 {
+		// get network policy mode from ipamd
+		networkPolicyMode, err = l.GetNetworkPolicyModeFromIpamd()
+		if err != nil {
+			l.logger.Info("Error while fetching networkPolicyMode from ipamd ", err)
+			return err
+		}
+	}
+
+	state := DEFAULT_ALLOW
+	if utils.IsStrictMode(networkPolicyMode) {
+		state = DEFAULT_DENY
+	}
+
+	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
+		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		l.logger.Info("ReattachEbpfProbes ", "attaching ingress for ", podIdentifier, "interface ", interfaceName)
+		_, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
+		if err != nil {
+			l.logger.Info("Failed to Attach Ingress TC probe for", "interface: ", interfaceName, " podidentifier", podIdentifier)
+			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
+		}
+		l.logger.Info("Updating ingress_pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", networkPolicyMode)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, state, true, false)
+		if err != nil {
+			l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
+		}
+	}
+
+	for interfaceName, pinPath := range l.interfaceNametoEgressPinPath {
+		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		l.logger.Info("ReattachEbpfProbes ", "attaching egress for ", podIdentifier, "interface ", interfaceName)
+		_, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
+		if err != nil {
+			l.logger.Info("Failed to Attach Egress TC probe for", "interface: ", interfaceName, " podidentifier", podIdentifier)
+			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+		}
+
+		l.logger.Info("Updating egress_pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", networkPolicyMode)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, state, false, true)
+		if err != nil {
+			l.logger.Info("Map update(s) failed for, ", "podIdentifier ", podIdentifier, "error: ", err)
+		}
+	}
+	return nil
+}
+
+func (l *bpfClient) GetNetworkPolicyModeFromIpamd() (string, error) {
+
+	ctx := context.Background()
+	grpcLogger := ctrl.Log.WithName("grpcLogger")
+
+	// grpc connection waits till the ipmad is up and running
+	grpcLogger.Info("Trying to establish GRPC connection to ipamd")
+	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
+	if err != nil {
+		grpcLogger.Error(err, "Failed to connect to ipamd")
+		return "", err
+	}
+	defer grpcConn.Close()
+
+	ipamd := rpc.NewConfigServerBackendClient(grpcConn)
+	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
+	if err != nil {
+		grpcLogger.Error(err, "Failed to get network policy configs")
+		return "", err
+	}
+	grpcLogger.Info("Connected to ipamd grpc endpoint and got response for ", "NetworkPolicyMode", resp.NetworkPolicyMode)
+	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
+		err = errors.New("Invalid Network Policy Mode")
+		grpcLogger.Error(err, "Invalid Network Policy Mode ", resp.NetworkPolicyMode)
+		return "", err
+	}
+	return resp.NetworkPolicyMode, nil
 }
 
 func (l *bpfClient) GetIngressPodToProgMap() *sync.Map {
@@ -441,8 +583,12 @@ func (l *bpfClient) GetEgressProgToPodsMap() *sync.Map {
 	return l.EgressProgToPodsMap
 }
 
+func (l *bpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
+	return l.DeletePodIdentifierLock
+}
+
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string) error {
-	// In strict mode two go routines can try to attach the probes at the same time
+	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.AttachProbesToPodLock.LoadOrStore(podIdentifier, &sync.Mutex{})
 	attachProbesLock := value.(*sync.Mutex)
@@ -458,7 +604,8 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
 	// name from the Name and Namespace of the Pod.
 	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
+	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+
 	l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
@@ -490,61 +637,6 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		l.EgressPodToProgMap.Store(podNamespacedName, progFD)
 		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(progFD, make(map[string]struct{}))
 		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
-	}
-
-	return nil
-}
-
-func (l *bpfClient) DetacheBPFProbes(pod types.NamespacedName, ingress bool, egress bool, deletePinPath bool) error {
-	start := time.Now()
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace)
-	l.logger.Info("DetacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " cleanup pinPath", deletePinPath)
-	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace, l.logger)
-	if ingress {
-		err := l.detachIngressBPFProbe(hostVethName)
-		duration := msSince(start)
-		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-		if err != nil {
-			l.logger.Info("Failed to Detach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-			sdkAPIErr.WithLabelValues("detachIngressBPFProbe").Inc()
-		}
-		l.logger.Info("Successfully detached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-
-		if deletePinPath {
-			err = l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
-			duration = msSince(start)
-			sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
-			}
-		}
-		l.DeletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
-	}
-
-	if egress {
-		err := l.detachEgressBPFProbe(hostVethName)
-		duration := msSince(start)
-		sdkAPILatency.WithLabelValues("detachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-		if err != nil {
-			l.logger.Info("Failed to Detach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
-		}
-		l.logger.Info("Successfully detached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-
-		if deletePinPath {
-			err = l.deleteBPFProgramAndMaps(podIdentifier, "egress")
-			duration = msSince(start)
-			sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
-				sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
-			}
-			l.policyEndpointeBPFContext.Delete(podIdentifier)
-			if _, ok := l.AttachProbesToPodLock.Load(podIdentifier); ok {
-				l.AttachProbesToPodLock.Delete(podIdentifier)
-			}
-		}
-		l.DeletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
 	}
 	return nil
 }
@@ -618,26 +710,28 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
-func (l *bpfClient) detachIngressBPFProbe(hostVethName string) error {
-	l.logger.Info("Attempting to do an Ingress Detach")
-	var err error
-	err = l.bpfTCClient.TCEgressDetach(hostVethName)
-	if err != nil &&
-		!utils.IsMissingFilterError(err.Error()) {
-		l.logger.Info("Ingress Detach failed:", "error", err)
-		return err
+func (l *bpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
+	start := time.Now()
+	err := l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
+	duration := msSince(start)
+	sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
+	if err != nil {
+		l.logger.Info("Error while deleting Ingress BPF Probe for ", "podIdentifier: ", podIdentifier)
+		sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
 	}
-	return nil
-}
 
-func (l *bpfClient) detachEgressBPFProbe(hostVethName string) error {
-	l.logger.Info("Attempting to do an Egress Detach")
-	var err error
-	err = l.bpfTCClient.TCIngressDetach(hostVethName)
-	if err != nil &&
-		!utils.IsMissingFilterError(err.Error()) {
-		l.logger.Info("Ingress Detach failed:", "error", err)
-		return err
+	start = time.Now()
+	err = l.deleteBPFProgramAndMaps(podIdentifier, "egress")
+	duration = msSince(start)
+	sdkAPILatency.WithLabelValues("deleteBPFProgramAndMaps", fmt.Sprint(err != nil)).Observe(duration)
+	if err != nil {
+		l.logger.Info("Error while deleting Egress BPF Probe for ", "podIdentifier: ", podIdentifier)
+		sdkAPIErr.WithLabelValues("deleteBPFProgramAndMaps").Inc()
+	}
+
+	l.policyEndpointeBPFContext.Delete(podIdentifier)
+	if _, ok := l.AttachProbesToPodLock.Load(podIdentifier); ok {
+		l.AttachProbesToPodLock.Delete(podIdentifier)
 	}
 	return nil
 }
@@ -652,27 +746,33 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 
 	pgmPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
 	mapPinpath := utils.GetBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
+	podStateMapPinPath := utils.GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
 
-	l.logger.Info("Deleting: ", "Program: ", pgmPinPath, "Map: ", mapPinpath)
+	l.logger.Info("Deleting: ", "Program: ", pgmPinPath, "Map: ", mapPinpath, "Map: ", podStateMapPinPath)
 
 	pgmInfo := peBPFContext.ingressPgmInfo
 	mapToDelete := pgmInfo.Maps[TC_INGRESS_MAP]
+	podStateMapToDelete := pgmInfo.Maps[TC_INGRESS_POD_STATE_MAP]
 	if direction == "egress" {
-		l.logger.Info("Egress delete flow for ", "Program: ", pgmPinPath, "Map: ", mapPinpath)
 		pgmInfo = peBPFContext.egressPgmInfo
 		mapToDelete = pgmInfo.Maps[TC_EGRESS_MAP]
+		podStateMapToDelete = pgmInfo.Maps[TC_EGRESS_POD_STATE_MAP]
 	}
 
 	l.logger.Info("Get storedFD ", "progFD: ", pgmInfo.Program.ProgFD)
 	if pgmInfo.Program.ProgFD != 0 {
-		l.logger.Info("Found the Program and Map to delete - ", "Program: ", pgmPinPath, "Map: ", mapPinpath)
+		l.logger.Info("Found the Program and Map to delete - ", "Program: ", pgmPinPath, "Map: ", mapPinpath, "Map: ", podStateMapPinPath)
 		err = pgmInfo.Program.UnPinProg(pgmPinPath)
 		if err != nil {
 			l.logger.Info("Failed to delete the Program: ", err)
 		}
-		mapToDelete.UnPinMap(mapPinpath)
+		err = mapToDelete.UnPinMap(mapPinpath)
 		if err != nil {
 			l.logger.Info("Failed to delete the Map: ", err)
+		}
+		err = podStateMapToDelete.UnPinMap(podStateMapPinPath)
+		if err != nil {
+			l.logger.Info("Failed to delete PodState Map: ", err)
 		}
 	}
 	return nil
@@ -683,7 +783,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 
 	start := time.Now()
 	l.logger.Info("Load the eBPF program")
-	// Load a new instance of the ingres program
+	// Load a new instance of the program
 	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
@@ -746,6 +846,55 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 				sdkAPIErr.WithLabelValues("updateEbpfMap-egress").Inc()
 			}
 		}
+		err := l.UpdatePodStateEbpfMaps(podIdentifier, POLICIES_APPLIED, true, true)
+		if err != nil {
+			l.logger.Info("Pod State Map update failed: ", "error: ", err)
+		}
+	}
+	return nil
+}
+
+func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error {
+
+	var ingressProgFD, egressProgFD int
+	var mapToUpdate goebpfmaps.BpfMap
+	start := time.Now()
+	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+
+	if ok {
+		peBPFContext := value.(BPFContext)
+		ingressProgInfo := peBPFContext.ingressPgmInfo
+		egressProgInfo := peBPFContext.egressPgmInfo
+		key := uint32(POD_STATE_MAP_KEY)        // pod_state_map key
+		value := pod_state{state: uint8(state)} // pod_state_map value
+
+		if updateIngress && ingressProgInfo.Program.ProgFD != 0 {
+			ingressProgFD = ingressProgInfo.Program.ProgFD
+			mapToUpdate = ingressProgInfo.Maps[TC_INGRESS_POD_STATE_MAP]
+			l.logger.Info("Pod has an Ingress hook attached. Update the corresponding map", "progFD: ", ingressProgFD,
+				"mapName: ", TC_INGRESS_POD_STATE_MAP)
+			err := mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&value)), 0)
+			duration := msSince(start)
+			sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(err != nil)).Observe(duration)
+			if err != nil {
+				l.logger.Info("Ingress Pod State Map update failed: ", "error: ", err)
+				sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
+			}
+		}
+		if updateEgress && egressProgInfo.Program.ProgFD != 0 {
+			egressProgFD = egressProgInfo.Program.ProgFD
+			mapToUpdate = egressProgInfo.Maps[TC_EGRESS_POD_STATE_MAP]
+
+			l.logger.Info("Pod has an Egress hook attached. Update the corresponding map", "progFD: ", egressProgFD,
+				"mapName: ", TC_EGRESS_POD_STATE_MAP)
+			err := mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&value)), 0)
+			duration := msSince(start)
+			sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(err != nil)).Observe(duration)
+			if err != nil {
+				l.logger.Info("Egress Map update failed: ", "error: ", err)
+				sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
+			}
+		}
 	}
 	return nil
 }
@@ -763,13 +912,13 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 	return ingress, egress
 }
 
-func (l *bpfClient) IsMapUpdateRequired(podIdentifier string) bool {
-	mapUpdateRequired := false
+func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
+	firstPodInPodIdentifier := false
 	if _, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
 		l.logger.Info("No map instance found")
-		mapUpdateRequired = true
+		firstPodInPodIdentifier = true
 	}
-	return mapUpdateRequired
+	return firstPodInPodIdentifier
 }
 
 func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []EbpfFirewallRules) error {
