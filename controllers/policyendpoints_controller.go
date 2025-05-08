@@ -579,8 +579,12 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		}
 	}
 
-	//Update active podIdentifiers selected by the current Network Policy
-	r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
+	// Update active podIdentifiers selected by the current Network Policy
+	if len(targetPodIdentifiers) == 0 {
+		r.networkPolicyToPodIdentifierMap.Delete(utils.GetParentNPNameFromPEName(resourceName))
+	} else {
+		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
+	}
 
 	if len(currentPods) > 0 {
 		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods, podIdentifiers)
@@ -698,7 +702,11 @@ func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx
 			}
 			currentPEList = append(currentPEList, policyEndpointName)
 		}
-		r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentPEList)
+		if len(currentPEList) == 0 {
+			r.podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
+		} else {
+			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentPEList)
+		}
 	}
 }
 
