@@ -604,7 +604,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
 	// name from the Name and Namespace of the Pod.
 	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+	hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+	if err != nil {
+		l.logger.Info("Failed to attach ebpf probes for pod ", pod.Name, "Pod might have been deleted")
+		return nil
+	}
 
 	l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
@@ -914,9 +918,19 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 
 func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	firstPodInPodIdentifier := false
-	if _, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
+	if value, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
 		l.logger.Info("No map instance found")
 		firstPodInPodIdentifier = true
+	} else {
+		peBPFContext := value.(BPFContext)
+		ingressProgInfo := peBPFContext.ingressPgmInfo
+		egressProgInfo := peBPFContext.egressPgmInfo
+		// If we don't find ingress or egress program info we should load missing bpf prog
+		// and also update maps for the new bpf program added
+		if ingressProgInfo.Program.ProgFD == 0 || egressProgInfo.Program.ProgFD == 0 {
+			l.logger.Info("No ingress or egress program found")
+			firstPodInPodIdentifier = true
+		}
 	}
 	return firstPodInPodIdentifier
 }
