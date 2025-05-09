@@ -56,7 +56,7 @@ func init() {
 }
 
 func main() {
-	initLogger, _ := getLoggerWithLogLevel("info", "")
+	initLogger, _ := getLoggerWithLogLevel("info", "", 0, 0, 0, false)
 
 	ctrlConfig, err := loadControllerConfig()
 	if err != nil {
@@ -64,7 +64,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrlLogger, err := getLoggerWithLogLevel(ctrlConfig.LogLevel, ctrlConfig.LogFile)
+	ctrlLogger, err := getLoggerWithLogLevel(ctrlConfig.LogLevel, ctrlConfig.LogFile,
+		ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups, ctrlConfig.LogFileMaxAge, ctrlConfig.LogFileCompress)
 	if err != nil {
 		initLogger.Error(err, "unable to setup logger")
 		os.Exit(1)
@@ -153,7 +154,7 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 }
 
 // getLoggerWithLogLevel returns logger with specific log level.
-func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
-	ctrlLogger := logger.New(logLevel, logFilePath)
+func getLoggerWithLogLevel(logLevel string, logFilePath string, logFileMaxSize int, logFileMaxBackups int, logFileMaxAge int, logFileCompress bool) (logr.Logger, error) {
+	ctrlLogger := logger.New(logLevel, logFilePath, logFileMaxSize, logFileMaxBackups, logFileMaxAge, logFileCompress)
 	return zapr.NewLogger(ctrlLogger), nil
 }
