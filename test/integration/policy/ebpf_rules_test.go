@@ -2,15 +2,15 @@ package policy
 
 import (
 	"fmt"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	network "k8s.io/api/networking/v1"
 	v1 "k8s.io/api/core/v1"
+	network "k8s.io/api/networking/v1"
 )
 
 var _ = Describe("Ebpf prog protocol and port evaluation test", func() {

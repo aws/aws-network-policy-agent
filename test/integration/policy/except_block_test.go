@@ -12,8 +12,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	network "k8s.io/api/networking/v1"
 	v1 "k8s.io/api/core/v1"
+	network "k8s.io/api/networking/v1"
 )
 
 func printNetworkPolicyYAML(np *network.NetworkPolicy) {
@@ -38,16 +38,16 @@ func getPrefix(ipStr string, maskLen int) (string, error) {
 
 var _ = Describe("IPBlock Except Test Cases", func() {
 	var (
-		serverPod  *v1.Pod
-		clientPod  *v1.Pod
-		serverIP   string
-		serverName = "ipblock-server"
-		clientName = "ipblock-client"
+		serverPod       *v1.Pod
+		clientPod       *v1.Pod
+		serverIP        string
+		serverName      = "ipblock-server"
+		clientName      = "ipblock-client"
 		serverNamespace = "server"
 		clientNamespace = "client"
-		policy     *network.NetworkPolicy
-		allowPort  int = 3306
-		blockPort  int = 3307
+		policy          *network.NetworkPolicy
+		allowPort       int = 3306
+		blockPort       int = 3307
 	)
 
 	BeforeEach(func() {
@@ -142,10 +142,10 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 
 		It("should allow on /16 and 3006 port, deny on rest /16 ports, allow all on rest of endpoints", func() {
 			time.Sleep(30 * time.Second)
-		
+
 			// fetch the logs
 			logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
-			Expect(err).ToNot(HaveOccurred())		
+			Expect(err).ToNot(HaveOccurred())
 			Expect(processIPBlockLogs(logs, allowPort, blockPort)).To(Succeed())
 		})
 	})
