@@ -1003,6 +1003,27 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	return result
 }
 
+// computeMapEntriesFromEndpointRules generates a map of IP prefix keys to encoded L4 rules that will
+// be used to update ebpf maps
+//
+// How it works:
+//   1. A default allow-all entry is added for the node IP to ensure local node traffic is always permitted.
+//   2. The list of firewall rules is sorted by prefix length in descending order. This is crucial for
+//      handling overlapping CIDRs because longest-prefix matches win in LPM TRIE.
+//   3. Each rule is normalized:
+//        - Ensures all entries contain a /mask (using hostMask if omitted).
+//        - Filters out IPv4 rules in IPv6 clusters and vice versa.
+//        - For rules without any L4 port info, a catch-all rule is inserted to match all traffic.
+//   4. For any rule whose CIDR is more specific (e.g., /24) and falls within a broader one (e.g., /16),
+//      we check existing rules in the map to see if it matches a prior CIDR. If it does and is not part of
+//      that CIDR's "except" list, we inherit the broader rule's ports into the current one.
+//      This ensures that the specific CIDR behaves consistently with the broader scope's intent.
+//   5. We then handle all `except` CIDRs at the end.
+//        - If not already in the map, each `except` CIDR is added explicitly with a deny-all L4 entry.
+//        - This ensures specific excluded IP ranges override broader allow rules correctly in the LPM match tree.
+//   6. Finally, all CIDRs are encoded into trie keys and their corresponding merged/derived L4 info is encoded
+//      into the values, forming the output map.
+
 func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 
 	firewallMap := make(map[string][]byte)

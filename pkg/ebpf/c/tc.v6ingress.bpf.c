@@ -113,9 +113,22 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 			return BPF_DROP;
 		}
 
-		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->nexthdr &&
-					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
-						(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
+		// 1. ANY_IP_PROTOCOL:
+		//    - If the rule specifies ANY_IP_PROTOCOL (i.e., applies to all L4 protocols),
+		//    - Then match if:
+		//        - start_port is ANY_PORT → rule applies to all ports
+		//        - OR l4_dst_port is exactly the start_port
+		//        - OR l4_dst_port falls within the inclusive [start_port, end_port] range
+		//
+		// 2. Specific Protocol Match:
+		//    - If trie_val->protocol matches the packet's IP protocol (e.g., TCP or UDP),
+		//    - Then apply the same port match logic as above.
+		if ((trie_val->protocol == ANY_IP_PROTOCOL &&
+			((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+			(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port))) || 
+			(trie_val->protocol == ip->nexthdr &&
+			((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+			(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
 			struct conntrack_value new_flow_val = {};
 			if (pst->state == DEFAULT_ALLOW) {
