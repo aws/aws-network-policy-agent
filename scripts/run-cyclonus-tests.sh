@@ -59,7 +59,7 @@ K8S_VERSION: $K8S_VERSION
 "
 
 echo "Nodes AMI version for cluster: $CLUSTER_NAME"
-kubectl get nodes -owide
+kubectl get nodes -o wide
 
 PROVIDER_ID=$(kubectl get nodes -ojson | jq -r '.items[0].spec.providerID')
 AMI_ID=$(aws ec2 describe-instances --instance-ids ${PROVIDER_ID##*/} --region $REGION | jq -r '.Reservations[].Instances[].ImageId')

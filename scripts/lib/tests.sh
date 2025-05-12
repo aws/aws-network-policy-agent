@@ -48,7 +48,7 @@ function run_cyclonus_tests(){
     while true; do
       STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
       if [ "$STATUS" == "True" ]; then
-        echo "Job $JOB_NAME has failed. Exiting."
+        echo "cyclonus job has failed. Exiting."
         break
       fi
 
@@ -63,7 +63,7 @@ function run_cyclonus_tests(){
     done
 
     kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
-    kubectl get pods -A -owide
+    kubectl get pods -A -o wide
 
     # Cleanup after test finishes
     kubectl delete clusterrolebinding cyclonus
