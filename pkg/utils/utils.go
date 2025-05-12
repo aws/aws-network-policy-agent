@@ -158,9 +158,14 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) string {
+func GetHostVethName(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string, logger logr.Logger) string {
 	var interfaceName string
 	var errors error
+
+	if interfaceIndex > 0 {
+		podName = fmt.Sprintf("%s.%s", podName, strconv.Itoa(interfaceIndex))
+	}
+
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
 

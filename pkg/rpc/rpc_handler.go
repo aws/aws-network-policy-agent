@@ -59,14 +59,14 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		return &success, nil
 	}
 
-	s.log.Info("Received Enforce Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE, "Mode", in.NETWORK_POLICY_MODE)
+	s.log.Info("Received Enforce Network Policy Request for Pod", "Name", in.K8S_POD_NAME, "Namespace", in.K8S_POD_NAMESPACE, "Mode", in.NETWORK_POLICY_MODE, "NumInterfaces", in.NUM_INTERFACES)
 	var err error
 
 	s.policyReconciler.SetNetworkPolicyMode(in.NETWORK_POLICY_MODE)
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, s.log)
 	isFirstPodInPodIdentifier := s.policyReconciler.GeteBPFClient().IsFirstPodInPodIdentifier(podIdentifier)
 	err = s.policyReconciler.GeteBPFClient().AttacheBPFProbes(types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE},
-		podIdentifier)
+		podIdentifier, in.NUM_INTERFACES)
 	if err != nil {
 		s.log.Error(err, "Attaching eBPF probe failed for", "pod", in.K8S_POD_NAME, "namespace", in.K8S_POD_NAMESPACE)
 		return nil, err

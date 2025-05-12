@@ -581,7 +581,11 @@ func (l *bpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
 	return l.DeletePodIdentifierLock
 }
 
-func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+	var ingressProgFD int
+	var egressProgFD int
+	var err error
+
 	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.AttachProbesToPodLock.LoadOrStore(podIdentifier, &sync.Mutex{})
@@ -594,44 +598,48 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// If yes, then skip probe attach flow for this pod and update the relevant map entries.
 	isIngressProbeAttached, isEgressProbeAttached := l.IsEBPFProbeAttached(pod.Name, pod.Namespace)
 
-	start := time.Now()
-	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
-	// name from the Name and Namespace of the Pod.
-	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+	for index = 0; index < numInterfaces; index++ {
+		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth
+		// name from the Name and Namespace of the Pod.
+		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
+		hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
 
-	l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName)
-	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+		l.logger.Info("AttacheBPFProbes for", "pod", pod.Name, " in namespace", pod.Namespace, " with hostVethName", hostVethName, " at interface", index)
+		podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
-	if !isIngressProbeAttached {
-		progFD, err := l.attachIngressBPFProbe(hostVethName, podIdentifier)
-		duration := msSince(start)
-		sdkAPILatency.WithLabelValues("attachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-		if err != nil {
-			l.logger.Info("Failed to Attach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
-			return err
+		if !isIngressProbeAttached {
+			start := time.Now()
+			ingressProgFD, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
+			duration := msSince(start)
+			sdkAPILatency.WithLabelValues("attachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
+			if err != nil {
+				l.logger.Info("Failed to Attach Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace, " at interface", index)
+				sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
+				return err
+			}
+			l.logger.Info("Successfully attached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace, " at interface", index)
 		}
-		l.logger.Info("Successfully attached Ingress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-		l.IngressPodToProgMap.Store(podNamespacedName, progFD)
-		currentPodSet, _ := l.IngressProgToPodsMap.LoadOrStore(progFD, make(map[string]struct{}))
-		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
-	}
 
-	if !isEgressProbeAttached {
-		progFD, err := l.attachEgressBPFProbe(hostVethName, podIdentifier)
-		duration := msSince(start)
-		sdkAPILatency.WithLabelValues("attachEgressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
-		if err != nil {
-			l.logger.Info("Failed to Attach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
-			return err
+		if !isEgressProbeAttached {
+			start := time.Now()
+			egressProgFD, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
+			duration := msSince(start)
+			sdkAPILatency.WithLabelValues("attachEgressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
+			if err != nil {
+				l.logger.Info("Failed to Attach Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace, " at interface", index)
+				sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+				return err
+			}
+			l.logger.Info("Successfully attached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace, " at interface", index)
 		}
-		l.logger.Info("Successfully attached Egress TC probe for", "pod: ", pod.Name, " in namespace", pod.Namespace)
-		l.EgressPodToProgMap.Store(podNamespacedName, progFD)
-		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(progFD, make(map[string]struct{}))
-		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	}
+	l.IngressPodToProgMap.Store(podNamespacedName, ingressProgFD)
+	currentPodSet, _ := l.IngressProgToPodsMap.LoadOrStore(ingressProgFD, make(map[string]struct{}))
+	currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
+
+	l.EgressPodToProgMap.Store(podNamespacedName, egressProgFD)
+	currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(egressProgFD, make(map[string]struct{}))
+	currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	return nil
 }
 
