@@ -47,6 +47,6 @@ func setupMetricsServer() *http.Server {
 }
 
 func getMetricsLogger() logr.Logger {
-	ctrlLogger := logger.New("info", "")
+	ctrlLogger := logger.New("info", "", 0, 0, 0, false)
 	return zapr.NewLogger(ctrlLogger)
 }

@@ -25,8 +25,12 @@ import (
 
 // Configuration stores the config for the logger
 type Configuration struct {
-	LogLevel    string
-	LogLocation string
+	LogLevel          string
+	LogLocation       string
+	LogFileMaxSize    int
+	LogFileMaxBackups int
+	LogFileMaxAge     int
+	LogFileCompress   bool
 }
 
 // getZapLevel converts log level string to zapcore.Level
@@ -60,7 +64,8 @@ func (logConfig *Configuration) newZapLogger() *zap.Logger { //Logger {
 
 	logLevel := getZapLevel(logConfig.LogLevel)
 
-	writer := getLogFilePath(logConfig.LogLocation)
+	writer := getLogFilePath(logConfig.LogLocation, logConfig.LogFileMaxSize,
+		logConfig.LogFileMaxBackups, logConfig.LogFileMaxAge, logConfig.LogFileCompress)
 
 	cores = append(cores, zapcore.NewCore(getEncoder(), writer, logLevel))
 
@@ -75,13 +80,13 @@ func (logConfig *Configuration) newZapLogger() *zap.Logger { //Logger {
 }
 
 // getLogFilePath returns the writer
-func getLogFilePath(logFilePath string) zapcore.WriteSyncer {
+func getLogFilePath(logFilePath string, logFileMaxSize int, logFileMaxBackups int, logFileMaxAge int, logFileCompress bool) zapcore.WriteSyncer {
 	var writer zapcore.WriteSyncer
 
 	if logFilePath == "" {
 		writer = zapcore.Lock(os.Stderr)
 	} else if strings.ToLower(logFilePath) != "stdout" {
-		writer = getLogWriter(logFilePath)
+		writer = getLogWriter(logFilePath, logFileMaxSize, logFileMaxBackups, logFileMaxAge, logFileCompress)
 	} else {
 		writer = zapcore.Lock(os.Stdout)
 	}
@@ -90,22 +95,26 @@ func getLogFilePath(logFilePath string) zapcore.WriteSyncer {
 }
 
 // getLogWriter is for lumberjack
-func getLogWriter(logFilePath string) zapcore.WriteSyncer {
+func getLogWriter(logFilePath string, logFileMaxSize int, logFileMaxBackups int, logFileMaxAge int, logFileCompress bool) zapcore.WriteSyncer {
 	lumberJackLogger := &lumberjack.Logger{
 		Filename:   logFilePath,
-		MaxSize:    100,
-		MaxBackups: 5,
-		MaxAge:     30,
-		Compress:   true,
+		MaxSize:    logFileMaxSize,
+		MaxBackups: logFileMaxBackups,
+		MaxAge:     logFileMaxAge,
+		Compress:   logFileCompress,
 	}
 	return zapcore.AddSync(lumberJackLogger)
 }
 
 // New logger initializes logger
-func New(logLevel, logLocation string) *zap.Logger {
+func New(logLevel string, logLocation string, logFileMaxSize int, logFileMaxBackups int, logFileMaxAge int, logFileCompress bool) *zap.Logger {
 	inputLogConfig := &Configuration{
-		LogLevel:    logLevel,
-		LogLocation: logLocation,
+		LogLevel:          logLevel,
+		LogLocation:       logLocation,
+		LogFileMaxSize:    logFileMaxSize,
+		LogFileMaxBackups: logFileMaxBackups,
+		LogFileMaxAge:     logFileMaxAge,
+		LogFileCompress:   logFileCompress,
 	}
 
 	logger := inputLogConfig.newZapLogger()
