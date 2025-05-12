@@ -217,19 +217,13 @@ int handle_egress(struct __sk_buff *skb)
 		flow_key.protocol = ip->nexthdr;
 		flow_key.owner_addr = ip->saddr;
 
-	//Check if it's an existing flow
-	flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
-	if (flow_val != NULL) { 
-		return BPF_OK;	
-	}
-
-	evt.src_ip = ip->saddr;
-	evt.dest_ip = ip->daddr;	
-	evt.src_port = flow_key.src_port;
-	evt.dest_port = flow_key.dest_port;
-	evt.protocol = flow_key.protocol;
-	evt.is_egress = 1;
-	evt.packet_sz = skb->len;
+		evt.src_ip = ip->saddr;
+		evt.dest_ip = ip->daddr;	
+		evt.src_port = flow_key.src_port;
+		evt.dest_port = flow_key.dest_port;
+		evt.protocol = flow_key.protocol;
+		evt.is_egress = 1;
+		evt.packet_sz = skb->len;
 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&egress_pod_state_map, &key);
