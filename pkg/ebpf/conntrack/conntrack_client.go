@@ -332,7 +332,6 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
 				c.logger.Info("Conntrack cleanup", "Delete - ", key)
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
-				c.printByteArray(ceByteSlice)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
 			}
 		}
