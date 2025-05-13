@@ -17,7 +17,7 @@ function load_default_values(){
 
     # If Kubernetes version is not passed then use the latest available version
     if [[ -z $K8S_VERSION ]]; then
-        K8S_VERSION=$(eksctl utils describe-cluster-versions | jq -r '.clusterVersions[0].ClusterVersion')
+        K8S_VERSION=$(eksctl utils describe-cluster-versions --region $REGION | jq -r '.clusterVersions[0].ClusterVersion')
     fi
 
 }
