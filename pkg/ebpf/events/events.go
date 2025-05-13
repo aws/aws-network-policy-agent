@@ -32,6 +32,8 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
+const VerdictDeny uint32 = 0
+
 var (
 	dropCountTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -200,7 +202,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-				if rb.Verdict == uint32(0) {
+				if rb.Verdict == VerdictDeny {
 					if rb.IsEgress == 0 {
 						direction = "ingress"
 					}
@@ -221,7 +223,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-				if rb.Verdict == uint32(0) {
+				if rb.Verdict == VerdictDeny {
 					if rb.IsEgress == 0 {
 						direction = "ingress"
 					}
