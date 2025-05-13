@@ -1008,6 +1008,8 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	ipCIDRs := make(map[string][]v1alpha1.Port)
 	nonHostCIDRs := make(map[string][]v1alpha1.Port)
 	isCatchAllIPEntryPresent, allowAll := false, false
+	excepts := make(map[v1alpha1.NetworkAddress]struct{})
+	preFireWallMap := make(map[v1alpha1.NetworkAddress][]v1alpha1.Port)
 	var catchAllIPPorts []v1alpha1.Port
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
@@ -1015,6 +1017,12 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 	key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
 	value := utils.ComputeTrieValue([]v1alpha1.Port{}, l.logger, true, false)
 	firewallMap[string(key)] = value
+
+	for index, firewallRule := range firewallRules {
+		if !strings.Contains(string(firewallRule.IPCidr), "/") {
+			firewallRules[index].IPCidr += v1alpha1.NetworkAddress(l.hostMask)
+		}
+	}
 
 	//Sort the rules
 	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
@@ -1027,6 +1035,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 		key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
 		value := utils.ComputeTrieValue(catchAllIPPorts, l.logger, allowAll, false)
 		firewallMap[string(key)] = value
+		nonHostCIDRs["0.0.0.0/0"] = catchAllIPPorts
 	}
 
 	for _, firewallRule := range firewallRules {
@@ -1083,35 +1092,52 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 				}
 				ipCIDRs[string(firewallRule.IPCidr)] = firewallRule.L4Info
 			}
-			//Include port and protocol combination paired with catch all entries
-			firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
-
-			l.logger.Info("Updating Map with ", "IP Key:", firewallRule.IPCidr)
-			_, firewallMapKey, _ := net.ParseCIDR(string(firewallRule.IPCidr))
-			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-			firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
-
 			if len(firewallRule.L4Info) != 0 {
 				mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
 				firewallRule.L4Info = mergedL4Info
 
 			}
-			firewallValue := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, allowAll, false)
-			firewallMap[string(firewallKey)] = firewallValue
+			preFireWallMap[firewallRule.IPCidr] = mergeDuplicateL4Info(append(preFireWallMap[firewallRule.IPCidr], firewallRule.L4Info...))
 		}
 		if firewallRule.Except != nil {
 			for _, exceptCIDR := range firewallRule.Except {
-				_, mapKey, _ := net.ParseCIDR(string(exceptCIDR))
-				key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-				l.logger.Info("Parsed Except CIDR", "IP Key: ", mapKey)
-				if len(firewallRule.L4Info) != 0 {
-					mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
-					firewallRule.L4Info = mergedL4Info
-				}
-				value := utils.ComputeTrieValue(firewallRule.L4Info, l.logger, false, true)
-				firewallMap[string(key)] = value
+				excepts[exceptCIDR] = struct{}{}
 			}
 		}
+	}
+
+	for except := range excepts {
+		var allowPorts []v1alpha1.Port
+		var denyAll bool
+
+		_, exceptCIDR, _ := net.ParseCIDR(string(except))
+		for _, fireWallRule := range firewallRules {
+			_, cidr, _ := net.ParseCIDR(string(fireWallRule.IPCidr))
+			if utils.CheckCIDRContains(cidr, exceptCIDR) && utils.CheckSubExceptNotContains(fireWallRule.Except, exceptCIDR) {
+				allowPorts = append(allowPorts, fireWallRule.L4Info...)
+			}
+		}
+
+		if len(allowPorts) == 0 {
+			denyAll = true
+		}
+
+		key := utils.ComputeTrieKey(*exceptCIDR, l.enableIPv6)
+		value := utils.ComputeTrieValue(mergeDuplicateL4Info(allowPorts), l.logger, false, denyAll)
+		firewallMap[string(key)] = value
+	}
+
+	for fireWallCIDR, ports := range preFireWallMap {
+
+		if _, ok := excepts[fireWallCIDR]; ok {
+			continue
+		}
+
+		_, fireWallMapKey, _ := net.ParseCIDR(string(fireWallCIDR))
+		key := utils.ComputeTrieKey(*fireWallMapKey, l.enableIPv6)
+		value := utils.ComputeTrieValue(mergeDuplicateL4Info(ports), l.logger, allowAll, false)
+
+		firewallMap[string(key)] = value
 	}
 
 	return firewallMap, nil
