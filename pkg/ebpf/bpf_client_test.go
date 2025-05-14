@@ -674,6 +674,10 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		}
 		testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 
+		utils.GetHostVethName = func(podName, podNamespace string, prefixes []string, logger logr.Logger) (string, error) {
+			return "mockedveth0", nil
+		}
+
 		t.Run(tt.name, func(t *testing.T) {
 			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier)
 			assert.Equal(t, tt.wantErr, gotError)

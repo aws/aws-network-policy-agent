@@ -166,7 +166,7 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) string {
+var GetHostVethName = func(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) (string, error) {
 	var interfaceName string
 	var errors error
 	h := sha1.New()
@@ -176,14 +176,14 @@ func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, l
 		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
 		if _, err := getHostLinkByName(interfaceName); err == nil {
 			logger.Info("host veth interface found", "interface name", interfaceName)
-			return interfaceName
+			return interfaceName, nil
 		} else {
 			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
 		}
 	}
 
 	logger.Error(errors, "Not found any interface starting with prefixes and the hash", "prefixes searched", interfacePrefixes, "hash", hex.EncodeToString(h.Sum(nil))[:11])
-	return ""
+	return "", errors
 }
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
