@@ -649,11 +649,9 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
 	var policyEndpoints []string
 
-	r.log.Info("Current PE Count for Parent NP:", "Count: ", len(parentPEList))
 	if currentPESet, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		policyEndpoints = currentPESet.([]string)
 		for _, policyEndpointResourceName := range parentPEList {
-			r.log.Info("PE for parent NP", "name", policyEndpointResourceName)
 			addPEResource := true
 			for _, pe := range currentPESet.([]string) {
 				if pe == policyEndpointResourceName {
@@ -680,7 +678,6 @@ func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Contex
 	var stalePodIdentifiers []string
 	if currentPodIdentifiers, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(resourceName)); ok {
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
-			r.log.Info("podIdentifier", "name", podIdentifier)
 			stalePodIdentifier := true
 			for _, pe := range targetPodIdentifiers {
 				if pe == podIdentifier {

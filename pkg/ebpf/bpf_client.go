@@ -1052,9 +1052,7 @@ func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirew
 
 		if !utils.IsCatchAllIPEntry(string(firewallRule.IPCidr)) {
 			if len(firewallRule.L4Info) == 0 {
-				l.logger.Info("No L4 specified. Add Catch all entry: ", "CIDR: ", firewallRule.IPCidr)
 				l.addCatchAllL4Entry(&firewallRule)
-				l.logger.Info("Total L4 entries ", "count: ", len(firewallRule.L4Info))
 			}
 			if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
 				existingL4Info, ok := nonHostCIDRs[string(firewallRule.IPCidr)]
@@ -1137,7 +1135,6 @@ func (l *bpfClient) checkAndDeriveCatchAllIPPorts(firewallRules []EbpfFirewallRu
 				allowAllPortAndProtocols = true
 			}
 		}
-		l.logger.Info("Current L4 entry count for catch all entry: ", "count: ", len(catchAllL4Info))
 	}
 	l.logger.Info("Total L4 entry count for catch all entry: ", "count: ", len(catchAllL4Info))
 	return catchAllL4Info, isCatchAllIPEntryPresent, allowAllPortAndProtocols
@@ -1150,9 +1147,7 @@ func (l *bpfClient) checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string
 	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
 	for nonHostCIDR, l4Info := range nonHostCIDRs {
 		_, cidrEntry, _ := net.ParseCIDR(nonHostCIDR)
-		l.logger.Info("CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
 		if cidrEntry.Contains(ipToCheck.IP) {
-			l.logger.Info("Found a CIDR match: ", "for IP: ", firewallRule, "in CIDR: ", nonHostCIDR)
 			matchingCIDRL4Info = append(matchingCIDRL4Info, l4Info...)
 		}
 	}

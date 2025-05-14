@@ -175,7 +175,6 @@ func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, l
 	for _, prefix := range interfacePrefixes {
 		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
 		if _, err := getHostLinkByName(interfaceName); err == nil {
-			logger.Info("host veth interface found", "interface name", interfaceName)
 			return interfaceName
 		} else {
 			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
