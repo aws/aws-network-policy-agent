@@ -166,7 +166,7 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) (string, error) {
+var GetHostVethName = func(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) (string, error) {
 	var interfaceName string
 	var errors error
 	h := sha1.New()
