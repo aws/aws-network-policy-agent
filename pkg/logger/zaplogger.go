@@ -113,23 +113,23 @@ func (l *structuredLogger) Debugf(format string, args ...interface{}) {
 	l.zapLogger.Debugf(format, args...)
 }
 
-func (l *structuredLogger) Debug(msg string) { 
-	l.zapLogger.Desugar().Debug(msg) 
+func (l *structuredLogger) Debug(msg string) {
+	l.zapLogger.Desugar().Debug(msg)
 }
 
 func (l *structuredLogger) Infof(format string, args ...interface{}) {
 	l.zapLogger.Infof(format, args...)
 }
 
-func (l *structuredLogger) Info(msg string) { 
-	l.zapLogger.Desugar().Info(msg) 
+func (l *structuredLogger) Info(msg string) {
+	l.zapLogger.Desugar().Info(msg)
 }
 
 func (l *structuredLogger) Warnf(format string, args ...interface{}) {
 	l.zapLogger.Warnf(format, args...)
 }
 
-func (l *structuredLogger) Warn(msg string) { 
+func (l *structuredLogger) Warn(msg string) {
 	l.zapLogger.Desugar().Warn(msg)
 }
 
@@ -137,8 +137,8 @@ func (l *structuredLogger) Errorf(format string, args ...interface{}) {
 	l.zapLogger.Errorf(format, args...)
 }
 
-func (l *structuredLogger) Error(msg string) { 
-	l.zapLogger.Desugar().Error(msg) 
+func (l *structuredLogger) Error(msg string) {
+	l.zapLogger.Desugar().Error(msg)
 }
 
 func (l *structuredLogger) Fatalf(format string, args ...interface{}) {

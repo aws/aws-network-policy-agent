@@ -206,7 +206,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-				
+
 				if rb.IsEgress == 0 {
 					direction = "ingress"
 				}
@@ -233,7 +233,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 				verdict := getVerdict(int(rb.Verdict))
 
 				if rb.IsEgress == 0 {
-						direction = "ingress"
+					direction = "ingress"
 				}
 
 				if rb.Verdict == VerdictDeny {
