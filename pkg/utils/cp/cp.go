@@ -13,7 +13,9 @@ var (
 	EKS_V6_CLI_BINARY = "aws-eks-na-cli-v6"
 )
 
-var log = logger.Get()
+func log() logger.Logger {
+	return logger.Get()
+}
 
 func cp(src, dst string) error {
 	sourceFileStat, err := os.Stat(src)
@@ -64,7 +66,7 @@ func CopyFile(src, dst string) (err error) {
 }
 
 func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
-	log.Info("Let's install BPF Binaries on to the host path.....")
+	log().Info("Let's install BPF Binaries on to the host path.....")
 	for _, plugin := range pluginBins {
 		targetPlugin := plugin
 
@@ -75,12 +77,12 @@ func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
 
 		target := fmt.Sprintf("%s%s", hostCNIBinPath, targetPlugin)
 		source := fmt.Sprintf("%s", plugin)
-		log.Infof("Installing BPF Binary..target %s source %s", target, source)
+		log().Infof("Installing BPF Binary..target %s source %s", target, source)
 
 		if err := CopyFile(source, target); err != nil {
-			log.Errorf("Failed to install target %v error %v", target, err)
+			log().Errorf("Failed to install target %v error %v", target, err)
 		}
-		log.Infof("Successfully installed - binary %s", target)
+		log().Infof("Successfully installed - binary %s", target)
 	}
 	return nil
 }

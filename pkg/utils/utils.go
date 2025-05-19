@@ -42,7 +42,9 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
-var log = logger.Get()
+func log() logger.Logger {
+	return logger.Get()
+}
 
 // NetworkPolicyEnforcingMode is the mode of network policy enforcement
 type NetworkPolicyEnforcingMode string
@@ -112,7 +114,7 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
-		log.Info("Replacing '.' character with '_' for pod pin path.")
+		log().Info("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
@@ -183,7 +185,7 @@ func GetHostVethName(podName, podNamespace string, interfacePrefixes []string) s
 		}
 	}
 
-	log.Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
+	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
 	return ""
 }
 
@@ -224,12 +226,12 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log.Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
 		if startOffset >= TRIE_VALUE_LENGTH {
-			log.Error("No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
+			log().Error("No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
 			return value
 		}
 		endPort = 0
@@ -243,7 +245,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log.Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))

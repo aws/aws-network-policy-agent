@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/prometheus/client_golang/prometheus"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -31,7 +32,33 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
-var log = logger.Get()
+func log() logger.Logger {
+	return logger.Get()
+}
+
+const VerdictDeny uint32 = 0
+
+var (
+	dropCountTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_count_total",
+			Help: "Total number of packets dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+
+	dropBytesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_bytes_total",
+			Help: "Total number of bytes dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(dropBytesTotal, dropCountTotal)
+}
 
 type ringBufferDataV4_t struct {
 	SourceIP   uint32
@@ -40,6 +67,8 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
 type ringBufferDataV6_t struct {
@@ -49,12 +78,14 @@ type ringBufferDataV6_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
 func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
 	// Enable logging and setup ring buffer
 	if mapFD <= 0 {
-		log.Errorf("MapFD is invalid %d", mapFD)
+		log().Errorf("MapFD is invalid %d", mapFD)
 		return fmt.Errorf("Invalid Ringbuffer FD: %d", mapFD)
 	}
 
@@ -63,18 +94,18 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 	eventsClient := goebpfevents.New()
 	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
 	if err != nil {
-		log.Errorf("Failed to Initialize Ring Buffer err: %v", err)
+		log().Errorf("Failed to Initialize Ring Buffer err: %v", err)
 		return err
 	} else {
 		if enableCloudWatchLogs {
-			log.Info("Cloudwatch log support is enabled")
+			log().Info("Cloudwatch log support is enabled")
 			err = setupCW()
 			if err != nil {
-				log.Errorf("unable to initialize Cloudwatch Logs for Policy events %v", err)
+				log().Errorf("unable to initialize Cloudwatch Logs for Policy events %v", err)
 				return err
 			}
 		}
-		log.Debug("Configure Event loop ... ")
+		log().Debug("Configure Event loop ... ")
 		capturePolicyEvents(eventChanList[mapFD], enableCloudWatchLogs, enableIPv6)
 	}
 	return nil
@@ -87,7 +118,7 @@ func setupCW() error {
 
 	cloud, err := aws.NewCloud(awsCloudConfig)
 	if err != nil {
-		log.Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
+		log().Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
 		return err
 	}
 
@@ -99,10 +130,10 @@ func setupCW() error {
 	if clusterName == utils.DEFAULT_CLUSTER_NAME {
 		customlogGroupName = NON_EKS_CW_PATH + clusterName + "/cluster"
 	}
-	log.Infof("Setting loggroup Name %s", customlogGroupName)
+	log().Infof("Setting loggroup Name %s", customlogGroupName)
 	err = ensureLogGroupExists(customlogGroupName)
 	if err != nil {
-		log.Errorf("unable to validate log group presence. Please check IAM permissions %v", err)
+		log().Errorf("unable to validate log group presence. Please check IAM permissions %v", err)
 		return err
 	}
 	logGroupName = customlogGroupName
@@ -125,7 +156,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 		Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
 	})
 	if len(logQueue) > 0 {
-		log.Debug("Sending logs to CW")
+		log().Debug("Sending logs to CW")
 		input := cloudwatchlogs.PutLogEventsInput{
 			LogEvents:    logQueue,
 			LogGroupName: &logGroupName,
@@ -134,7 +165,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 		if sequenceToken == "" {
 			err := createLogStream()
 			if err != nil {
-				log.Errorf("Failed to create log stream %v", err)
+				log().Errorf("Failed to create log stream %v", err)
 				panic(err)
 			}
 		} else {
@@ -145,7 +176,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 
 		resp, err := cwl.PutLogEvents(&input)
 		if err != nil {
-			log.Errorf("Push log events Failed %v", err)
+			log().Errorf("Push log events Failed %v", err)
 		} else if resp != nil && resp.NextSequenceToken != nil {
 			sequenceToken = *resp.NextSequenceToken
 		}
@@ -164,33 +195,56 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 		for record := range ringbufferdata {
 			var logQueue []*cloudwatchlogs.InputLogEvent
 			var message string
+			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Errorf("Failed to read from Ring buf %v", err)
+					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
+				
+				if rb.IsEgress == 0 {
+					direction = "ingress"
+				}
 
-				log.Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
-					utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, verdict)
+				if rb.Verdict == VerdictDeny {
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+				} else {
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+				}
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Errorf("Failed to read from Ring buf %v", err)
+					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
-					utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, verdict)
+				if rb.IsEgress == 0 {
+						direction = "ingress"
+				}
+
+				if rb.Verdict == VerdictDeny {
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+				} else {
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+				}
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}

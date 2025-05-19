@@ -72,6 +72,7 @@ func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
 
 	logger := zap.New(combinedCore,
 		zap.AddCaller(),
+		zap.AddCallerSkip(2),
 	)
 	defer logger.Sync()
 

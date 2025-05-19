@@ -16,17 +16,19 @@ const (
 	metricsPort = 61680
 )
 
-var log = logger.Get()
+func log() logger.Logger {
+	return logger.Get()
+}
 
 func ServeMetrics() {
-	log.Infof("Serving metrics on port %d", metricsPort)
+	log().Infof("Serving metrics on port %d", metricsPort)
 	server := setupMetricsServer()
 	for {
 		once := sync.Once{}
 		_ = retry.WithBackoff(retry.NewSimpleBackoff(time.Second, time.Minute, 0.2, 2), func() error {
 			err := server.ListenAndServe()
 			once.Do(func() {
-				log.Errorf("Error running http API: %v", err)
+				log().Errorf("Error running http API: %v", err)
 			})
 			return err
 		})
