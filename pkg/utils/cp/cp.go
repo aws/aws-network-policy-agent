@@ -5,15 +5,15 @@ import (
 	"io"
 	"os"
 
-	ctrl "sigs.k8s.io/controller-runtime"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 )
-
-var utilLogger = ctrl.Log.WithName("cp-util")
 
 var (
 	EKS_CLI_BINARY    = "aws-eks-na-cli"
 	EKS_V6_CLI_BINARY = "aws-eks-na-cli-v6"
 )
+
+var log = logger.Get()
 
 func cp(src, dst string) error {
 	sourceFileStat, err := os.Stat(src)
@@ -64,7 +64,7 @@ func CopyFile(src, dst string) (err error) {
 }
 
 func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
-	utilLogger.Info("Let's install BPF Binaries on to the host path.....")
+	log.Info("Let's install BPF Binaries on to the host path.....")
 	for _, plugin := range pluginBins {
 		targetPlugin := plugin
 
@@ -75,12 +75,12 @@ func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
 
 		target := fmt.Sprintf("%s%s", hostCNIBinPath, targetPlugin)
 		source := fmt.Sprintf("%s", plugin)
-		utilLogger.Info("Installing BPF Binary..", "target", target, "source", source)
+		log.Infof("Installing BPF Binary..target %s source %s", target, source)
 
 		if err := CopyFile(source, target); err != nil {
-			utilLogger.Info("Failed to install", "target", target, "error", err)
+			log.Errorf("Failed to install target %v error %v", target, err)
 		}
-		utilLogger.Info("Successfully installed - ", "binary", target)
+		log.Infof("Successfully installed - binary %s", target)
 	}
 	return nil
 }

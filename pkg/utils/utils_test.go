@@ -5,12 +5,9 @@ import (
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestComputeTrieKey(t *testing.T) {
@@ -53,7 +50,6 @@ func TestComputeTrieKey(t *testing.T) {
 }
 
 func TestComputeTrieValue(t *testing.T) {
-	test_utilsLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
 	protocolUDP := corev1.ProtocolUDP
 	protocolSCTP := corev1.ProtocolSCTP
@@ -331,7 +327,7 @@ func TestComputeTrieValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ComputeTrieValue(tt.args.Ports, test_utilsLogger, tt.args.allowAll, tt.args.denyAll)
+			got := ComputeTrieValue(tt.args.Ports, tt.args.allowAll, tt.args.denyAll)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -387,7 +383,7 @@ func TestGetPodIdentifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -415,7 +411,7 @@ func TestGetDotPodIdentifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -697,7 +693,7 @@ func TestGetHostVethName(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix, logr.New(&log.NullLogSink{}))
+			got := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix)
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -16,18 +16,14 @@ import (
 	mock_tc "github.com/aws/aws-ebpf-sdk-go/pkg/tc/mocks"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	// "unsafe"
 )
 
 func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
-	test_bpfClientLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
 	//protocolUDP := corev1.ProtocolUDP
 	//protocolSCTP := corev1.ProtocolSCTP
@@ -80,7 +76,6 @@ func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			test_bpfClient := &bpfClient{
 				nodeIP:     "10.1.1.1",
-				logger:     test_bpfClientLogger,
 				enableIPv6: false,
 				hostMask:   "/32",
 			}
@@ -153,7 +148,6 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -258,7 +252,6 @@ func TestBpfClient_CheckAndDeriveCatchAllIPPorts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -321,7 +314,6 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -374,7 +366,6 @@ func TestBpfClient_AddCatchAllL4Entry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -394,7 +385,6 @@ func TestLoadBPFProgram(t *testing.T) {
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	testBpfClient := &bpfClient{
 		nodeIP:       "10.1.1.1",
-		logger:       logr.New(&log.NullLogSink{}),
 		enableIPv6:   false,
 		bpfSDKClient: mockBpfClient,
 	}
@@ -469,7 +459,6 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
@@ -530,7 +519,6 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
@@ -634,7 +622,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		{
 			name:          "Ingress and Egress Attach - Existing probes",
 			testPod:       testPod,
-			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace, logr.New(&log.NullLogSink{})),
+			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
 			wantErr:       nil,
 		},
 		{
@@ -655,7 +643,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 
 		testBpfClient := &bpfClient{
 			nodeIP:                    "10.1.1.1",
-			logger:                    logr.New(&log.NullLogSink{}),
 			enableIPv6:                false,
 			hostMask:                  "/32",
 			policyEndpointeBPFContext: new(sync.Map),
@@ -881,7 +868,6 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
