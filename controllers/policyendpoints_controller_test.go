@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -283,6 +284,82 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
 				*list = policyendpoint.PolicyEndpointList{}
+				return nil
+			},
+		).AnyTimes()
+
+		_, err = policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      policyEndpoint.GetName(),
+				Namespace: policyEndpoint.GetNamespace(),
+			},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.networkPolicyToPodIdentifierMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.podIdentifierToPolicyEndpointMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.policyEndpointSelectorMap))
+	})
+
+	t.Run("Reconcile for CreatePE and Delete Pod having only non-local Pods", func(t *testing.T) {
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, zap.New(zap.UseDevMode(true), zap.WriteTo(os.Stdout)), nodeIp, &ebpf.MockBpfClient{})
+
+		policyEndpoint := getPolicyEndpoint("allow-all-egress", namespace, []policyendpoint.PodEndpoint{p1N2})
+
+		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+			Name:      policyEndpoint.GetName(),
+			Namespace: policyEndpoint.GetNamespace(),
+		}, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				*currentPE = policyEndpoint
+				return nil
+			},
+		).MaxTimes(3)
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				*list = policyendpoint.PolicyEndpointList{
+					Items: []policyendpoint.PolicyEndpoint{policyEndpoint},
+				}
+				return nil
+			},
+		).MaxTimes(1)
+
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      policyEndpoint.GetName(),
+				Namespace: policyEndpoint.GetNamespace(),
+			},
+		})
+
+		assert.Nil(t, err)
+		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "deployment2rs-my-namespace"))
+
+		// we store non-local PodIds also to immediately apply NP if Pod belonging to PodId lands on this node
+		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment2rs-my-namespace")
+		fmt.Println(ok)
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+
+		noPodTargetPolicyEndpoint := getPolicyEndpoint("allow-all-egress", namespace, []policyendpoint.PodEndpoint{})
+
+		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+			Name:      policyEndpoint.GetName(),
+			Namespace: policyEndpoint.GetNamespace(),
+		}, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				*currentPE = noPodTargetPolicyEndpoint
+				return nil
+			},
+		).AnyTimes()
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				*list = policyendpoint.PolicyEndpointList{
+					Items: []policyendpoint.PolicyEndpoint{noPodTargetPolicyEndpoint},
+				}
 				return nil
 			},
 		).AnyTimes()

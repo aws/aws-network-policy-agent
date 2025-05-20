@@ -87,13 +87,13 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger, node
 		ebpfClient: ebpfClient,
 	}
 
-	// go func() {
-	// 	ticker := time.NewTicker(10 * time.Second)
-	// 	for {
-	// 		<-ticker.C
-	// 		r.logInternalMaps()
-	// 	}
-	// }()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for {
+			<-ticker.C
+			r.logInternalMaps()
+		}
+	}()
 
 	prometheusRegister()
 	return r
@@ -168,8 +168,6 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
 	r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
-
-	r.log.Info("cleanUpPolicyEndpoint: ", "Pods to cleanup - ", len(podsToBeCleanedUp), "and Pods to be updated - ", len(targetPods))
 
 	// targetPods are pods which would need map update
 	if len(targetPods) > 0 {
@@ -581,7 +579,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 
 	// Update active podIdentifiers selected by the current Network Policy
 	allPodIdentifiers = append(allPodIdentifiers, targetPodIdentifiers...)
-	if len(targetPodIdentifiers) == 0 {
+	if len(allPodIdentifiers) == 0 {
 		r.networkPolicyToPodIdentifierMap.Delete(utils.GetParentNPNameFromPEName(policyEndpointName))
 	} else {
 		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(policyEndpointName), allPodIdentifiers)
@@ -696,13 +694,11 @@ func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Contex
 			}
 		}
 	}
-	r.log.Info("stalePodIdentifiers", "stalePodIdentifiers", stalePodIdentifiers)
 	return stalePodIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
 	policyEndpoint string) {
-	r.log.Info("cleaning PodId map", "podId", podIdentifier, "policyEndpoint", policyEndpoint)
 	r.podIdentifierToPolicyEndpointMapMutex.Lock()
 	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
 	var currentPEList []string
