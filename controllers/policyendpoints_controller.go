@@ -158,7 +158,7 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Requ
 		if apierrors.IsNotFound(err) {
 			return r.cleanUpPolicyEndpoint(ctx, req)
 		}
-		log().Errorf("Unable to get policy endpoint spec for policyendpoint %v: %v", req.NamespacedName, err)
+		log().Errorf("Unable to get policy endpoint spec for policyendpoint %s: %v", req.NamespacedName, err)
 		return err
 	}
 	if !policyEndpoint.DeletionTimestamp.IsZero() {
@@ -300,7 +300,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace, policyEndpoint.Name, false)
 		if err != nil {
-			log().Errorf("Error Parsing policy Endpoint resource %v: %v", policyEndpoint.Name, err)
+			log().Errorf("Error Parsing policy Endpoint resource %s: %v", policyEndpoint.Name, err)
 			return err
 		}
 
@@ -349,7 +349,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 
 	err = r.updateeBPFMaps(ctx, podIdentifier, ingressRules, egressRules)
 	if err != nil {
-		log().Errorf("Map updates failed for podIdentifier %v: %v", podIdentifier, err)
+		log().Errorf("Map updates failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
 	return nil
@@ -371,7 +371,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
 			policyEndpoint, isDeleteFlow)
 		if err != nil {
-			log().Errorf("Error Parsing policy Endpoint resource %v: %v", policyEndpoint, err)
+			log().Errorf("Error Parsing policy Endpoint resource %s: %v", policyEndpoint, err)
 			return err
 		}
 
@@ -391,7 +391,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 			log().Infof("No active policies. Updating pod_state map for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.networkPolicyMode)
 			err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, state, true, true)
 			if err != nil {
-				log().Errorf("Map update(s) failed for podIdentifier %v: %v", podIdentifier, err)
+				log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 				return err
 			}
 		} else {
@@ -414,7 +414,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 
 			err = r.updateeBPFMaps(ctx, podIdentifier, ingressRules, egressRules)
 			if err != nil {
-				log().Errorf("Map update(s) failed for podIdentifier %v: %v", podIdentifier, err)
+				log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 				return err
 			}
 		}
@@ -507,7 +507,7 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdent
 	// Map Update should only happen once for those that share the same Map
 	err := r.ebpfClient.UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
 	if err != nil {
-		log().Errorf("Map update(s) failed for podIdentifier %v: %v", podIdentifier, err)
+		log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
 	return nil
@@ -730,7 +730,7 @@ func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.
 	if err := r.k8sClient.List(ctx, policyEndpointList, &client.ListOptions{
 		Namespace: resourceNamespace,
 	}); err != nil {
-		log().Errorf("Unable to list PolicyEndpoints err: ", err)
+		log().Errorf("Unable to list PolicyEndpoints err: %v", err)
 		return nil
 	}
 

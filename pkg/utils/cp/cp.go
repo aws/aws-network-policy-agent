@@ -80,7 +80,7 @@ func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
 		log().Infof("Installing BPF Binary..target %s source %s", target, source)
 
 		if err := CopyFile(source, target); err != nil {
-			log().Errorf("Failed to install target %v error %v", target, err)
+			log().Errorf("Failed to install target %s error %v", target, err)
 		}
 		log().Infof("Successfully installed - binary %s", target)
 	}

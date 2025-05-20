@@ -67,7 +67,7 @@ func main() {
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
 	restCFG, err := config.BuildRestConfig(ctrlConfig.RuntimeConfig)
 	if err != nil {
-		log.Errorf("unable to build REST config %s", err)
+		log.Errorf("unable to build REST config %v", err)
 		os.Exit(1)
 	}
 
