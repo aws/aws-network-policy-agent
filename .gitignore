@@ -13,3 +13,4 @@ amazon-network-policy-controller-k8s
 
 # Test build files
 test/build/
+.vscode

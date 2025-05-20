@@ -27,7 +27,6 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -80,33 +79,24 @@ func prometheusRegister() {
 }
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
-func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger,
-	enablePolicyEventLogs, enableCloudWatchLogs bool, enableIPv6 bool, enableNetworkPolicy bool, conntrackTTL int, conntrackTableSize int) (*PolicyEndpointsReconciler, error) {
+func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger, nodeIP string, ebpfClient ebpf.BpfClient) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
-		k8sClient: k8sClient,
-		log:       log,
+		k8sClient:  k8sClient,
+		log:        log,
+		nodeIP:     nodeIP,
+		ebpfClient: ebpfClient,
 	}
 
-	if !enableIPv6 {
-		r.nodeIP, _ = imds.GetMetaData("local-ipv4")
-	} else {
-		r.nodeIP, _ = imds.GetMetaData("ipv6")
-	}
-	r.log.Info("ConntrackTTL", "cleanupPeriod", conntrackTTL)
+	// go func() {
+	// 	ticker := time.NewTicker(10 * time.Second)
+	// 	for {
+	// 		<-ticker.C
+	// 		r.logInternalMaps()
+	// 	}
+	// }()
 
-	var err error
-	r.enableNetworkPolicy = enableNetworkPolicy
-
-	// keep the check here for UT TestIsProgFdShared
-	if enableNetworkPolicy {
-		r.ebpfClient, err = ebpf.NewBpfClient(&r.policyEndpointeBPFContext, r.nodeIP,
-			enablePolicyEventLogs, enableCloudWatchLogs, enableIPv6, conntrackTTL, conntrackTableSize)
-		r.ebpfClient.ReAttachEbpfProbes()
-
-		// Start prometheus
-		prometheusRegister()
-	}
-	return r, err
+	prometheusRegister()
+	return r
 }
 
 // PolicyEndpointsReconciler reconciles a PolicyEndpoints object
@@ -115,8 +105,6 @@ type PolicyEndpointsReconciler struct {
 	scheme    *runtime.Scheme
 	//Primary IP of EC2 instance
 	nodeIP string
-	// Maps PolicyEndpoint resource to it's eBPF context
-	policyEndpointeBPFContext sync.Map
 	// Maps pod Identifier to list of PolicyEndpoint resources
 	podIdentifierToPolicyEndpointMap sync.Map
 	// Mutex for operations on PodIdentifierToPolicyEndpointMap
@@ -127,8 +115,6 @@ type PolicyEndpointsReconciler struct {
 	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
-	// NetworkPolicy enabled/disabled
-	enableNetworkPolicy bool
 	// NetworkPolicy mode standard/strict
 	networkPolicyMode string
 	//Logger
@@ -144,6 +130,7 @@ func (r *PolicyEndpointsReconciler) SetNetworkPolicyMode(mode string) {
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.log.Info("Received a new reconcile request", "req", req)
+	defer r.logInternalMaps()
 	if err := r.reconcile(ctx, req); err != nil {
 		r.log.Error(err, "Reconcile error")
 		return ctrl.Result{}, err
@@ -155,6 +142,7 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Requ
 	policyEndpoint := &policyk8sawsv1.PolicyEndpoint{}
 	if err := r.k8sClient.Get(ctx, req.NamespacedName, policyEndpoint); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.log.Info("didn't found PE")
 			return r.cleanUpPolicyEndpoint(ctx, req)
 		}
 		r.log.Error(err, "Unable to get policy endpoint spec", "policyendpoint", req.NamespacedName)
@@ -284,9 +272,9 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	// Identify pods local to the node. PolicyEndpoint resource will include `HostIP` field and
 	// network policy agent relies on it to filter local pods
 	parentNP := policyEndpoint.Spec.PolicyRef.Name
-	resourceNamespace := policyEndpoint.Namespace
-	resourceName := policyEndpoint.Name
-	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+	policyEndpointNamespace := policyEndpoint.Namespace
+	policyEndpointName := policyEndpoint.Name
+	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, policyEndpointNamespace, policyEndpointName)
 
 	// Check if we need to remove this policy against any existing pods against which this policy
 	// is currently active. podIdentifiers will have the pod identifiers of the targetPods from the derived PEs
@@ -519,18 +507,18 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdent
 }
 
 func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
-	parentNP, resourceNamespace, resourceName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
+	parentNP, policyEndpointNamespace, policyEndpointName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
 	var targetPods, podsToBeCleanedUp, currentPods []types.NamespacedName
 	var targetPodIdentifiers []string
+	var allPodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
 	r.log.Info("Parent NP resource:", "Name: ", parentNP)
-	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
+	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, policyEndpointNamespace)
 	r.log.Info("Total PEs for Parent NP:", "Count: ", len(parentPEList))
 
-	policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(resourceName,
-		resourceNamespace)
+	policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointName, policyEndpointNamespace)
 	// Gather the current set of pods (local to the node) that are configured with this policy rules.
 	existingPods, podsPresent := r.policyEndpointSelectorMap.Load(policyEndpointIdentifier)
 	if podsPresent {
@@ -541,17 +529,11 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		}
 	}
 
-	if len(parentPEList) == 0 {
-		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
-		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
-		r.log.Info("No PEs left: ", "number of pods to cleanup - ", len(podsToBeCleanedUp))
-	}
-
 	for _, policyEndpointResource := range parentPEList {
 		r.log.Info("Derive PE Object ", "Name ", policyEndpointResource)
 		peNamespacedName := types.NamespacedName{
 			Name:      policyEndpointResource,
-			Namespace: resourceNamespace,
+			Namespace: policyEndpointNamespace,
 		}
 		if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -559,21 +541,32 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			}
 		}
 		r.log.Info("Processing PE ", "Name ", policyEndpointResource)
-		currentTargetPods, currentPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
+		currentTargetPods, currentPodIdentifiers, nonLocalPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
 		r.log.Info("Adding to current targetPods", "Total pods: ", len(currentTargetPods))
 		targetPods = append(targetPods, currentTargetPods...)
 		for podIdentifier, _ := range currentPodIdentifiers {
 			podIdentifiers[podIdentifier] = true
 			targetPodIdentifiers = append(targetPodIdentifiers, podIdentifier)
 		}
+		for podIdentifier, _ := range nonLocalPodIdentifiers {
+			allPodIdentifiers = append(allPodIdentifiers, podIdentifier)
+		}
 	}
 
 	//Update active podIdentifiers selected by the current Network Policy
-	stalePodIdentifiers := r.deriveStalePodIdentifiers(ctx, resourceName, targetPodIdentifiers)
+	stalePodIdentifiers := r.deriveStalePodIdentifiers(ctx, policyEndpointName, targetPodIdentifiers)
+
+	if len(parentPEList) == 0 {
+		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
+		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
+		r.log.Info("No PEs left: ", "number of pods to cleanup - ", len(podsToBeCleanedUp))
+		for _, podIdentifier := range stalePodIdentifiers {
+			r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpointName)
+		}
+	}
 
 	for _, policyEndpointResource := range parentPEList {
-		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource,
-			resourceNamespace)
+		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource, policyEndpointNamespace)
 		if len(targetPods) > 0 {
 			r.log.Info("Update target pods for PE Object ", "Name ", policyEndpointResource, " with Total pods: ", len(targetPods))
 			r.policyEndpointSelectorMap.Store(policyEndpointIdentifier, targetPods)
@@ -587,10 +580,11 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	}
 
 	// Update active podIdentifiers selected by the current Network Policy
+	allPodIdentifiers = append(allPodIdentifiers, targetPodIdentifiers...)
 	if len(targetPodIdentifiers) == 0 {
-		r.networkPolicyToPodIdentifierMap.Delete(utils.GetParentNPNameFromPEName(resourceName))
+		r.networkPolicyToPodIdentifierMap.Delete(utils.GetParentNPNameFromPEName(policyEndpointName))
 	} else {
-		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
+		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(policyEndpointName), allPodIdentifiers)
 	}
 
 	if len(currentPods) > 0 {
@@ -603,9 +597,10 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 // Function returns list of target pods along with their unique identifiers. It also
 // captures list of (any) existing pods against which this policy is no longer active.
 func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool) {
+	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool, map[string]bool) {
 	var targetPods []types.NamespacedName
-	podIdentifiers := make(map[string]bool)
+	localPodIdentifiers := make(map[string]bool)
+	nonLocalPodIdentifiers := make(map[string]bool)
 
 	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
 	// by the Host IP value.
@@ -615,12 +610,14 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			r.log.Info("Found a matching Pod: ", "name: ", pod.Name, "namespace: ", pod.Namespace)
 			targetPods = append(targetPods, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace})
-			podIdentifiers[podIdentifier] = true
+			localPodIdentifiers[podIdentifier] = true
 			r.log.Info("Derived ", "Pod identifier: ", podIdentifier)
+		} else {
+			nonLocalPodIdentifiers[podIdentifier] = true
 		}
 		r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList)
 	}
-	return targetPods, podIdentifiers
+	return targetPods, localPodIdentifiers, nonLocalPodIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []types.NamespacedName,
@@ -681,6 +678,7 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Context, resourceName string,
 	targetPodIdentifiers []string) []string {
 
+	r.log.Info("targetPodIds", "targetPodIds", targetPodIdentifiers)
 	var stalePodIdentifiers []string
 	if currentPodIdentifiers, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(resourceName)); ok {
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
@@ -698,11 +696,13 @@ func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Contex
 			}
 		}
 	}
+	r.log.Info("stalePodIdentifiers", "stalePodIdentifiers", stalePodIdentifiers)
 	return stalePodIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
 	policyEndpoint string) {
+	r.log.Info("cleaning PodId map", "podId", podIdentifier, "policyEndpoint", policyEndpoint)
 	r.podIdentifierToPolicyEndpointMapMutex.Lock()
 	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
 	var currentPEList []string
@@ -801,4 +801,20 @@ func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifi
 		}
 	}
 	return false
+}
+
+func (r *PolicyEndpointsReconciler) logInternalMaps() {
+	r.log.Info("logging map states")
+	r.networkPolicyToPodIdentifierMap.Range(func(key, value any) bool {
+		r.log.Info("NetworkPolicyToPodIdentifierMap", "key: ", key, "value: ", value)
+		return true
+	})
+	r.podIdentifierToPolicyEndpointMap.Range(func(key, value any) bool {
+		r.log.Info("PodIdentifierToPolicyEndpointMap", "key: ", key, "value: ", value)
+		return true
+	})
+	r.policyEndpointSelectorMap.Range(func(key, value any) bool {
+		r.log.Info("PolicyEndpointSelectorMap", "key: ", key, "value: ", value)
+		return true
+	})
 }
