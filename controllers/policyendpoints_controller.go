@@ -87,14 +87,6 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, log logr.Logger, node
 		ebpfClient: ebpfClient,
 	}
 
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		for {
-			<-ticker.C
-			r.logInternalMaps()
-		}
-	}()
-
 	prometheusRegister()
 	return r
 }
@@ -130,7 +122,6 @@ func (r *PolicyEndpointsReconciler) SetNetworkPolicyMode(mode string) {
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.log.Info("Received a new reconcile request", "req", req)
-	defer r.logInternalMaps()
 	if err := r.reconcile(ctx, req); err != nil {
 		r.log.Error(err, "Reconcile error")
 		return ctrl.Result{}, err
@@ -142,7 +133,6 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Requ
 	policyEndpoint := &policyk8sawsv1.PolicyEndpoint{}
 	if err := r.k8sClient.Get(ctx, req.NamespacedName, policyEndpoint); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.log.Info("didn't found PE")
 			return r.cleanUpPolicyEndpoint(ctx, req)
 		}
 		r.log.Error(err, "Unable to get policy endpoint spec", "policyendpoint", req.NamespacedName)
@@ -675,8 +665,6 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 
 func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Context, resourceName string,
 	targetPodIdentifiers []string) []string {
-
-	r.log.Info("targetPodIds", "targetPodIds", targetPodIdentifiers)
 	var stalePodIdentifiers []string
 	if currentPodIdentifiers, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(resourceName)); ok {
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
@@ -797,20 +785,4 @@ func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifi
 		}
 	}
 	return false
-}
-
-func (r *PolicyEndpointsReconciler) logInternalMaps() {
-	r.log.Info("logging map states")
-	r.networkPolicyToPodIdentifierMap.Range(func(key, value any) bool {
-		r.log.Info("NetworkPolicyToPodIdentifierMap", "key: ", key, "value: ", value)
-		return true
-	})
-	r.podIdentifierToPolicyEndpointMap.Range(func(key, value any) bool {
-		r.log.Info("PodIdentifierToPolicyEndpointMap", "key: ", key, "value: ", value)
-		return true
-	})
-	r.policyEndpointSelectorMap.Range(func(key, value any) bool {
-		r.log.Info("PolicyEndpointSelectorMap", "key: ", key, "value: ", value)
-		return true
-	})
 }
