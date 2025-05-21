@@ -914,7 +914,7 @@ func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 		// If we don't find ingress or egress program info we should load missing bpf prog
 		// and also update maps for the new bpf program added
 		if ingressProgInfo.Program.ProgFD == 0 || egressProgInfo.Program.ProgFD == 0 {
-			l.logger.Info("No ingress or egress program found")
+			log().Info("No ingress or egress program found")
 			firstPodInPodIdentifier = true
 		}
 	}
