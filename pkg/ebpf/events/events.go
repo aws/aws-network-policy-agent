@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/prometheus/client_golang/prometheus"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -31,6 +32,30 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
+const VerdictDeny uint32 = 0
+
+var (
+	dropCountTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_count_total",
+			Help: "Total number of packets dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+
+	dropBytesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_bytes_total",
+			Help: "Total number of bytes dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(dropBytesTotal, dropCountTotal)
+}
+
 type ringBufferDataV4_t struct {
 	SourceIP   uint32
 	SourcePort uint32
@@ -38,6 +63,8 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
 type ringBufferDataV6_t struct {
@@ -47,6 +74,8 @@ type ringBufferDataV6_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
 func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
@@ -162,35 +191,48 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 		for record := range ringbufferdata {
 			var logQueue []*cloudwatchlogs.InputLogEvent
 			var message string
+			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Info("Failed to read from Ring buf", err)
+					log.Info("Failed to read from Ring buf", "error", err)
 					continue
 				}
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-
+				if rb.Verdict == VerdictDeny {
+					if rb.IsEgress == 0 {
+						direction = "ingress"
+					}
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+					"Proto", protocol, "Verdict", verdict, "Direction", direction)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Info("Failed to read from Ring buf", err)
+					log.Info("Failed to read from Ring buf", "error", err)
 					continue
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
-
+				if rb.Verdict == VerdictDeny {
+					if rb.IsEgress == 0 {
+						direction = "ingress"
+					}
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+				}
 				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
 					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+					"Proto", protocol, "Verdict", verdict, "Direction", direction)
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}
