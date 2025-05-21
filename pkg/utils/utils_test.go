@@ -650,9 +650,10 @@ func TestGetHostVethName(t *testing.T) {
 	defer func() { getLinkByNameFunc = originalFunc }() // Restore after test
 
 	tests := []struct {
-		name string
-		args args
-		want string
+		name    string
+		args    args
+		want    string
+		wantErr string
 	}{
 		{
 			name: "host interface not found",
@@ -662,7 +663,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"eni", "vlan"},
 				mockNetlink:     false,
 			},
-			want: "",
+			want:    "",
+			wantErr: "failed to find link",
 		},
 		{
 			name: "Pod with host interface starting as eni",
@@ -672,7 +674,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"eni"},
 				mockNetlink:     true,
 			},
-			want: "eni9cfdfc6963c",
+			want:    "eni9cfdfc6963c",
+			wantErr: "",
 		},
 		{
 			name: "Pod with host interface starting as vlan",
@@ -682,7 +685,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"vlan"},
 				mockNetlink:     true,
 			},
-			want: "vlan9cfdfc6963c",
+			want:    "vlan9cfdfc6963c",
+			wantErr: "",
 		},
 	}
 	for _, tt := range tests {
@@ -693,8 +697,13 @@ func TestGetHostVethName(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix)
+			got, err := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix)
 			assert.Equal(t, tt.want, got)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
 		})
 	}
 }

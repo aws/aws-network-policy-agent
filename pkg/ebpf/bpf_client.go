@@ -411,7 +411,6 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
 		bpfState, err := eBPFSDKClient.RecoverAllBpfProgramsAndMaps()
-		var peBPFContext BPFContext
 		if err != nil {
 			//Log it and move on. We will overwrite and recreate the maps/programs
 			log().Errorf("BPF State Recovery failed error: %v", err)
@@ -422,6 +421,7 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 		for pinPath, bpfEntry := range bpfState {
 			podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 			log().Infof("Recovered program Identifier: Pin Path: %s PodIdentifier: %s direction: %s", pinPath, podIdentifier, direction)
+			var peBPFContext BPFContext
 			value, ok := policyEndpointeBPFContext.Load(podIdentifier)
 			if ok {
 				peBPFContext = value.(BPFContext)
@@ -600,7 +600,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	// We attach the TC probes to the hostVeth interface of the pod. Derive the hostVeth
 	// name from the Name and Namespace of the Pod.
 	// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-	hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+	hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+	if err != nil {
+		log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
+		return err
+	}
 
 	log().Infof("AttacheBPFProbes for pod %s in namespace %s with hostVethName %s", pod.Name, pod.Namespace, hostVethName)
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
@@ -900,9 +904,19 @@ func (l *bpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bo
 
 func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	firstPodInPodIdentifier := false
-	if _, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
+	if value, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
 		log().Info("No map instance found")
 		firstPodInPodIdentifier = true
+	} else {
+		peBPFContext := value.(BPFContext)
+		ingressProgInfo := peBPFContext.ingressPgmInfo
+		egressProgInfo := peBPFContext.egressPgmInfo
+		// If we don't find ingress or egress program info we should load missing bpf prog
+		// and also update maps for the new bpf program added
+		if ingressProgInfo.Program.ProgFD == 0 || egressProgInfo.Program.ProgFD == 0 {
+			l.logger.Info("No ingress or egress program found")
+			firstPodInPodIdentifier = true
+		}
 	}
 	return firstPodInPodIdentifier
 }
