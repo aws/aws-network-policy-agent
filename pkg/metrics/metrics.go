@@ -8,8 +8,6 @@ import (
 
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/utils/retry"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
-	"github.com/go-logr/logr"
-	"github.com/go-logr/zapr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -18,16 +16,19 @@ const (
 	metricsPort = 61680
 )
 
+func log() logger.Logger {
+	return logger.Get()
+}
+
 func ServeMetrics() {
-	metricsLogger := getMetricsLogger()
-	metricsLogger.Info("Serving metrics on ", "port", metricsPort)
+	log().Infof("Serving metrics on port %d", metricsPort)
 	server := setupMetricsServer()
 	for {
 		once := sync.Once{}
 		_ = retry.WithBackoff(retry.NewSimpleBackoff(time.Second, time.Minute, 0.2, 2), func() error {
 			err := server.ListenAndServe()
 			once.Do(func() {
-				metricsLogger.Error(err, "Error running http API: %v")
+				log().Errorf("Error running http API: %v", err)
 			})
 			return err
 		})
@@ -44,9 +45,4 @@ func setupMetricsServer() *http.Server {
 		WriteTimeout: 5 * time.Second,
 	}
 	return server
-}
-
-func getMetricsLogger() logr.Logger {
-	ctrlLogger := logger.New("info", "")
-	return zapr.NewLogger(ctrlLogger)
 }
