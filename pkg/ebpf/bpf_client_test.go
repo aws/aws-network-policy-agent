@@ -9,6 +9,7 @@ import (
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
+	"github.com/samber/lo"
 
 	mock_bpfclient "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser/mocks"
 	mock_bpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps/mocks"
@@ -706,16 +707,39 @@ func TestRecoverBPFState(t *testing.T) {
 		POLICY_EVENTS_MAP_PIN_PATH: sampleEventsMap,
 	}
 
+	ProgramAndMap := map[string]goelf.BpfData{
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_ingress": {
+			Program: goebpfprogs.BpfProgram{
+				ProgFD: 1,
+			},
+			Maps: make(map[string]goebpfmaps.BpfMap),
+		},
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_egress": {
+			Program: goebpfprogs.BpfProgram{
+				ProgFD: 2,
+			},
+			Maps: make(map[string]goebpfmaps.BpfMap),
+		},
+	}
+
+	type bpfContextValidation struct {
+		ingressProbeFd int
+		egressProbeFd  int
+	}
+
 	type want struct {
 		isConntrackMapPresent    bool
 		isPolicyEventsMapPresent bool
 		eventsMapFD              int
+		bpfContextCount          int
+		bpfContextValidation     map[string]bpfContextValidation
 	}
 
 	tests := []struct {
 		name                      string
 		policyEndpointeBPFContext *sync.Map
 		currentGlobalMaps         map[string]goebpfmaps.BpfMap
+		currentProgramAndMap      map[string]goelf.BpfData
 		updateIngressProbe        bool
 		updateEgressProbe         bool
 		updateEventsProbe         bool
@@ -723,41 +747,82 @@ func TestRecoverBPFState(t *testing.T) {
 		wantErr                   error
 	}{
 		{
-			name:               "Conntrack and Events map are already present",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  ConntrackandEventMaps,
+			name:                 "Conntrack and Events map are already present",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    ConntrackandEventMaps,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: true,
 				isConntrackMapPresent:    true,
 				eventsMapFD:              3,
+				bpfContextCount:          1,
 			},
 			wantErr: nil,
 		},
 		{
-			name:               "Conntrack Map present while Events map is missing",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  OnlyConntrackMap,
+			name:                 "Conntrack Map present while Events map is missing",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    OnlyConntrackMap,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: false,
 				isConntrackMapPresent:    true,
 				eventsMapFD:              0,
+				bpfContextCount:          1,
 			},
 			wantErr: nil,
 		},
 		{
-			name:               "Conntrack Map missing while Events map is present",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  OnlyEventsMap,
+			name:                 "Conntrack Map missing while Events map is present",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    OnlyEventsMap,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: true,
 				isConntrackMapPresent:    false,
 				eventsMapFD:              3,
+				bpfContextCount:          1,
+			},
+			wantErr: nil,
+		},
+		{
+			name:               "Prevent BpfContext mangling",
+			updateIngressProbe: false,
+			updateEgressProbe:  false,
+			updateEventsProbe:  false,
+			currentGlobalMaps:  ConntrackandEventMaps,
+			currentProgramAndMap: lo.Assign(
+				ProgramAndMap,
+				map[string]goelf.BpfData{
+					"/sys/fs/bpf/globals/aws/programs/hello-udp-1234-default_handle_ingress": {
+						Program: goebpfprogs.BpfProgram{
+							ProgFD: 3,
+						},
+						Maps: make(map[string]goebpfmaps.BpfMap),
+					},
+				},
+			),
+			want: want{
+				isPolicyEventsMapPresent: true,
+				isConntrackMapPresent:    true,
+				eventsMapFD:              3,
+				bpfContextCount:          2,
+				bpfContextValidation: map[string]bpfContextValidation{
+					"hello-udp-748dc8d996-default": {
+						ingressProbeFd: 1,
+						egressProbeFd:  2,
+					},
+					"hello-udp-1234-default": {
+						ingressProbeFd: 3,
+						egressProbeFd:  0,
+					},
+				},
 			},
 			wantErr: nil,
 		},
@@ -775,21 +840,43 @@ func TestRecoverBPFState(t *testing.T) {
 				return tt.currentGlobalMaps, nil
 			},
 		).AnyTimes()
-		mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().AnyTimes()
-
-		policyEndpointeBPFContext := new(sync.Map)
-		globapMaps := new(sync.Map)
+		mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().DoAndReturn(
+			func() (map[string]goelf.BpfData, error) {
+				return tt.currentProgramAndMap, nil
+			},
+		).AnyTimes()
 
 		t.Run(tt.name, func(t *testing.T) {
+			policyEndpointeBPFContext := new(sync.Map)
+			globapMaps := new(sync.Map)
 			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, _, _, gotError := recoverBPFState(mockTCClient, mockBpfClient, policyEndpointeBPFContext, globapMaps,
 				tt.updateIngressProbe, tt.updateEgressProbe, tt.updateEventsProbe)
 			assert.Equal(t, tt.want.isConntrackMapPresent, gotIsConntrackMapPresent)
 			assert.Equal(t, tt.want.isPolicyEventsMapPresent, gotIsPolicyEventsMapPresent)
 			assert.Equal(t, tt.want.eventsMapFD, gotEventsMapFD)
 			assert.Equal(t, tt.wantErr, gotError)
+			assert.Equal(t, tt.want.bpfContextCount, sizeOfSyncMap(policyEndpointeBPFContext))
+
+			if tt.want.bpfContextValidation != nil {
+				for k, v := range tt.want.bpfContextValidation {
+					context, ok := policyEndpointeBPFContext.Load(k)
+					assert.True(t, ok)
+					assert.Equal(t, v.ingressProbeFd, context.(BPFContext).ingressPgmInfo.Program.ProgFD)
+					assert.Equal(t, v.egressProbeFd, context.(BPFContext).egressPgmInfo.Program.ProgFD)
+				}
+			}
 		})
 	}
 
+}
+
+func sizeOfSyncMap(m *sync.Map) int {
+	count := 0
+	m.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 func TestMergeDuplicateL4Info(t *testing.T) {
