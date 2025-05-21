@@ -175,103 +175,6 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	}
 }
 
-func TestBpfClient_CheckAndDeriveCatchAllIPPorts(t *testing.T) {
-	protocolTCP := corev1.ProtocolTCP
-	var port80 int32 = 80
-
-	type want struct {
-		catchAllL4Info           []v1alpha1.Port
-		isCatchAllIPEntryPresent bool
-		allowAllPortAndProtocols bool
-	}
-
-	l4InfoWithCatchAllEntry := []EbpfFirewallRules{
-		{
-			IPCidr: "0.0.0.0/0",
-			L4Info: []v1alpha1.Port{
-				{
-					Protocol: &protocolTCP,
-					Port:     &port80,
-				},
-			},
-		},
-	}
-
-	l4InfoWithNoCatchAllEntry := []EbpfFirewallRules{
-		{
-			IPCidr: "1.1.1.1/32",
-			L4Info: []v1alpha1.Port{
-				{
-					Protocol: &protocolTCP,
-					Port:     &port80,
-				},
-			},
-		},
-	}
-
-	l4InfoWithCatchAllEntryAndAllProtocols := []EbpfFirewallRules{
-		{
-			IPCidr: "0.0.0.0/0",
-		},
-	}
-
-	tests := []struct {
-		name          string
-		firewallRules []EbpfFirewallRules
-		want          want
-	}{
-		{
-			name:          "Catch All Entry present",
-			firewallRules: l4InfoWithCatchAllEntry,
-			want: want{
-				catchAllL4Info: []v1alpha1.Port{
-					{
-						Protocol: &protocolTCP,
-						Port:     &port80,
-					},
-				},
-				isCatchAllIPEntryPresent: true,
-				allowAllPortAndProtocols: false,
-			},
-		},
-
-		{
-			name:          "No Catch All Entry present",
-			firewallRules: l4InfoWithNoCatchAllEntry,
-			want: want{
-				isCatchAllIPEntryPresent: false,
-				allowAllPortAndProtocols: false,
-			},
-		},
-
-		{
-			name:          "Catch All Entry With no Port info",
-			firewallRules: l4InfoWithCatchAllEntryAndAllProtocols,
-			want: want{
-				isCatchAllIPEntryPresent: true,
-				allowAllPortAndProtocols: true,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testBpfClient := &bpfClient{
-				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
-				enableIPv6:          false,
-				hostMask:            "/32",
-				IngressPodToProgMap: new(sync.Map),
-				EgressPodToProgMap:  new(sync.Map),
-			}
-			gotCatchAllL4Info, gotIsCatchAllIPEntryPresent, gotAllowAllPortAndProtocols := testBpfClient.checkAndDeriveCatchAllIPPorts(tt.firewallRules)
-			assert.Equal(t, tt.want.catchAllL4Info, gotCatchAllL4Info)
-			assert.Equal(t, tt.want.isCatchAllIPEntryPresent, gotIsCatchAllIPEntryPresent)
-			assert.Equal(t, tt.want.allowAllPortAndProtocols, gotAllowAllPortAndProtocols)
-		})
-	}
-}
-
 func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
 	var port80 int32 = 80
@@ -280,11 +183,15 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 		matchingCIDRL4Info []v1alpha1.Port
 	}
 
-	sampleNonHostCIDRs := map[string][]v1alpha1.Port{
+	sampleCidrsMap := map[string]EbpfFirewallRules{
 		"1.1.1.0/24": {
-			{
-				Protocol: &protocolTCP,
-				Port:     &port80,
+			IPCidr: "1.1.1.0/24",
+			Except: []v1alpha1.NetworkAddress{},
+			L4Info: []v1alpha1.Port{
+				{
+					Protocol: &protocolTCP,
+					Port:     &port80,
+				},
 			},
 		},
 	}
@@ -292,13 +199,13 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 	tests := []struct {
 		name         string
 		firewallRule string
-		nonHostCIDRs map[string][]v1alpha1.Port
+		cidrsMap     map[string]EbpfFirewallRules
 		want         want
 	}{
 		{
 			name:         "Match Present",
 			firewallRule: "1.1.1.2/32",
-			nonHostCIDRs: sampleNonHostCIDRs,
+			cidrsMap:     sampleCidrsMap,
 			want: want{
 				matchingCIDRL4Info: []v1alpha1.Port{
 					{
@@ -312,7 +219,7 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 		{
 			name:         "No Match",
 			firewallRule: "2.1.1.2/32",
-			nonHostCIDRs: sampleNonHostCIDRs,
+			cidrsMap:     sampleCidrsMap,
 			want:         want{},
 		},
 	}
@@ -327,7 +234,7 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 				IngressPodToProgMap: new(sync.Map),
 				EgressPodToProgMap:  new(sync.Map),
 			}
-			gotMatchingCIDRL4Info := testBpfClient.checkAndDeriveL4InfoFromAnyMatchingCIDRs(tt.firewallRule, tt.nonHostCIDRs)
+			gotMatchingCIDRL4Info := testBpfClient.checkAndDeriveL4InfoFromAnyMatchingCIDRs(tt.firewallRule, tt.cidrsMap)
 			assert.Equal(t, tt.want.matchingCIDRL4Info, gotMatchingCIDRL4Info)
 		})
 	}
