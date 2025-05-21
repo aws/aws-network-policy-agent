@@ -413,7 +413,6 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 	// created by aws-network-policy-agent (Located under /sys/fs/bpf/globals/aws)
 	if !updateIngressProbe || !updateEgressProbe {
 		bpfState, err := eBPFSDKClient.RecoverAllBpfProgramsAndMaps()
-		var peBPFContext BPFContext
 		if err != nil {
 			//Log it and move on. We will overwrite and recreate the maps/programs
 			log.Info("BPF State Recovery failed: ", "error: ", err)
@@ -425,6 +424,7 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 			log.Info("Recovered program Identifier: ", "Pin Path: ", pinPath)
 			podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 			log.Info("PinPath: ", "podIdentifier: ", podIdentifier, "direction: ", direction)
+			var peBPFContext BPFContext
 			value, ok := policyEndpointeBPFContext.Load(podIdentifier)
 			if ok {
 				peBPFContext = value.(BPFContext)
