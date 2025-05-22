@@ -2,19 +2,192 @@ package controllers
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	policyendpoint "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/golang/mock/gomock"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestPolicyEndpointReconcile(t *testing.T) {
+	namespace := "my-namespace"
+	p1N1 := policyendpoint.PodEndpoint{
+		HostIP:    "1.1.1.1",
+		PodIP:     "10.1.1.1",
+		Name:      "deployment1rs-1",
+		Namespace: namespace,
+	}
+	p2N1 := policyendpoint.PodEndpoint{
+		HostIP:    "1.1.1.1",
+		PodIP:     "10.1.1.2",
+		Name:      "deployment1rs-2",
+		Namespace: namespace,
+	}
+
+	nodeIp := "1.1.1.1"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	t.Run("Reconcile call for Create PolicyEndpoint with PodEndpoint local to Node", func(t *testing.T) {
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{})
+
+		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
+
+		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+			Name:      policyEndpoint.GetName(),
+			Namespace: policyEndpoint.GetNamespace(),
+		}, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				*currentPE = policyEndpoint
+				return nil
+			},
+		).AnyTimes()
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				*list = policyendpoint.PolicyEndpointList{
+					Items: []policyendpoint.PolicyEndpoint{policyEndpoint},
+				}
+				return nil
+			},
+		).AnyTimes()
+
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      policyEndpoint.GetName(),
+				Namespace: policyEndpoint.GetNamespace(),
+			},
+		})
+
+		assert.Nil(t, err)
+		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "deployment1rs-my-namespace"))
+
+		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs-my-namespace")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
+		assert.True(t, ok)
+		assert.Equal(t, 2, len(val.([]types.NamespacedName)))
+	})
+
+	t.Run("Reconcile for Create and Delete PE", func(t *testing.T) {
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{})
+
+		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
+
+		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+			Name:      policyEndpoint.GetName(),
+			Namespace: policyEndpoint.GetNamespace(),
+		}, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				*currentPE = policyEndpoint
+				return nil
+			},
+		).MaxTimes(3)
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				*list = policyendpoint.PolicyEndpointList{
+					Items: []policyendpoint.PolicyEndpoint{policyEndpoint},
+				}
+				return nil
+			},
+		).MaxTimes(1)
+
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      policyEndpoint.GetName(),
+				Namespace: policyEndpoint.GetNamespace(),
+			},
+		})
+
+		assert.Nil(t, err)
+		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "deployment1rs-my-namespace"))
+
+		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs-my-namespace")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
+		assert.True(t, ok)
+		assert.Equal(t, 2, len(val.([]types.NamespacedName)))
+
+		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+			Name:      policyEndpoint.GetName(),
+			Namespace: policyEndpoint.GetNamespace(),
+		}, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				return apierrors.NewNotFound(schema.GroupResource{Group: networking.SchemeGroupVersion.Group, Resource: ""}, "")
+			},
+		).AnyTimes()
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				*list = policyendpoint.PolicyEndpointList{}
+				return nil
+			},
+		).AnyTimes()
+
+		_, err = policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      policyEndpoint.GetName(),
+				Namespace: policyEndpoint.GetNamespace(),
+			},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.networkPolicyToPodIdentifierMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.podIdentifierToPolicyEndpointMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.policyEndpointSelectorMap))
+
+	})
+}
+
+func getPolicyEndpoint(npName string, namespace string, podEndpoints []policyendpoint.PodEndpoint) policyendpoint.PolicyEndpoint {
+	return policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      npName + "-abcd",
+			Namespace: namespace,
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector:          &metav1.LabelSelector{},
+			PodSelectorEndpoints: podEndpoints,
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      npName,
+				Namespace: namespace,
+			},
+			Egress: []policyendpoint.EndpointInfo{},
+		},
+	}
+}
+
+func sizeOfSyncMap(m *sync.Map) int {
+	count := 0
+	m.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
+}
 
 func TestIsProgFdShared(t *testing.T) {
 	type want struct {
@@ -57,7 +230,7 @@ func TestIsProgFdShared(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
 		policyEndpointReconciler.ebpfClient = ebpf.NewMockBpfClient()
 		for pod, progFd := range podToProgFd {
 			policyEndpointReconciler.ebpfClient.GetIngressPodToProgMap().Store(pod, progFd)
@@ -382,7 +555,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -797,7 +970,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1042,7 +1215,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
