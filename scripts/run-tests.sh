@@ -3,6 +3,7 @@ set -Eeuox pipefail
 
 DIR=$(cd "$(dirname "$0")"; pwd)
 
+source ${DIR}/lib/common.sh
 source ${DIR}/lib/cleanup.sh
 source ${DIR}/lib/cloudwatch.sh
 source ${DIR}/lib/cluster.sh
@@ -25,6 +26,10 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+check_is_installed aws
+check_is_installed eksctl
+check_is_installed helm
 
 load_default_values
 create_cluster
