@@ -53,7 +53,7 @@ func init() {
 }
 
 func main() {
-	initLogger := logger.New("info", "")
+	initLogger := logger.New("info", "", 0, 0, 0, false)
 
 	ctrlConfig, err := loadControllerConfig()
 	if err != nil {
@@ -61,7 +61,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile)
+	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile,
+		ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups, ctrlConfig.LogFileMaxAge, ctrlConfig.LogFileCompress)
 	log.Infof("Starting network policy agent with log level: %s", ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
