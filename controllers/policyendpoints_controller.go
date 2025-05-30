@@ -129,18 +129,12 @@ type PolicyEndpointsReconciler struct {
 	ebpfClient ebpf.BpfClient
 	// NetworkPolicy enabled/disabled
 	enableNetworkPolicy bool
-	// NetworkPolicy mode standard/strict
-	networkPolicyMode string
 	//Logger
 	log logr.Logger
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints/status,verbs=get
-
-func (r *PolicyEndpointsReconciler) SetNetworkPolicyMode(mode string) {
-	r.networkPolicyMode = mode
-}
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.log.Info("Received a new reconcile request", "req", req)
@@ -342,8 +336,12 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			continue
 		}
 
-		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier)
+		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier, 1, false)
 		if err != nil {
+			if errors.Is(err, ebpf.ErrSkipAttach) {
+				r.log.Info("Skipped eBPF probe attach due to multi-NIC enabled and probes not already attached", "Pod", pod)
+				return nil // Don't update maps
+			}
 			r.log.Info("Attaching eBPF probe failed for", "pod", pod.Name, "namespace", pod.Namespace)
 			return err
 		}
@@ -388,10 +386,10 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 		// We update pod_state to default allow/deny if there are no other policies applied
 		if noActiveIngressPolicies && noActiveEgressPolicies {
 			state := DEFAULT_ALLOW
-			if utils.IsStrictMode(r.networkPolicyMode) {
+			if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
 				state = DEFAULT_DENY
 			}
-			r.log.Info("No active policies. Updating pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", r.networkPolicyMode)
+			r.log.Info("No active policies. Updating pod_state map for ", "podIdentifier: ", podIdentifier, "networkPolicyMode: ", r.GeteBPFClient().GetNetworkPolicyMode())
 			err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, state, true, true)
 			if err != nil {
 				r.log.Error(err, "Map update(s) failed for, ", "podIdentifier ", podIdentifier)
