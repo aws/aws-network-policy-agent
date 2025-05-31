@@ -7,7 +7,6 @@ import (
 	policyendpoint "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
-	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -15,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestIsProgFdShared(t *testing.T) {
@@ -59,8 +57,7 @@ func TestIsProgFdShared(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
 		policyEndpointReconciler.ebpfClient = ebpf.NewMockBpfClient()
 		for pod, progFd := range podToProgFd {
 			policyEndpointReconciler.ebpfClient.GetIngressPodToProgMap().Store(pod, progFd)
@@ -385,8 +382,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -578,7 +574,6 @@ func TestDeriveTargetPods(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := PolicyEndpointsReconciler{
 			k8sClient: mockClient,
-			log:       logr.New(&log.NullLogSink{}),
 			nodeIP:    tt.nodeIP,
 		}
 		if tt.nodeIP == "" {
@@ -641,7 +636,6 @@ func TestAddCatchAllEntry(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := PolicyEndpointsReconciler{
 			k8sClient: mockClient,
-			log:       logr.New(&log.NullLogSink{}),
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -758,7 +752,6 @@ func TestDeriveDefaultPodIsolation(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := PolicyEndpointsReconciler{
 			k8sClient: mockClient,
-			log:       logr.New(&log.NullLogSink{}),
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -804,8 +797,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1050,8 +1042,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, logr.New(&log.NullLogSink{}),
-			false, false, false, false, 300, 262144)
+		policyEndpointReconciler, _ := NewPolicyEndpointsReconciler(mockClient, false, false, false, false, 300, 262144)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)

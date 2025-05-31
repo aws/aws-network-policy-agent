@@ -2,8 +2,6 @@ package ebpf
 
 import (
 	"sync"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // NewMockBpfClient is an exported helper for tests that returns a mock implementation of BpfClient.
@@ -19,6 +17,5 @@ func NewMockBpfClient() BpfClient {
 		nodeIP:                    "127.0.0.1",
 		enableIPv6:                false,
 		hostMask:                  "/32",
-		logger:                    ctrl.Log.WithName("mock-bpfclient"),
 	}
 }

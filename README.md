@@ -82,6 +82,16 @@ Network Policy agent can operate in either IPv4 or IPv6 mode. Setting this flag 
 
 **Note:** VPC CNI by default creates an egress only IPv4 interface for IPv6 pods and this network interface will not be secured by the Network policy feature. Network policies will only be enforced on the Pod's primary interface (i.e.,) `eth0`. If you want to block the egress IPv4 access, please disable the interface creation via [ENABLE_V4_EGRESS](https://github.com/aws/amazon-vpc-cni-k8s#enable_v4_egress-v1151) flag in VPC CNI. 
 
+#### `log-level`
+
+Type: String
+
+Default: debug
+
+Sets the logging verbosity for the Network Policy Agent. Valid options are: debug, info, warn, error.
+DENY flow logs are always logged, regardless of the log level.
+ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true
+
 #### `conntrack-cache-cleanup-period` (from v1.0.7+)
 
 Type: Integer

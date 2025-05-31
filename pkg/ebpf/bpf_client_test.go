@@ -9,6 +9,7 @@ import (
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
+	"github.com/samber/lo"
 
 	mock_bpfclient "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser/mocks"
 	mock_bpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps/mocks"
@@ -16,18 +17,14 @@ import (
 	mock_tc "github.com/aws/aws-ebpf-sdk-go/pkg/tc/mocks"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	// "unsafe"
 )
 
 func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
-	test_bpfClientLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
 	//protocolUDP := corev1.ProtocolUDP
 	//protocolSCTP := corev1.ProtocolSCTP
@@ -80,7 +77,6 @@ func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			test_bpfClient := &bpfClient{
 				nodeIP:     "10.1.1.1",
-				logger:     test_bpfClientLogger,
 				enableIPv6: false,
 				hostMask:   "/32",
 			}
@@ -153,7 +149,6 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -258,7 +253,6 @@ func TestBpfClient_CheckAndDeriveCatchAllIPPorts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -321,7 +315,6 @@ func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -374,7 +367,6 @@ func TestBpfClient_AddCatchAllL4Entry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:              "10.1.1.1",
-				logger:              logr.New(&log.NullLogSink{}),
 				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
@@ -394,7 +386,6 @@ func TestLoadBPFProgram(t *testing.T) {
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	testBpfClient := &bpfClient{
 		nodeIP:       "10.1.1.1",
-		logger:       logr.New(&log.NullLogSink{}),
 		enableIPv6:   false,
 		bpfSDKClient: mockBpfClient,
 	}
@@ -469,7 +460,6 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
@@ -530,7 +520,6 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
@@ -634,7 +623,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		{
 			name:          "Ingress and Egress Attach - Existing probes",
 			testPod:       testPod,
-			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace, logr.New(&log.NullLogSink{})),
+			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
 			wantErr:       nil,
 		},
 		{
@@ -655,7 +644,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 
 		testBpfClient := &bpfClient{
 			nodeIP:                    "10.1.1.1",
-			logger:                    logr.New(&log.NullLogSink{}),
 			enableIPv6:                false,
 			hostMask:                  "/32",
 			policyEndpointeBPFContext: new(sync.Map),
@@ -673,6 +661,10 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			egressPgmInfo:  sampleEgressPgmInfo,
 		}
 		testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
+
+		utils.GetHostVethName = func(podName, podNamespace string, prefixes []string) (string, error) {
+			return "mockedveth0", nil
+		}
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier)
@@ -702,16 +694,39 @@ func TestRecoverBPFState(t *testing.T) {
 		POLICY_EVENTS_MAP_PIN_PATH: sampleEventsMap,
 	}
 
+	ProgramAndMap := map[string]goelf.BpfData{
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_ingress": {
+			Program: goebpfprogs.BpfProgram{
+				ProgFD: 1,
+			},
+			Maps: make(map[string]goebpfmaps.BpfMap),
+		},
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_egress": {
+			Program: goebpfprogs.BpfProgram{
+				ProgFD: 2,
+			},
+			Maps: make(map[string]goebpfmaps.BpfMap),
+		},
+	}
+
+	type bpfContextValidation struct {
+		ingressProbeFd int
+		egressProbeFd  int
+	}
+
 	type want struct {
 		isConntrackMapPresent    bool
 		isPolicyEventsMapPresent bool
 		eventsMapFD              int
+		bpfContextCount          int
+		bpfContextValidation     map[string]bpfContextValidation
 	}
 
 	tests := []struct {
 		name                      string
 		policyEndpointeBPFContext *sync.Map
 		currentGlobalMaps         map[string]goebpfmaps.BpfMap
+		currentProgramAndMap      map[string]goelf.BpfData
 		updateIngressProbe        bool
 		updateEgressProbe         bool
 		updateEventsProbe         bool
@@ -719,41 +734,82 @@ func TestRecoverBPFState(t *testing.T) {
 		wantErr                   error
 	}{
 		{
-			name:               "Conntrack and Events map are already present",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  ConntrackandEventMaps,
+			name:                 "Conntrack and Events map are already present",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    ConntrackandEventMaps,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: true,
 				isConntrackMapPresent:    true,
 				eventsMapFD:              3,
+				bpfContextCount:          1,
 			},
 			wantErr: nil,
 		},
 		{
-			name:               "Conntrack Map present while Events map is missing",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  OnlyConntrackMap,
+			name:                 "Conntrack Map present while Events map is missing",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    OnlyConntrackMap,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: false,
 				isConntrackMapPresent:    true,
 				eventsMapFD:              0,
+				bpfContextCount:          1,
 			},
 			wantErr: nil,
 		},
 		{
-			name:               "Conntrack Map missing while Events map is present",
-			updateIngressProbe: false,
-			updateEgressProbe:  false,
-			updateEventsProbe:  false,
-			currentGlobalMaps:  OnlyEventsMap,
+			name:                 "Conntrack Map missing while Events map is present",
+			updateIngressProbe:   false,
+			updateEgressProbe:    false,
+			updateEventsProbe:    false,
+			currentGlobalMaps:    OnlyEventsMap,
+			currentProgramAndMap: ProgramAndMap,
 			want: want{
 				isPolicyEventsMapPresent: true,
 				isConntrackMapPresent:    false,
 				eventsMapFD:              3,
+				bpfContextCount:          1,
+			},
+			wantErr: nil,
+		},
+		{
+			name:               "Prevent BpfContext mangling",
+			updateIngressProbe: false,
+			updateEgressProbe:  false,
+			updateEventsProbe:  false,
+			currentGlobalMaps:  ConntrackandEventMaps,
+			currentProgramAndMap: lo.Assign(
+				ProgramAndMap,
+				map[string]goelf.BpfData{
+					"/sys/fs/bpf/globals/aws/programs/hello-udp-1234-default_handle_ingress": {
+						Program: goebpfprogs.BpfProgram{
+							ProgFD: 3,
+						},
+						Maps: make(map[string]goebpfmaps.BpfMap),
+					},
+				},
+			),
+			want: want{
+				isPolicyEventsMapPresent: true,
+				isConntrackMapPresent:    true,
+				eventsMapFD:              3,
+				bpfContextCount:          2,
+				bpfContextValidation: map[string]bpfContextValidation{
+					"hello-udp-748dc8d996-default": {
+						ingressProbeFd: 1,
+						egressProbeFd:  2,
+					},
+					"hello-udp-1234-default": {
+						ingressProbeFd: 3,
+						egressProbeFd:  0,
+					},
+				},
 			},
 			wantErr: nil,
 		},
@@ -771,21 +827,43 @@ func TestRecoverBPFState(t *testing.T) {
 				return tt.currentGlobalMaps, nil
 			},
 		).AnyTimes()
-		mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().AnyTimes()
-
-		policyEndpointeBPFContext := new(sync.Map)
-		globapMaps := new(sync.Map)
+		mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().DoAndReturn(
+			func() (map[string]goelf.BpfData, error) {
+				return tt.currentProgramAndMap, nil
+			},
+		).AnyTimes()
 
 		t.Run(tt.name, func(t *testing.T) {
+			policyEndpointeBPFContext := new(sync.Map)
+			globapMaps := new(sync.Map)
 			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, _, _, gotError := recoverBPFState(mockTCClient, mockBpfClient, policyEndpointeBPFContext, globapMaps,
 				tt.updateIngressProbe, tt.updateEgressProbe, tt.updateEventsProbe)
 			assert.Equal(t, tt.want.isConntrackMapPresent, gotIsConntrackMapPresent)
 			assert.Equal(t, tt.want.isPolicyEventsMapPresent, gotIsPolicyEventsMapPresent)
 			assert.Equal(t, tt.want.eventsMapFD, gotEventsMapFD)
 			assert.Equal(t, tt.wantErr, gotError)
+			assert.Equal(t, tt.want.bpfContextCount, sizeOfSyncMap(policyEndpointeBPFContext))
+
+			if tt.want.bpfContextValidation != nil {
+				for k, v := range tt.want.bpfContextValidation {
+					context, ok := policyEndpointeBPFContext.Load(k)
+					assert.True(t, ok)
+					assert.Equal(t, v.ingressProbeFd, context.(BPFContext).ingressPgmInfo.Program.ProgFD)
+					assert.Equal(t, v.egressProbeFd, context.(BPFContext).egressPgmInfo.Program.ProgFD)
+				}
+			}
 		})
 	}
 
+}
+
+func sizeOfSyncMap(m *sync.Map) int {
+	count := 0
+	m.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 func TestMergeDuplicateL4Info(t *testing.T) {
@@ -881,7 +959,6 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				nodeIP:                    "10.1.1.1",
-				logger:                    logr.New(&log.NullLogSink{}),
 				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),

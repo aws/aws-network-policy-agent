@@ -10,7 +10,7 @@ const (
 	flagLogLevel                       = "log-level"
 	flagLogFile                        = "log-file"
 	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
-	defaultLogLevel                    = "info"
+	defaultLogLevel                    = "debug"
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
