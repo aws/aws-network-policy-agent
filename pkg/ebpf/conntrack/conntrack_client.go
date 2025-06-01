@@ -7,8 +7,8 @@ import (
 	"unsafe"
 
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/go-logr/logr"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -16,6 +16,10 @@ import (
 var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
+
+func log() logger.Logger {
+	return logger.Get()
+}
 
 type ConntrackClient interface {
 	CleanupConntrackMap()
@@ -27,17 +31,15 @@ var _ ConntrackClient = (*conntrackClient)(nil)
 type conntrackClient struct {
 	conntrackMap          goebpfmaps.BpfMap
 	enableIPv6            bool
-	logger                logr.Logger
 	hydratelocalConntrack bool
 	localConntrackV4Cache map[utils.ConntrackKey]bool
 	localConntrackV6Cache map[utils.ConntrackKeyV6]bool
 }
 
-func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool, logger logr.Logger) *conntrackClient {
+func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool) *conntrackClient {
 	return &conntrackClient{
 		conntrackMap:          conntrackMap,
 		enableIPv6:            enableIPv6,
-		logger:                logger,
 		hydratelocalConntrack: true,
 	}
 }
@@ -51,11 +53,11 @@ func (c *conntrackClient) InitializeLocalCache() {
 }
 
 func (c *conntrackClient) CleanupConntrackMap() {
-	c.logger.Info("Check for any stale entries in the conntrack map")
+	log().Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
-		c.logger.Info("Failed to get mapInfo for conntrack pinpath")
+		log().Errorf("Failed to get mapInfo for conntrack pinpath %v", err)
 		return
 	}
 	mapID := int(mapInfo.Id)
@@ -103,14 +105,14 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				iterKey = iterNextKey
 			}
 		}
-		c.logger.Info("hydrated local conntrack cache")
+		log().Info("hydrated local conntrack cache")
 		c.hydratelocalConntrack = false
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
 		conntrackFlows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET)
 		if err != nil {
-			c.logger.Info("Failed to read from conntrack table")
+			log().Errorf("Failed to read from conntrack table %v", err)
 			return
 		}
 		kernelConntrackV4Cache := make(map[utils.ConntrackKey]bool)
@@ -180,24 +182,24 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String())
-				c.logger.Info("Conntrack cleanup", "Delete - ", key)
+				log().Infof("Conntrack cleanup Delete - %s", key)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
 
 			}
 		}
 		//c.localConntrackV4Cache = make(map[utils.ConntrackKey]bool)
-		c.logger.Info("Done cleanup of conntrack map")
+		log().Info("Done cleanup of conntrack map")
 		c.hydratelocalConntrack = true
 	}
 	return
 }
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
-	c.logger.Info("Check for any stale entries in the conntrack map")
+	log().Info("Check for any stale entries in the conntrack map")
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
-		c.logger.Info("Failed to get mapInfo for conntrack pinpath")
+		log().Info("Failed to get mapInfo for conntrack pinpath")
 		return
 	}
 	mapID := int(mapInfo.Id)
@@ -250,14 +252,14 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				copy(byteSlice, nextbyteSlice)
 			}
 		}
-		c.logger.Info("hydrated local conntrack cache")
+		log().Info("hydrated local conntrack cache")
 		c.hydratelocalConntrack = false
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
 		conntrackFlows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET6)
 		if err != nil {
-			c.logger.Info("Failed to read from conntrack table")
+			log().Info("Failed to read from conntrack table")
 			return
 		}
 
@@ -330,15 +332,14 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
-				c.logger.Info("Conntrack cleanup", "Delete - ", key)
+				log().Infof("Conntrack cleanup Delete - %s", key)
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
-				c.printByteArray(ceByteSlice)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
 			}
 		}
 		//Lets cleanup all entries in cache
 		c.localConntrackV6Cache = make(map[utils.ConntrackKeyV6]bool)
-		c.logger.Info("Done cleanup of conntrack map")
+		log().Info("Done cleanup of conntrack map")
 		c.hydratelocalConntrack = true
 	}
 	return
@@ -346,7 +347,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 
 func (c *conntrackClient) printByteArray(byteArray []byte) {
 	for _, b := range byteArray {
-		c.logger.Info("CONNTRACK VAL", "->", b)
+		log().Debugf("CONNTRACK VAL -> %v", b)
 	}
-	c.logger.Info("DONE")
+	log().Debug("DONE")
 }
