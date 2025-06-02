@@ -10,7 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/go-logr/logr"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +42,10 @@ var (
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
+
+func log() logger.Logger {
+	return logger.Get()
+}
 
 // NetworkPolicyEnforcingMode is the mode of network policy enforcement
 type NetworkPolicyEnforcingMode string
@@ -109,9 +113,9 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + podNamespace
 }
 
-func GetPodIdentifier(podName, podNamespace string, log logr.Logger) string {
+func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
-		log.Info("Replacing '.' character with '_' for pod pin path.")
+		log().Info("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
@@ -167,7 +171,7 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, logger logr.Logger) string {
+var GetHostVethName = func(podName, podNamespace string, interfacePrefixes []string) (string, error) {
 	var interfaceName string
 	var errors error
 	h := sha1.New()
@@ -176,15 +180,14 @@ func GetHostVethName(podName, podNamespace string, interfacePrefixes []string, l
 	for _, prefix := range interfacePrefixes {
 		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
 		if _, err := getHostLinkByName(interfaceName); err == nil {
-			logger.Info("host veth interface found", "interface name", interfaceName)
-			return interfaceName
+			return interfaceName, nil
 		} else {
 			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
 		}
 	}
 
-	logger.Error(errors, "Not found any interface starting with prefixes and the hash", "prefixes searched", interfacePrefixes, "hash", hex.EncodeToString(h.Sum(nil))[:11])
-	return ""
+	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
+	return "", errors
 }
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
@@ -206,7 +209,7 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	return key
 }
 
-func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll bool, denyAll bool) []byte {
+func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 	var startPort, endPort, protocol int
 
 	value := make([]byte, TRIE_VALUE_LENGTH)
@@ -224,13 +227,12 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll bool, de
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log.Info("L4 values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
-		return value
+		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
 		if startOffset >= TRIE_VALUE_LENGTH {
-			log.Error(nil, "No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
+			log().Error("No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
 			return value
 		}
 		endPort = 0
@@ -244,7 +246,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, log logr.Logger, allowAll bool, de
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log.Info("L4 values: ", "protocol: ", protocol, "startPort: ", startPort, "endPort: ", endPort)
+		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
