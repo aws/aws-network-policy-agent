@@ -19,7 +19,10 @@ package main
 import (
 	"os"
 
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
+	"github.com/samber/lo"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
@@ -89,13 +92,19 @@ func main() {
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
 		log.Info("Network Policy is enabled, registering the policyEndpointController...")
-		policyEndpointController, err = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
-			ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
-		if err != nil {
-			log.Errorf("unable to setup controller, PolicyEndpoints init failed %v", err)
-			os.Exit(1)
+
+		var nodeIP string
+		if !ctrlConfig.EnableIPv6 {
+			nodeIP = lo.Must1(imds.GetMetaData("local-ipv4"))
+		} else {
+			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
 		}
+
+		ebpfClient := lo.Must1(ebpf.NewBpfClient(nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize))
+		ebpfClient.ReAttachEbpfProbes()
+
+		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
 
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
