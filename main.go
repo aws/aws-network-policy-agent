@@ -19,12 +19,13 @@ package main
 import (
 	"os"
 
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
+	"github.com/samber/lo"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
-	"github.com/go-logr/logr"
-	"github.com/go-logr/zapr"
 	"github.com/spf13/pflag"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -44,8 +45,7 @@ import (
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	scheme = runtime.NewScheme()
 )
 
 func init() {
@@ -56,67 +56,71 @@ func init() {
 }
 
 func main() {
-	initLogger, _ := getLoggerWithLogLevel("info", "")
+	initLogger := logger.New("info", "")
 
 	ctrlConfig, err := loadControllerConfig()
 	if err != nil {
-		initLogger.Error(err, "unable to load policy endpoint controller config")
+		initLogger.Errorf("unable to load policy endpoint controller config %v", err)
 		os.Exit(1)
 	}
 
-	ctrlLogger, err := getLoggerWithLogLevel(ctrlConfig.LogLevel, ctrlConfig.LogFile)
-	if err != nil {
-		initLogger.Error(err, "unable to setup logger")
-		os.Exit(1)
-	}
-	ctrl.SetLogger(ctrlLogger)
+	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile)
+	log.Infof("Starting network policy agent with log level: %s", ctrlConfig.LogLevel)
+
+	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
 	restCFG, err := config.BuildRestConfig(ctrlConfig.RuntimeConfig)
 	if err != nil {
-		setupLog.Error(err, "unable to build REST config")
+		log.Errorf("unable to build REST config %v", err)
 		os.Exit(1)
 	}
 
 	runtimeOpts := config.BuildRuntimeOptions(ctrlConfig.RuntimeConfig, scheme)
 	mgr, err := ctrl.NewManager(restCFG, runtimeOpts)
 	if err != nil {
-		setupLog.Error(err, "unable to create controller manager")
+		log.Errorf("unable to create controller manager %v", err)
 		os.Exit(1)
 	}
 
 	err = ctrlConfig.ValidControllerFlags()
 	if err != nil {
-		setupLog.Error(err, "Controller flags validation failed")
+		log.Errorf("Controller flags validation failed %v", err)
 		os.Exit(1)
 	}
 
 	ctx := ctrl.SetupSignalHandler()
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
-		setupLog.Info("Network Policy is enabled, registering the policyEndpointController...")
-		policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
-			ctrl.Log.WithName("controllers").WithName("policyEndpoints"), ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.EnableNetworkPolicy, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize)
-		if err != nil {
-			setupLog.Error(err, "unable to setup controller", "controller", "PolicyEndpoints init failed")
-			os.Exit(1)
+		log.Info("Network Policy is enabled, registering the policyEndpointController...")
+
+		var nodeIP string
+		if !ctrlConfig.EnableIPv6 {
+			nodeIP = lo.Must1(imds.GetMetaData("local-ipv4"))
+		} else {
+			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
 		}
 
+		ebpfClient := lo.Must1(ebpf.NewBpfClient(nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize))
+		ebpfClient.ReAttachEbpfProbes()
+
+		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
+
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "PolicyEndpoints")
+			log.Errorf("unable to create controller PolicyEndpoints %v", err)
 			os.Exit(1)
 		}
 	} else {
-		setupLog.Info("Network Policy is disabled, skip the policyEndpointController registration")
+		log.Info("Network Policy is disabled, skip the policyEndpointController registration")
 	}
 
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
+		log.Errorf("unable to set up health check %v", err)
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
+		log.Errorf("unable to set up ready check %v", err)
 		os.Exit(1)
 	}
 
@@ -124,16 +128,16 @@ func main() {
 	// need to start rpc always
 	go func() {
 		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
-			setupLog.Error(err, "Failed to set up gRPC Handler")
+			log.Errorf("Failed to set up gRPC Handler %v", err)
 			os.Exit(1)
 		}
 	}()
 
 	go metrics.ServeMetrics()
 
-	setupLog.Info("starting manager")
+	log.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
-		setupLog.Error(err, "problem running manager")
+		log.Errorf("problem running manager %v", err)
 		os.Exit(1)
 	}
 
@@ -150,10 +154,4 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 	}
 
 	return controllerConfig, nil
-}
-
-// getLoggerWithLogLevel returns logger with specific log level.
-func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
-	ctrlLogger := logger.New(logLevel, logFilePath)
-	return zapr.NewLogger(ctrlLogger), nil
 }
