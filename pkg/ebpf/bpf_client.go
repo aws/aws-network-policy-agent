@@ -108,7 +108,7 @@ func prometheusRegister() {
 }
 
 type BpfClient interface {
-	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string, numInterfaces int, skipIfMultiNICEnabled bool) error
+	CheckAndAttacheBPFProbes(pod types.NamespacedName, policyEndpoint string, numInterfaces int, skipAttachProbes bool) (bool, error)
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
 	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
@@ -287,7 +287,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	networkPolicyMode, isMultiNICEnabled, err := GetNetworkPolicyConfigsFromIpamd()
 	if err != nil {
-		ebpfClient.logger.Info("Error while fetching NetworkPolicyConfigs from ipamd ", err)
+		log().Errorf("Error while fetching NetworkPolicyConfigs from ipamd %v", err)
 		return nil, err
 	}
 	ebpfClient.networkPolicyMode = networkPolicyMode
@@ -521,7 +521,7 @@ func GetNetworkPolicyConfigsFromIpamd() (string, bool, error) {
 	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
 		err = errors.New("Invalid Network Policy Mode")
 		log().Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
-		return "", err
+		return "", false, err
 	}
 	return resp.NetworkPolicyMode, resp.MultiNICEnabled, nil
 }
@@ -589,10 +589,9 @@ func (l *bpfClient) GetNetworkPolicyMode() string {
 	return l.networkPolicyMode
 }
 
-func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, skipIfMultiNICEnabled bool) error {
+func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, skipAttachProbes bool) (bool, error) {
 	var ingressProgFD int
 	var egressProgFD int
-	var err error
 
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
@@ -609,22 +608,22 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	isIngressProbeAttached, isEgressProbeAttached := l.IsEBPFProbeAttached(pod.Name, pod.Namespace)
 
 	if isIngressProbeAttached && isEgressProbeAttached {
-		return nil
+		return true, nil
 	}
 
-	if skipIfMultiNICEnabled && (!isIngressProbeAttached || !isEgressProbeAttached) {
-		log().Infof("Skipping attaching probes as MultiNIC is enabled and num interfaces is unknown. Pod: %s PodIdentifier: %s", pod.Name, podIdentifier)
-		return ErrSkipAttach
+	if skipAttachProbes {
+		log().Infof("Pod does not have probes attached yet. Pod: %s PodIdentifier: %s", pod.Name, podIdentifier)
+		return false, nil
 	}
 
 	for index := 0; index < numInterfaces; index++ {
 		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth
 		// name from the Name and Namespace of the Pod.
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-		hostVethName := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, l.logger)
+		hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 		if err != nil {
 			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
-			return err
+			return false, err
 		}
 
 		log().Infof("AttacheBPFProbes for pod %s in namespace %s with hostVethName %s at interface %d", pod.Name, pod.Namespace, hostVethName, index)
@@ -637,7 +636,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 			if err != nil {
 				log().Errorf("Failed to Attach Ingress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
-				return err
+				return false, err
 			}
 			log().Infof("Successfully attached Ingress TC probe for pod: %s in namespace %s at interface %d", pod.Name, pod.Namespace, index)
 		}
@@ -650,7 +649,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 			if err != nil {
 				log().Errorf("Failed to Attach Egress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
-				return err
+				return false, err
 			}
 			log().Infof("Successfully attached Egress TC probe for pod: %s in namespace %s at interface %d", pod.Name, pod.Namespace, index)
 		}
@@ -666,7 +665,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(egressProgFD, make(map[string]struct{}))
 		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	}
-	return nil
+	return true, nil
 }
 
 func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (int, error) {

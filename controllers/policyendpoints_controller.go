@@ -311,14 +311,9 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			continue
 		}
 
-		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier, 1, true)
-		if err != nil {
-			if errors.Is(err, ebpf.ErrSkipAttach) {
-				log().Infof("Skipped eBPF probe attach due to multi-NIC enabled and probes not already attached. Pod %s", pod)
-				return nil // Don't update maps
-			}
-			log().Errorf("Attaching eBPF probe failed for pod %s namespace %s", pod.Name, pod.Namespace)
-			return err
+		probesAttached, _ = r.ebpfClient.CheckAndAttacheBPFProbes(pod, podIdentifier, 0, true)
+		if !probesAttached {
+			return nil
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
