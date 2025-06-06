@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
+
 	"github.com/spf13/pflag"
 )
 
@@ -11,15 +13,11 @@ const (
 	flagLogFile                        = "log-file"
 	flagLogFileMaxSize                 = "log-file-max-size"
 	flagLogFileMaxBackups              = "log-file-max-backups"
-	flagLogFileMaxAge                  = "log-file-max-age"
-	flagLogFileCompress                = "log-file-compress"
 	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
 	defaultLogLevel                    = "debug"
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
-	defaultLogFileMaxSize              = 200
-	defaultLogFileMaxBackups           = 8
-	defaultLogFileMaxAge               = 30
-	defaultLogFileCompress             = true
+	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
+	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
@@ -41,10 +39,6 @@ type ControllerConfig struct {
 	LogFileMaxSize int
 	// Count of rotated Network Policy Agent local log files
 	LogFileMaxBackups int
-	// Network Policy Agent rotated local log files max age
-	LogFileMaxAge int
-	// Network Policy Agent rotated local log files compression
-	LogFileCompress bool
 	// MaxConcurrentReconciles specifies the max number of reconcile loops
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
@@ -72,10 +66,6 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Set the controller log file max size in megabytes before it gets rotated")
 	fs.IntVar(&cfg.LogFileMaxBackups, flagLogFileMaxBackups, defaultLogFileMaxBackups, ""+
 		"Set the controller maximum number of rotated log files to retain")
-	fs.IntVar(&cfg.LogFileMaxAge, flagLogFileMaxAge, defaultLogFileMaxAge, ""+
-		"Set the controller rotated log files max age in days")
-	fs.BoolVar(&cfg.LogFileCompress, flagLogFileCompress, defaultLogFileCompress, ""+
-		"Set the controller rotated log files compression")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
 		"Maximum number of concurrent reconcile loops")
 	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")
