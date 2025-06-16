@@ -26,6 +26,7 @@ import (
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -306,7 +307,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 }
 
 func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, podIdentifier string,
-	targetPods []types.NamespacedName, ingressRules, egressRules []ebpf.EbpfFirewallRules) error {
+	targetPods []types.NamespacedName, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
 	var err error
 
 	//Loop over target pods and setup/configure/update eBPF probes/maps
@@ -337,7 +338,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 	policyEndpoint string, isDeleteFlow bool) error {
 
 	var err error
-	var ingressRules, egressRules []ebpf.EbpfFirewallRules
+	var ingressRules, egressRules []fwrp.EbpfFirewallRules
 	var isIngressIsolated, isEgressIsolated bool
 	noActiveIngressPolicies, noActiveEgressPolicies := false, false
 
@@ -401,8 +402,8 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 }
 
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
-	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool) ([]ebpf.EbpfFirewallRules, []ebpf.EbpfFirewallRules, bool, bool, error) {
-	var ingressRules, egressRules []ebpf.EbpfFirewallRules
+	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, bool, bool, error) {
+	var ingressRules, egressRules []fwrp.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
@@ -432,7 +433,7 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 
 			for _, endPointInfo := range currentPE.Spec.Ingress {
 				ingressRules = append(ingressRules,
-					ebpf.EbpfFirewallRules{
+					fwrp.EbpfFirewallRules{
 						IPCidr: endPointInfo.CIDR,
 						Except: endPointInfo.Except,
 						L4Info: endPointInfo.Ports,
@@ -441,7 +442,7 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 
 			for _, endPointInfo := range currentPE.Spec.Egress {
 				egressRules = append(egressRules,
-					ebpf.EbpfFirewallRules{
+					fwrp.EbpfFirewallRules{
 						IPCidr: endPointInfo.CIDR,
 						Except: endPointInfo.Except,
 						L4Info: endPointInfo.Ports,
@@ -480,7 +481,7 @@ func (r *PolicyEndpointsReconciler) deriveDefaultPodIsolation(ctx context.Contex
 }
 
 func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdentifier string,
-	ingressRules, egressRules []ebpf.EbpfFirewallRules) error {
+	ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
 
 	// Map Update should only happen once for those that share the same Map
 	err := r.ebpfClient.UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
@@ -688,13 +689,13 @@ func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx
 	}
 }
 
-func (r *PolicyEndpointsReconciler) addCatchAllEntry(ctx context.Context, firewallRules *[]ebpf.EbpfFirewallRules) {
+func (r *PolicyEndpointsReconciler) addCatchAllEntry(ctx context.Context, firewallRules *[]fwrp.EbpfFirewallRules) {
 	//Add allow-all entry to firewall rule set
 	catchAllRule := policyk8sawsv1.EndpointInfo{
 		CIDR: "0.0.0.0/0",
 	}
 	*firewallRules = append(*firewallRules,
-		ebpf.EbpfFirewallRules{
+		fwrp.EbpfFirewallRules{
 			IPCidr: catchAllRule.CIDR,
 			L4Info: catchAllRule.Ports,
 		})
@@ -733,8 +734,8 @@ func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 	return r.ebpfClient
 }
 
-func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]ebpf.EbpfFirewallRules,
-	[]ebpf.EbpfFirewallRules, error) {
+func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]fwrp.EbpfFirewallRules,
+	[]fwrp.EbpfFirewallRules, error) {
 
 	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(context.Background(), podIdentifier,
 		podNamespace, "", false)
