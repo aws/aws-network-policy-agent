@@ -1,8 +1,6 @@
 package ebpf
 
 import (
-	"net"
-	"sort"
 	"sync"
 	"testing"
 
@@ -16,6 +14,7 @@ import (
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	mock_tc "github.com/aws/aws-ebpf-sdk-go/pkg/tc/mocks"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -23,77 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	// "unsafe"
 )
-
-func TestBpfClient_computeMapEntriesFromEndpointRules(t *testing.T) {
-	protocolTCP := corev1.ProtocolTCP
-	//protocolUDP := corev1.ProtocolUDP
-	//protocolSCTP := corev1.ProtocolSCTP
-
-	var testIP v1alpha1.NetworkAddress
-	var gotKeys []string
-
-	nodeIP := "10.1.1.1"
-	_, nodeIPCIDR, _ := net.ParseCIDR(nodeIP + "/32")
-	nodeIPKey := utils.ComputeTrieKey(*nodeIPCIDR, false)
-	// nodeIPValue := utils.ComputeTrieValue([]v1alpha1.Port{}, test_bpfClientLogger, true, false)
-
-	var testPort int32
-	testPort = 80
-	testIP = "10.1.1.2/32"
-	_, testIPCIDR, _ := net.ParseCIDR(string(testIP))
-
-	testIPKey := utils.ComputeTrieKey(*testIPCIDR, false)
-	//      cidrWithPPValue := utils.ComputeTrieValue(testL4Info, test_bpfClientLogger, false, false)
-	type args struct {
-		firewallRules []EbpfFirewallRules
-	}
-
-	tests := []struct {
-		name    string
-		args    args
-		want    []string
-		wantErr error
-	}{
-		{
-			name: "CIDR with Port and Protocol",
-			args: args{
-				[]EbpfFirewallRules{
-					{
-						IPCidr: "10.1.1.2/32",
-						L4Info: []v1alpha1.Port{
-							{
-								Protocol: &protocolTCP,
-								Port:     &testPort,
-							},
-						},
-					},
-				},
-			},
-			want: []string{string(nodeIPKey), string(testIPKey)},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			test_bpfClient := &bpfClient{
-				nodeIP:     "10.1.1.1",
-				enableIPv6: false,
-				hostMask:   "/32",
-			}
-			got, err := test_bpfClient.computeMapEntriesFromEndpointRules(tt.args.firewallRules)
-			if tt.wantErr != nil {
-				assert.EqualError(t, err, tt.wantErr.Error())
-			} else {
-				for key, _ := range got {
-					gotKeys = append(gotKeys, key)
-				}
-				sort.Strings(tt.want)
-				sort.Strings(gotKeys)
-				assert.Equal(t, tt.want, gotKeys)
-			}
-		})
-	}
-}
 
 func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	ingressProgFD, egressProgFD := 12, 13
@@ -148,8 +76,6 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:              "10.1.1.1",
-				enableIPv6:          false,
 				hostMask:            "/32",
 				IngressPodToProgMap: new(sync.Map),
 				EgressPodToProgMap:  new(sync.Map),
@@ -170,214 +96,6 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	}
 }
 
-func TestBpfClient_CheckAndDeriveCatchAllIPPorts(t *testing.T) {
-	protocolTCP := corev1.ProtocolTCP
-	var port80 int32 = 80
-
-	type want struct {
-		catchAllL4Info           []v1alpha1.Port
-		isCatchAllIPEntryPresent bool
-		allowAllPortAndProtocols bool
-	}
-
-	l4InfoWithCatchAllEntry := []EbpfFirewallRules{
-		{
-			IPCidr: "0.0.0.0/0",
-			L4Info: []v1alpha1.Port{
-				{
-					Protocol: &protocolTCP,
-					Port:     &port80,
-				},
-			},
-		},
-	}
-
-	l4InfoWithNoCatchAllEntry := []EbpfFirewallRules{
-		{
-			IPCidr: "1.1.1.1/32",
-			L4Info: []v1alpha1.Port{
-				{
-					Protocol: &protocolTCP,
-					Port:     &port80,
-				},
-			},
-		},
-	}
-
-	l4InfoWithCatchAllEntryAndAllProtocols := []EbpfFirewallRules{
-		{
-			IPCidr: "0.0.0.0/0",
-		},
-	}
-
-	tests := []struct {
-		name          string
-		firewallRules []EbpfFirewallRules
-		want          want
-	}{
-		{
-			name:          "Catch All Entry present",
-			firewallRules: l4InfoWithCatchAllEntry,
-			want: want{
-				catchAllL4Info: []v1alpha1.Port{
-					{
-						Protocol: &protocolTCP,
-						Port:     &port80,
-					},
-				},
-				isCatchAllIPEntryPresent: true,
-				allowAllPortAndProtocols: false,
-			},
-		},
-
-		{
-			name:          "No Catch All Entry present",
-			firewallRules: l4InfoWithNoCatchAllEntry,
-			want: want{
-				isCatchAllIPEntryPresent: false,
-				allowAllPortAndProtocols: false,
-			},
-		},
-
-		{
-			name:          "Catch All Entry With no Port info",
-			firewallRules: l4InfoWithCatchAllEntryAndAllProtocols,
-			want: want{
-				isCatchAllIPEntryPresent: true,
-				allowAllPortAndProtocols: true,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testBpfClient := &bpfClient{
-				nodeIP:              "10.1.1.1",
-				enableIPv6:          false,
-				hostMask:            "/32",
-				IngressPodToProgMap: new(sync.Map),
-				EgressPodToProgMap:  new(sync.Map),
-			}
-			gotCatchAllL4Info, gotIsCatchAllIPEntryPresent, gotAllowAllPortAndProtocols := testBpfClient.checkAndDeriveCatchAllIPPorts(tt.firewallRules)
-			assert.Equal(t, tt.want.catchAllL4Info, gotCatchAllL4Info)
-			assert.Equal(t, tt.want.isCatchAllIPEntryPresent, gotIsCatchAllIPEntryPresent)
-			assert.Equal(t, tt.want.allowAllPortAndProtocols, gotAllowAllPortAndProtocols)
-		})
-	}
-}
-
-func TestBpfClient_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) {
-	protocolTCP := corev1.ProtocolTCP
-	var port80 int32 = 80
-
-	type want struct {
-		matchingCIDRL4Info []v1alpha1.Port
-	}
-
-	sampleNonHostCIDRs := map[string][]v1alpha1.Port{
-		"1.1.1.0/24": {
-			{
-				Protocol: &protocolTCP,
-				Port:     &port80,
-			},
-		},
-	}
-
-	tests := []struct {
-		name         string
-		firewallRule string
-		nonHostCIDRs map[string][]v1alpha1.Port
-		want         want
-	}{
-		{
-			name:         "Match Present",
-			firewallRule: "1.1.1.2/32",
-			nonHostCIDRs: sampleNonHostCIDRs,
-			want: want{
-				matchingCIDRL4Info: []v1alpha1.Port{
-					{
-						Protocol: &protocolTCP,
-						Port:     &port80,
-					},
-				},
-			},
-		},
-
-		{
-			name:         "No Match",
-			firewallRule: "2.1.1.2/32",
-			nonHostCIDRs: sampleNonHostCIDRs,
-			want:         want{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testBpfClient := &bpfClient{
-				nodeIP:              "10.1.1.1",
-				enableIPv6:          false,
-				hostMask:            "/32",
-				IngressPodToProgMap: new(sync.Map),
-				EgressPodToProgMap:  new(sync.Map),
-			}
-			gotMatchingCIDRL4Info := testBpfClient.checkAndDeriveL4InfoFromAnyMatchingCIDRs(tt.firewallRule, tt.nonHostCIDRs)
-			assert.Equal(t, tt.want.matchingCIDRL4Info, gotMatchingCIDRL4Info)
-		})
-	}
-}
-
-func TestBpfClient_AddCatchAllL4Entry(t *testing.T) {
-	protocolTCP := corev1.ProtocolTCP
-	var port80 int32 = 80
-
-	l4InfoWithNoCatchAllEntry := EbpfFirewallRules{
-		IPCidr: "1.1.1.1/32",
-		L4Info: []v1alpha1.Port{
-			{
-				Protocol: &protocolTCP,
-				Port:     &port80,
-			},
-		},
-	}
-
-	l4InfoWithCatchAllL4Info := EbpfFirewallRules{
-		IPCidr: "1.1.1.1/32",
-		L4Info: []v1alpha1.Port{
-			{
-				Protocol: &protocolTCP,
-				Port:     &port80,
-			},
-			{
-				Protocol: &CATCH_ALL_PROTOCOL,
-			},
-		},
-	}
-
-	tests := []struct {
-		name          string
-		firewallRules EbpfFirewallRules
-	}{
-		{
-			name:          "Append Catch All Entry",
-			firewallRules: l4InfoWithNoCatchAllEntry,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testBpfClient := &bpfClient{
-				nodeIP:              "10.1.1.1",
-				enableIPv6:          false,
-				hostMask:            "/32",
-				IngressPodToProgMap: new(sync.Map),
-				EgressPodToProgMap:  new(sync.Map),
-			}
-			testBpfClient.addCatchAllL4Entry(&tt.firewallRules)
-			assert.Equal(t, tt.firewallRules, l4InfoWithCatchAllL4Info)
-		})
-	}
-}
-
 func TestLoadBPFProgram(t *testing.T) {
 	var wantErr error
 	ctrl := gomock.NewController(t)
@@ -385,8 +103,6 @@ func TestLoadBPFProgram(t *testing.T) {
 
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	testBpfClient := &bpfClient{
-		nodeIP:       "10.1.1.1",
-		enableIPv6:   false,
 		bpfSDKClient: mockBpfClient,
 	}
 
@@ -400,7 +116,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	var port80 int32 = 80
 	ingressMapFD, ingressMapID, egressMapFD, egressMapID := 11, 12, 13, 14
 
-	sampleIngressFirewalls := []EbpfFirewallRules{
+	sampleIngressFirewalls := []fwrp.EbpfFirewallRules{
 		{
 			IPCidr: "10.1.1.2/32",
 			L4Info: []v1alpha1.Port{
@@ -412,7 +128,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 		},
 	}
 
-	sampleEgressFirewalls := []EbpfFirewallRules{
+	sampleEgressFirewalls := []fwrp.EbpfFirewallRules{
 		{
 			IPCidr: "10.1.1.2/32",
 			L4Info: []v1alpha1.Port{
@@ -444,8 +160,8 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	tests := []struct {
 		name                 string
 		podIdentifier        string
-		ingressFirewallRules []EbpfFirewallRules
-		egressFirewallRules  []EbpfFirewallRules
+		ingressFirewallRules []fwrp.EbpfFirewallRules
+		egressFirewallRules  []fwrp.EbpfFirewallRules
 		wantErr              error
 	}{
 		{
@@ -459,8 +175,6 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:                    "10.1.1.1",
-				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
 			}
@@ -519,8 +233,6 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:                    "10.1.1.1",
-				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
 			}
@@ -643,8 +355,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
 
 		testBpfClient := &bpfClient{
-			nodeIP:                    "10.1.1.1",
-			enableIPv6:                false,
 			hostMask:                  "/32",
 			policyEndpointeBPFContext: new(sync.Map),
 			bpfSDKClient:              mockBpfClient,
@@ -866,61 +576,6 @@ func sizeOfSyncMap(m *sync.Map) int {
 	return count
 }
 
-func TestMergeDuplicateL4Info(t *testing.T) {
-	type mergeDuplicatePortsTestCase struct {
-		Name     string
-		Ports    []v1alpha1.Port
-		Expected []v1alpha1.Port
-	}
-	protocolTCP := corev1.ProtocolTCP
-	protocolUDP := corev1.ProtocolUDP
-
-	testCases := []mergeDuplicatePortsTestCase{
-		{
-			Name: "Merge Duplicate Ports with nil Protocol",
-			Ports: []v1alpha1.Port{
-				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
-				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
-				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
-				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
-				{Protocol: &protocolTCP, Port: Int32Ptr(8081), EndPort: Int32Ptr(8081)},
-			},
-			Expected: []v1alpha1.Port{
-				{Protocol: &protocolTCP, Port: Int32Ptr(80), EndPort: Int32Ptr(8080)},
-				{Protocol: nil, Port: Int32Ptr(53), EndPort: Int32Ptr(53)},
-				{Protocol: &protocolTCP, Port: Int32Ptr(8081), EndPort: Int32Ptr(8081)},
-			},
-		},
-		{
-			Name: "Merge Duplicate Ports with nil EndPort",
-			Ports: []v1alpha1.Port{
-				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
-				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
-			},
-			Expected: []v1alpha1.Port{
-				{Protocol: &protocolUDP, Port: Int32Ptr(53), EndPort: nil},
-			},
-		},
-		{
-			Name: "Merge Duplicate Ports with nil Port",
-			Ports: []v1alpha1.Port{
-				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
-				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
-			},
-			Expected: []v1alpha1.Port{
-				{Protocol: &protocolTCP, Port: nil, EndPort: Int32Ptr(8080)},
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.Name, func(t *testing.T) {
-			mergedPorts := mergeDuplicateL4Info(tc.Ports)
-			assert.Equal(t, len(tc.Expected), len(mergedPorts))
-		})
-	}
-}
-
 func TestIsFirstPodInPodIdentifier(t *testing.T) {
 	sampleIngressPgmInfo := goelf.BpfData{
 		Program: goebpfprogs.BpfProgram{
@@ -958,8 +613,6 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
-				nodeIP:                    "10.1.1.1",
-				enableIPv6:                false,
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
 			}
