@@ -29,8 +29,10 @@ type structuredLogger struct {
 
 // Configuration stores the config for the logger
 type Configuration struct {
-	LogLevel    string
-	LogLocation string
+	LogLevel          string
+	LogLocation       string
+	LogFileMaxSize    int
+	LogFileMaxBackups int
 }
 
 // getZapLevel converts log level string to zapcore.Level
@@ -64,7 +66,7 @@ func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
 
 	logLevel := getZapLevel(logConfig.LogLevel)
 
-	writer := getLogFilePath(logConfig.LogLocation)
+	writer := getLogFilePath(logConfig.LogLocation, logConfig.LogFileMaxSize, logConfig.LogFileMaxBackups)
 
 	cores = append(cores, zapcore.NewCore(getEncoder(), writer, logLevel))
 
@@ -83,13 +85,13 @@ func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
 }
 
 // getLogFilePath returns the writer
-func getLogFilePath(logFilePath string) zapcore.WriteSyncer {
+func getLogFilePath(logFilePath string, logFileMaxSize int, logFileMaxBackups int) zapcore.WriteSyncer {
 	var writer zapcore.WriteSyncer
 
 	if logFilePath == "" {
 		writer = zapcore.Lock(os.Stderr)
 	} else if strings.ToLower(logFilePath) != "stdout" {
-		writer = getLogWriter(logFilePath)
+		writer = getLogWriter(logFilePath, logFileMaxSize, logFileMaxBackups)
 	} else {
 		writer = zapcore.Lock(os.Stdout)
 	}
@@ -98,11 +100,11 @@ func getLogFilePath(logFilePath string) zapcore.WriteSyncer {
 }
 
 // getLogWriter is for lumberjack
-func getLogWriter(logFilePath string) zapcore.WriteSyncer {
+func getLogWriter(logFilePath string, logFileMaxSize int, logFileMaxBackups int) zapcore.WriteSyncer {
 	lumberJackLogger := &lumberjack.Logger{
 		Filename:   logFilePath,
-		MaxSize:    200,
-		MaxBackups: 8,
+		MaxSize:    logFileMaxSize,
+		MaxBackups: logFileMaxBackups,
 		MaxAge:     30,
 		Compress:   true,
 	}

@@ -3,6 +3,7 @@ package ebpf
 import (
 	"sync"
 
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -16,8 +17,6 @@ func NewMockBpfClient() BpfClient {
 		IngressProgToPodsMap:      new(sync.Map),
 		EgressProgToPodsMap:       new(sync.Map),
 		GlobalMaps:                new(sync.Map),
-		nodeIP:                    "127.0.0.1",
-		enableIPv6:                false,
 		hostMask:                  "/32",
 	}
 }
@@ -28,7 +27,7 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 	return nil
 }
 
-func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error {
+func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	return nil
 }
 
