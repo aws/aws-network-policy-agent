@@ -7,10 +7,6 @@ import (
 	"fmt"
 	"io/ioutil"
 
-	"net"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -21,9 +17,9 @@ import (
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
-	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
@@ -58,7 +54,6 @@ var (
 	CONNTRACK_MAP_PIN_PATH                     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 	POLICY_EVENTS_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
 	CATCH_ALL_PROTOCOL         corev1.Protocol = "ANY_IP_PROTOCOL"
-	DENY_ALL_PROTOCOL          corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	POD_VETH_PREFIX                            = "eni"
 	POLICIES_APPLIED                           = 0
 	DEFAULT_ALLOW                              = 1
@@ -109,7 +104,7 @@ func prometheusRegister() {
 
 type BpfClient interface {
 	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string) error
-	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
+	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error
 	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
 	IsFirstPodInPodIdentifier(podIdentifier string) bool
@@ -134,12 +129,6 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-type EbpfFirewallRules struct {
-	IPCidr v1alpha1.NetworkAddress
-	Except []v1alpha1.NetworkAddress
-	L4Info []v1alpha1.Port
-}
-
 func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
@@ -149,8 +138,6 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		policyEndpointeBPFContext: new(sync.Map),
 		IngressPodToProgMap:       new(sync.Map),
 		EgressPodToProgMap:        new(sync.Map),
-		nodeIP:                    nodeIP,
-		enableIPv6:                enableIPv6,
 		GlobalMaps:                new(sync.Map),
 		IngressProgToPodsMap:      new(sync.Map),
 		EgressProgToPodsMap:       new(sync.Map),
@@ -172,6 +159,8 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	ebpfClient.bpfSDKClient = goelf.New()
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+
+	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
 
 	//Set RLIMIT
 	err = ebpfClient.bpfSDKClient.IncreaseRlimit()
@@ -302,10 +291,6 @@ type bpfClient struct {
 	EgressPodToProgMap *sync.Map
 	// Stores info on the global maps the agent creates
 	GlobalMaps *sync.Map
-	// Primary IP of the node
-	nodeIP string
-	// Flag to track the IPv6 mode
-	enableIPv6 bool
 	// Ingress eBPF probe binary
 	ingressBinary string
 	// Egress eBPF probe binary
@@ -330,6 +315,8 @@ type bpfClient struct {
 	interfaceNametoEgressPinPath map[string]string
 	// Stores podIdentifier to deletepod lock mapping
 	DeletePodIdentifierLock *sync.Map
+	// FirewallRuleProcessor is used to convert firewall rules into ebpf Map content
+	fwRuleProcessor *fwrp.FirewallRuleProcessor
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -802,8 +789,8 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	return progInfo, progFD, nil
 }
 
-func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules,
-	egressFirewallRules []EbpfFirewallRules) error {
+func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
+	egressFirewallRules []fwrp.EbpfFirewallRules) error {
 
 	var ingressProgFD, egressProgFD int
 	var mapToUpdate goebpfmaps.BpfMap
@@ -923,10 +910,10 @@ func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	return firstPodInPodIdentifier
 }
 
-func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []EbpfFirewallRules) error {
+func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules []fwrp.EbpfFirewallRules) error {
 	start := time.Now()
 	duration := msSince(start)
-	mapEntries, err := l.computeMapEntriesFromEndpointRules(firewallRules)
+	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
 		return err
@@ -941,225 +928,6 @@ func (l *bpfClient) updateEbpfMap(mapToUpdate goebpfmaps.BpfMap, firewallRules [
 		return err
 	}
 	return nil
-}
-
-func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
-	sort.Slice(rules, func(i, j int) bool {
-
-		prefixSplit := strings.Split(prefixLenStr, "/")
-		prefixLen, _ := strconv.Atoi(prefixSplit[1])
-		prefixLenIp1 := prefixLen
-		prefixLenIp2 := prefixLen
-
-		if strings.Contains(string(rules[i].IPCidr), "/") {
-			prefixIp1 := strings.Split(string(rules[i].IPCidr), "/")
-			prefixLenIp1, _ = strconv.Atoi(prefixIp1[1])
-
-		}
-
-		if strings.Contains(string(rules[j].IPCidr), "/") {
-
-			prefixIp2 := strings.Split(string(rules[j].IPCidr), "/")
-			prefixLenIp2, _ = strconv.Atoi(prefixIp2[1])
-		}
-
-		return prefixLenIp1 < prefixLenIp2
-	})
-}
-
-func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
-	uniquePorts := make(map[string]v1alpha1.Port)
-	var result []v1alpha1.Port
-	var key string
-
-	for _, p := range ports {
-
-		portKey := 0
-		endPortKey := 0
-
-		if p.Port != nil {
-			portKey = int(*p.Port)
-		}
-
-		if p.EndPort != nil {
-			endPortKey = int(*p.EndPort)
-		}
-		if p.Protocol == nil {
-			key = fmt.Sprintf("%s-%d-%d", "", portKey, endPortKey)
-		} else {
-			key = fmt.Sprintf("%s-%d-%d", *p.Protocol, portKey, endPortKey)
-		}
-
-		if _, ok := uniquePorts[key]; ok {
-			continue
-		} else {
-			uniquePorts[key] = p
-		}
-	}
-
-	for _, port := range uniquePorts {
-		result = append(result, port)
-	}
-
-	return result
-}
-
-// computeMapEntriesFromEndpointRules generates a map of IP prefix keys to encoded L4 rules that will
-// be used to update ebpf maps
-//
-// How it works:
-//   1. A default allow-all entry is added for the node IP to ensure local node traffic is always permitted.
-//   2. The list of firewall rules is sorted by prefix length in descending order. This is crucial for
-//      handling overlapping CIDRs because longest-prefix matches win in LPM TRIE.
-//   3. Each rule is normalized:
-//        - Ensures all entries contain a /mask (using hostMask if omitted).
-//        - Filters out IPv4 rules in IPv6 clusters and vice versa.
-//        - For rules without any L4 port info, a catch-all rule is inserted to match all traffic.
-//   4. For any rule whose CIDR is more specific (e.g., /24) and falls within a broader one (e.g., /16),
-//      we check existing rules in the map to see if it matches a prior CIDR. If it does and is not part of
-//      that CIDR's "except" list, we inherit the broader rule's ports into the current one.
-//      This ensures that the specific CIDR behaves consistently with the broader scope's intent.
-//   5. We then handle all `except` CIDRs at the end.
-//        - If not already in the map, each `except` CIDR is added explicitly with a deny-all L4 entry.
-//        - This ensures specific excluded IP ranges override broader allow rules correctly in the LPM match tree.
-//   6. Finally, all CIDRs are encoded into trie keys and their corresponding merged/derived L4 info is encoded
-//      into the values, forming the output map.
-
-func (l *bpfClient) computeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
-
-	firewallMap := make(map[string][]byte)
-	cidrsMap := make(map[string]EbpfFirewallRules)
-
-	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
-	_, mapKey, _ := net.ParseCIDR(l.nodeIP + l.hostMask)
-	key := utils.ComputeTrieKey(*mapKey, l.enableIPv6)
-	value := utils.ComputeTrieValue([]v1alpha1.Port{}, true, false)
-	firewallMap[string(key)] = value
-
-	//Sort the rules
-	sortFirewallRulesByPrefixLength(firewallRules, l.hostMask)
-
-	for _, firewallRule := range firewallRules {
-		var cidrL4Info []v1alpha1.Port
-
-		if !strings.Contains(string(firewallRule.IPCidr), "/") {
-			firewallRule.IPCidr += v1alpha1.NetworkAddress(l.hostMask)
-		}
-
-		if utils.IsNodeIP(l.nodeIP, string(firewallRule.IPCidr)) {
-			continue
-		}
-
-		if l.enableIPv6 && !strings.Contains(string(firewallRule.IPCidr), "::") {
-			log().Debugf("Skipping ipv4 rule in ipv6 cluster CIDR: %s", string(firewallRule.IPCidr))
-			continue
-		}
-
-		if !l.enableIPv6 && strings.Contains(string(firewallRule.IPCidr), "::") {
-			log().Debugf("Skipping ipv6 rule in ipv4 cluster CIDR: %s", string(firewallRule.IPCidr))
-			continue
-		}
-
-		// If no L4 specified add catch all entry
-		if len(firewallRule.L4Info) == 0 {
-			log().Debugf("No L4 specified. Add Catch all entry CIDR: %s", string(firewallRule.IPCidr))
-			l.addCatchAllL4Entry(&firewallRule)
-			log().Debugf("Total L4 entries count: %d", len(firewallRule.L4Info))
-		}
-
-		if existingFirewallRuleInfo, ok := cidrsMap[string(firewallRule.IPCidr)]; ok {
-			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
-			firewallRule.Except = append(firewallRule.Except, existingFirewallRuleInfo.Except...)
-		} else {
-			// Check if the /m entry is part of any /n CIDRs that we've encountered so far
-			// If found, we need to include the port and protocol combination against the current entry as well since
-			// we use LPM TRIE map and the /m will always win out.
-			cidrL4Info = l.checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), cidrsMap)
-			if len(cidrL4Info) > 0 {
-				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
-			}
-		}
-		cidrsMap[string(firewallRule.IPCidr)] = firewallRule
-	}
-
-	// Go through except CIDRs and append DENY all rule to the L4 info
-	for _, firewallRule := range firewallRules {
-		if firewallRule.Except != nil {
-			for _, exceptCidr := range firewallRule.Except {
-				if _, ok := cidrsMap[string(exceptCidr)]; !ok {
-					exceptFirewall := EbpfFirewallRules{
-						IPCidr: exceptCidr,
-						Except: []v1alpha1.NetworkAddress{},
-						L4Info: []v1alpha1.Port{},
-					}
-					l.addDenyAllL4Entry(&exceptFirewall)
-					cidrsMap[string(exceptCidr)] = exceptFirewall
-				}
-				log().Debugf("Parsed Except CIDR:", string(exceptCidr))
-			}
-		}
-	}
-
-	for key, value := range cidrsMap {
-		log().Infof("Updating Map with IP Key: %s", string(key))
-		_, firewallMapKey, _ := net.ParseCIDR(string(key))
-		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-		firewallKey := utils.ComputeTrieKey(*firewallMapKey, l.enableIPv6)
-
-		if len(value.L4Info) != 0 {
-			mergedL4Info := mergeDuplicateL4Info(value.L4Info)
-			value.L4Info = mergedL4Info
-
-		}
-		firewallValue := utils.ComputeTrieValue(value.L4Info, false, false)
-		firewallMap[string(firewallKey)] = firewallValue
-	}
-
-	return firewallMap, nil
-}
-
-func (l *bpfClient) checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
-	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
-	var matchingCIDRL4Info []v1alpha1.Port
-
-	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
-	for cidr, cidrFirewallInfo := range cidrsMap {
-		if !utils.IsNonHostCIDR(cidr) {
-			continue
-		}
-		_, cidrEntry, _ := net.ParseCIDR(cidr)
-		if cidrEntry.Contains(ipToCheck.IP) {
-			log().Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)
-			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
-			foundInExcept := false
-			for _, except := range cidrFirewallInfo.Except {
-				_, exceptEntry, _ := net.ParseCIDR(string(except))
-				if exceptEntry.Contains(ipToCheck.IP) {
-					foundInExcept = true
-					log().Debugf("Found IP: %s in except block %s of CIDR %s. Skipping CIDR match", firewallRule, string(except), cidr)
-					break
-				}
-			}
-			if !foundInExcept {
-				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
-			}
-		}
-	}
-	return matchingCIDRL4Info
-}
-
-func (l *bpfClient) addCatchAllL4Entry(firewallRule *EbpfFirewallRules) {
-	catchAllL4Entry := v1alpha1.Port{
-		Protocol: &CATCH_ALL_PROTOCOL,
-	}
-	firewallRule.L4Info = append(firewallRule.L4Info, catchAllL4Entry)
-}
-
-func (l *bpfClient) addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
-	denyAllL4Entry := v1alpha1.Port{
-		Protocol: &DENY_ALL_PROTOCOL,
-	}
-	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
 func (l *bpfClient) DeletePodFromIngressProgPodCaches(podName string, podNamespace string) {
