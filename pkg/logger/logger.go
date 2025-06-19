@@ -23,15 +23,19 @@ type Logger interface {
 	WithFields(keyValues Fields) Logger
 }
 
-var (
-	DEFAULT_LOG_LEVEL    = "info"
-	DEFAULT_LOG_LOCATION = "/var/log/aws-routed-eni/network-policy-agent.log"
+const (
+	DEFAULT_LOG_LEVEL            = "info"
+	DEFAULT_LOG_LOCATION         = "/var/log/aws-routed-eni/network-policy-agent.log"
+	DEFAULT_LOG_FILE_MAX_SIZE    = 200
+	DEFAULT_LOG_FILE_MAX_BACKUPS = 8
 )
 
-func New(logLevel string, logLocation string) Logger {
+func New(logLevel string, logLocation string, logFileMaxSize int, logFileMaxBackups int) Logger {
 	inputLogConfig := &Configuration{
-		LogLevel:    logLevel,
-		LogLocation: logLocation,
+		LogLevel:          logLevel,
+		LogLocation:       logLocation,
+		LogFileMaxSize:    logFileMaxSize,
+		LogFileMaxBackups: logFileMaxBackups,
 	}
 	log = inputLogConfig.newZapLogger()
 	return log
@@ -39,7 +43,8 @@ func New(logLevel string, logLocation string) Logger {
 
 func Get() Logger {
 	if log == nil {
-		log = New(DEFAULT_LOG_LEVEL, DEFAULT_LOG_LOCATION)
+		log = New(DEFAULT_LOG_LEVEL, DEFAULT_LOG_LOCATION,
+			DEFAULT_LOG_FILE_MAX_SIZE, DEFAULT_LOG_FILE_MAX_BACKUPS)
 		log.Warn("Logger was not initialized explicitly, using default logger.")
 	}
 	return log

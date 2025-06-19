@@ -8,6 +8,7 @@ import (
 	policyendpoint "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/golang/mock/gomock"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -257,8 +258,8 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 	}
 
 	type want struct {
-		ingressRules      []ebpf.EbpfFirewallRules
-		egressRules       []ebpf.EbpfFirewallRules
+		ingressRules      []fwrp.EbpfFirewallRules
+		egressRules       []fwrp.EbpfFirewallRules
 		isIngressIsolated bool
 		isEgressIsolated  bool
 	}
@@ -415,7 +416,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 				},
 			},
 			want: want{
-				ingressRules: []ebpf.EbpfFirewallRules{
+				ingressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "1.1.1.1/32",
 						L4Info: []policyendpoint.Port{
@@ -426,7 +427,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 						},
 					},
 				},
-				egressRules: []ebpf.EbpfFirewallRules{
+				egressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "2.2.2.2/32",
 						L4Info: []policyendpoint.Port{
@@ -458,7 +459,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 				},
 			},
 			want: want{
-				ingressRules: []ebpf.EbpfFirewallRules{
+				ingressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "1.1.1.1/32",
 						L4Info: []policyendpoint.Port{
@@ -490,7 +491,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 				},
 			},
 			want: want{
-				egressRules: []ebpf.EbpfFirewallRules{
+				egressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "2.2.2.2/32",
 						L4Info: []policyendpoint.Port{
@@ -770,7 +771,7 @@ func TestAddCatchAllEntry(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
 	var port80 int32 = 80
 
-	sampleFirewallRules := []ebpf.EbpfFirewallRules{
+	sampleFirewallRules := []fwrp.EbpfFirewallRules{
 		{
 			IPCidr: "1.1.1.1/32",
 			L4Info: []policyendpoint.Port{
@@ -782,18 +783,18 @@ func TestAddCatchAllEntry(t *testing.T) {
 		},
 	}
 
-	catchAllFirewallRule := ebpf.EbpfFirewallRules{
+	catchAllFirewallRule := fwrp.EbpfFirewallRules{
 		IPCidr: "0.0.0.0/0",
 	}
 
-	var sampleFirewallRulesWithCatchAllEntry []ebpf.EbpfFirewallRules
+	var sampleFirewallRulesWithCatchAllEntry []fwrp.EbpfFirewallRules
 	sampleFirewallRulesWithCatchAllEntry = append(sampleFirewallRulesWithCatchAllEntry, sampleFirewallRules...)
 	sampleFirewallRulesWithCatchAllEntry = append(sampleFirewallRulesWithCatchAllEntry, catchAllFirewallRule)
 
 	tests := []struct {
 		name          string
-		firewallRules []ebpf.EbpfFirewallRules
-		want          []ebpf.EbpfFirewallRules
+		firewallRules []fwrp.EbpfFirewallRules
+		want          []fwrp.EbpfFirewallRules
 	}{
 		{
 			name:          "Append Catch All Entry",
@@ -994,8 +995,8 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 	}
 
 	type want struct {
-		ingressRules      []ebpf.EbpfFirewallRules
-		egressRules       []ebpf.EbpfFirewallRules
+		ingressRules      []fwrp.EbpfFirewallRules
+		egressRules       []fwrp.EbpfFirewallRules
 		isIngressIsolated bool
 		isEgressIsolated  bool
 	}
@@ -1118,7 +1119,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 				},
 			},
 			want: want{
-				ingressRules: []ebpf.EbpfFirewallRules{
+				ingressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "1.1.1.1/32",
 						L4Info: []policyendpoint.Port{
@@ -1129,7 +1130,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 						},
 					},
 				},
-				egressRules: []ebpf.EbpfFirewallRules{
+				egressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "2.2.2.2/32",
 						L4Info: []policyendpoint.Port{
@@ -1160,7 +1161,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 				},
 			},
 			want: want{
-				ingressRules: []ebpf.EbpfFirewallRules{
+				ingressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "1.1.1.1/32",
 						L4Info: []policyendpoint.Port{
@@ -1192,7 +1193,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 				},
 			},
 			want: want{
-				egressRules: []ebpf.EbpfFirewallRules{
+				egressRules: []fwrp.EbpfFirewallRules{
 					{
 						IPCidr: "2.2.2.2/32",
 						L4Info: []policyendpoint.Port{
