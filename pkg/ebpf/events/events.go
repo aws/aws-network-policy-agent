@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -57,7 +58,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(dropBytesTotal, dropCountTotal)
+	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal)
 }
 
 type ringBufferDataV4_t struct {

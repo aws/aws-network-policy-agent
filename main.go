@@ -35,7 +35,6 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/config"
-	"github.com/aws/aws-network-policy-agent/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -132,8 +131,6 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-
-	go metrics.ServeMetrics()
 
 	log.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
