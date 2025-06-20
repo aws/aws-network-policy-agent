@@ -317,9 +317,9 @@ type bpfClient struct {
 	interfaceNametoEgressPinPath map[string]string
 	// Stores podIdentifier to deletepod lock mapping
 	DeletePodIdentifierLock *sync.Map
-	// This is in-memory map backed by ingressBpfMap
+	// This is in-memory map backed by ingressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	ingressInMemoryMap map[string]*InMemoryBpfMap
-	// This is in-memory map backed by egressBpfMap
+	// This is in-memory map backed by egressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	egressInMemoryMap map[string]*InMemoryBpfMap
 	// FirewallRuleProcessor is used to convert firewall rules into ebpf Map content
 	fwRuleProcessor *fwrp.FirewallRuleProcessor
@@ -426,11 +426,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				val, found := bpfEntry.Maps[TC_INGRESS_MAP]
 				if found {
 					log().Infof("found ingress ebpf map for %v, map %+v", podIdentifier, val)
-					l.ingressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&val)
-					if err != nil {
-						log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
-					} else {
-						log().Infof("ingress map for %v loaded successfully", podIdentifier)
+					if _, ok := l.ingressInMemoryMap[podIdentifier]; !ok {
+						l.ingressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&val)
+						if err != nil {
+							log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
+						} else {
+							log().Infof("ingress map for %v loaded successfully", podIdentifier)
+						}
 					}
 				}
 			} else if direction == "egress" && !updateEgressProbe {
@@ -438,11 +440,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				val, found := bpfEntry.Maps[TC_EGRESS_MAP]
 				if found {
 					log().Infof("found egress ebpf map for %v, map %+v", podIdentifier, val)
-					l.egressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&val)
-					if err != nil {
-						log().Errorf("got err for egress in-mem map for %v, err %v", podIdentifier, err)
-					} else {
-						log().Infof("egress map for %v loaded successfully", podIdentifier)
+					if _, ok := l.egressInMemoryMap[podIdentifier]; !ok {
+						l.egressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&val)
+						if err != nil {
+							log().Errorf("got err for egress in-mem map for %v, err %v", podIdentifier, err)
+						} else {
+							log().Infof("egress map for %v loaded successfully", podIdentifier)
+						}
 					}
 				}
 			}
@@ -834,9 +838,8 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 			mapToUpdate := ingressProgInfo.Maps[TC_INGRESS_MAP]
 			log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s", ingressProgFD, TC_INGRESS_MAP)
 
-			log().Infof("ingressInMem map %+v, bpfMap %+v", l.ingressInMemoryMap, mapToUpdate)
 			if _, exists := l.ingressInMemoryMap[podIdentifier]; !exists {
-				log().Infof("didn't found ingress in-mem map for %v", podIdentifier)
+				log().Infof("Ingress in-mem map not found for %v", podIdentifier)
 				l.ingressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&mapToUpdate)
 				if err != nil {
 					log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
@@ -858,7 +861,6 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 
 			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s", egressProgFD, TC_EGRESS_MAP)
 
-			log().Infof("egressInMem map %+v, bpfMap %+v", l.egressInMemoryMap, mapToUpdate)
 			if _, exists := l.egressInMemoryMap[podIdentifier]; !exists {
 				log().Infof("didn't found egress in-mem map for %v", podIdentifier)
 				l.egressInMemoryMap[podIdentifier], err = NewInMemoryBpfMap(&mapToUpdate)
