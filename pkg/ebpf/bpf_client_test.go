@@ -546,7 +546,7 @@ func TestRecoverBPFState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			policyEndpointeBPFContext := new(sync.Map)
 			globapMaps := new(sync.Map)
-			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, _, _, gotError := recoverBPFState(mockTCClient, mockBpfClient, policyEndpointeBPFContext, globapMaps,
+			gotIsConntrackMapPresent, gotIsPolicyEventsMapPresent, gotEventsMapFD, _, _, gotError := NewMockBpfClient().recoverBPFState(mockTCClient, mockBpfClient, policyEndpointeBPFContext, globapMaps,
 				tt.updateIngressProbe, tt.updateEgressProbe, tt.updateEventsProbe)
 			assert.Equal(t, tt.want.isConntrackMapPresent, gotIsConntrackMapPresent)
 			assert.Equal(t, tt.want.isPolicyEventsMapPresent, gotIsPolicyEventsMapPresent)
