@@ -82,7 +82,7 @@ type ringBufferDataV6_t struct {
 	IsEgress   uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, cloudwatchLogLevel string) error {
 	// Enable logging and setup ring buffer
 	if mapFD <= 0 {
 		log().Errorf("MapFD is invalid %d", mapFD)
@@ -106,7 +106,7 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 			}
 		}
 		log().Debug("Configure Event loop ... ")
-		capturePolicyEvents(eventChanList[mapFD], enableCloudWatchLogs, enableIPv6)
+		capturePolicyEvents(eventChanList[mapFD], enableCloudWatchLogs, enableIPv6, cloudwatchLogLevel)
 	}
 	return nil
 }
@@ -187,7 +187,7 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 	return true
 }
 
-func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool) {
+func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool, cloudwatchLogLevel string) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
@@ -195,6 +195,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 		for record := range ringbufferdata {
 			var logQueue []*cloudwatchlogs.InputLogEvent
 			var message string
+			publishCloudwatchMessage := false
 			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
@@ -216,6 +217,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
 					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
 						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+					publishCloudwatchMessage = true
 				} else {
 					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
 						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
@@ -241,6 +243,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
 					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
 						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+					publishCloudwatchMessage = true
 				} else {
 					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
 						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
@@ -249,7 +252,11 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}
 
-			if enableCloudWatchLogs {
+			if cloudwatchLogLevel == "debug" {
+				publishCloudwatchMessage = true
+			}
+
+			if enableCloudWatchLogs && publishCloudwatchMessage {
 				done = publishDataToCloudwatch(logQueue, message)
 				if done {
 					break
