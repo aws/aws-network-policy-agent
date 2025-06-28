@@ -7,6 +7,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+// IPBlock holds one CIDR plus its except list.
+type IPBlock struct {
+	CIDR   string
+	Except []string
+}
+
 type IngressRuleBuilder struct {
 	From []network.NetworkPolicyPeer
 	Port []network.NetworkPolicyPort
@@ -35,33 +41,38 @@ func (ir *IngressRuleBuilder) Build() network.NetworkPolicyIngressRule {
 	return obj
 }
 
-func (ir *IngressRuleBuilder) AddPeer(nsSelector map[string]string, podSelector map[string]string, acceptCIDR string) *IngressRuleBuilder {
-	peerObj := network.NetworkPolicyPeer{}
-
-	if podSelector != nil {
-		peerObj.PodSelector = &metav1.LabelSelector{
-			MatchLabels: podSelector,
+// AddIPBlocks appends one or more IPBlock-based peers.
+func (ir *IngressRuleBuilder) AddIPBlocks(nsSelector map[string]string, podSelector map[string]string, blocks ...IPBlock) *IngressRuleBuilder {
+	for _, blk := range blocks {
+		peer := network.NetworkPolicyPeer{}
+		if podSelector != nil {
+			peer.PodSelector = &metav1.LabelSelector{MatchLabels: podSelector}
 		}
-	}
-
-	if nsSelector != nil {
-		peerObj.NamespaceSelector = &metav1.LabelSelector{
-			MatchLabels: nsSelector,
+		if nsSelector != nil {
+			peer.NamespaceSelector = &metav1.LabelSelector{MatchLabels: nsSelector}
 		}
-	}
-
-	if acceptCIDR != "" {
-		peerObj.IPBlock = &network.IPBlock{
-			CIDR: acceptCIDR,
+		if blk.CIDR != "" {
+			peer.IPBlock = &network.IPBlock{
+				CIDR:   blk.CIDR,
+				Except: blk.Except,
+			}
 		}
+		ir.From = append(ir.From, peer)
 	}
-	ir.From = append(ir.From, peerObj)
 	return ir
 }
 
+// AddPeer creates a single IPBlock peer from cidr and optional except lists.
+func (ir *IngressRuleBuilder) AddPeer(nsSelector map[string]string, podSelector map[string]string, cidr string, except ...string) *IngressRuleBuilder {
+	blk := IPBlock{CIDR: cidr, Except: except}
+	return ir.AddIPBlocks(nsSelector, podSelector, blk)
+}
+
 func (ir *IngressRuleBuilder) AddPort(port int, protocol v1.Protocol) *IngressRuleBuilder {
-	portObj := network.NetworkPolicyPort{
-		Protocol: &protocol,
+	portObj := network.NetworkPolicyPort{}
+
+	if string(protocol) != "" {
+		portObj.Protocol = &protocol
 	}
 
 	if port != -1 {
@@ -91,32 +102,17 @@ func (er *EgressRuleBuilder) Build() network.NetworkPolicyEgressRule {
 	return obj
 }
 
-func (er *EgressRuleBuilder) AddPeer(nsSelector map[string]string, podSelector map[string]string, acceptCIDR string) *EgressRuleBuilder {
-	peerObj := network.NetworkPolicyPeer{}
-	if podSelector != nil {
-		peerObj.PodSelector = &metav1.LabelSelector{
-			MatchLabels: podSelector,
-		}
-	}
-	if nsSelector != nil {
-		peerObj.NamespaceSelector = &metav1.LabelSelector{
-			MatchLabels: nsSelector,
-		}
-	}
-
-	if acceptCIDR != "" {
-		peerObj.IPBlock = &network.IPBlock{
-			CIDR: acceptCIDR,
-		}
-	}
-
-	er.To = append(er.To, peerObj)
-	return er
+// AddPeer creates a single IPBlock peer from cidr and optional except lists.
+func (er *EgressRuleBuilder) AddPeer(nsSelector map[string]string, podSelector map[string]string, cidr string, except ...string) *EgressRuleBuilder {
+	blk := IPBlock{CIDR: cidr, Except: except}
+	return er.AddIPBlocks(nsSelector, podSelector, blk)
 }
 
 func (er *EgressRuleBuilder) AddPort(port int, protocol v1.Protocol) *EgressRuleBuilder {
-	portObj := network.NetworkPolicyPort{
-		Protocol: &protocol,
+	portObj := network.NetworkPolicyPort{}
+
+	if string(protocol) != "" {
+		portObj.Protocol = &protocol
 	}
 
 	if port != -1 {
@@ -125,5 +121,26 @@ func (er *EgressRuleBuilder) AddPort(port int, protocol v1.Protocol) *EgressRule
 	}
 
 	er.Port = append(er.Port, portObj)
+	return er
+}
+
+// AddIPBlocks appends one or more IPBlock-based peers.
+func (er *EgressRuleBuilder) AddIPBlocks(nsSelector map[string]string, podSelector map[string]string, blocks ...IPBlock) *EgressRuleBuilder {
+	for _, blk := range blocks {
+		peer := network.NetworkPolicyPeer{}
+		if podSelector != nil {
+			peer.PodSelector = &metav1.LabelSelector{MatchLabels: podSelector}
+		}
+		if nsSelector != nil {
+			peer.NamespaceSelector = &metav1.LabelSelector{MatchLabels: nsSelector}
+		}
+		if blk.CIDR != "" {
+			peer.IPBlock = &network.IPBlock{
+				CIDR:   blk.CIDR,
+				Except: blk.Except,
+			}
+		}
+		er.To = append(er.To, peer)
+	}
 	return er
 }
