@@ -99,7 +99,7 @@ func main() {
 		}
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, ctrlConfig.CloudwatchLogLevel))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)

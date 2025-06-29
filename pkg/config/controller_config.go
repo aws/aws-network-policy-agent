@@ -9,11 +9,13 @@ import (
 )
 
 const (
+	flagCloudwatchLogLevel             = "cloudwatch-log-level"
 	flagLogLevel                       = "log-level"
 	flagLogFile                        = "log-file"
 	flagLogFileMaxSize                 = "log-file-max-size"
 	flagLogFileMaxBackups              = "log-file-max-backups"
 	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
+	defaultCloudwatchLogLevel          = "debug"
 	defaultLogLevel                    = "debug"
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
@@ -31,6 +33,8 @@ const (
 
 // ControllerConfig contains the controller configuration
 type ControllerConfig struct {
+	// Log level for the cloudwatch logs
+	CloudwatchLogLevel string
 	// Log level for the controller logs
 	LogLevel string
 	// Local log file for Network Policy Agent
@@ -58,6 +62,8 @@ type ControllerConfig struct {
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
+	fs.StringVar(&cfg.CloudwatchLogLevel, flagCloudwatchLogLevel, defaultCloudwatchLogLevel,
+		"Set the cloudwatch log level - info, debug")
 	fs.StringVar(&cfg.LogLevel, flagLogLevel, defaultLogLevel,
 		"Set the controller log level - info, debug")
 	fs.StringVar(&cfg.LogFile, flagLogFile, defaultLogFile, ""+
