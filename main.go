@@ -35,7 +35,6 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/config"
-	"github.com/aws/aws-network-policy-agent/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -56,7 +55,7 @@ func init() {
 }
 
 func main() {
-	initLogger := logger.New("info", "")
+	initLogger := logger.New("info", "", logger.DEFAULT_LOG_FILE_MAX_SIZE, logger.DEFAULT_LOG_FILE_MAX_BACKUPS)
 
 	ctrlConfig, err := loadControllerConfig()
 	if err != nil {
@@ -64,7 +63,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile)
+	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
 	log.Infof("Starting network policy agent with log level: %s", ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
@@ -132,8 +131,6 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-
-	go metrics.ServeMetrics()
 
 	log.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
