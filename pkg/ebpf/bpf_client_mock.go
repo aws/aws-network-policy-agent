@@ -24,7 +24,7 @@ func NewMockBpfClient() BpfClient {
 
 type MockBpfClient struct{}
 
-func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	return nil
 }
 
@@ -72,4 +72,8 @@ func (m *MockBpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
 
 func (m *MockBpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
 	return nil
+}
+
+func (m *MockBpfClient) GetNetworkPolicyMode() string {
+	return "standard"
 }

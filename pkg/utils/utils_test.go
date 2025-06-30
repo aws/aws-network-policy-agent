@@ -697,7 +697,7 @@ func TestGetHostVethName(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix)
+			got, err := GetHostVethName(tt.args.podName, tt.args.podNamespace, 0, tt.args.interfacePrefix)
 			assert.Equal(t, tt.want, got)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)

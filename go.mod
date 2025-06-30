@@ -85,6 +85,9 @@ require (
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.2 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
+	github.com/containernetworking/plugins v1.5.1 // indirect
+	github.com/coreos/go-iptables v0.8.0 // indirect
+	github.com/sirupsen/logrus v1.9.3 // indirect
 )
 
 replace github.com/aws/amazon-vpc-cni-k8s => ./amazon-vpc-cni-k8s

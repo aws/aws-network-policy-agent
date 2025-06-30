@@ -2,9 +2,10 @@ package ebpf
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	"net"
 	"sort"
@@ -16,6 +17,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
 	"github.com/aws/amazon-vpc-cni-k8s/rpc"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
@@ -64,9 +66,10 @@ var (
 	LOCAL_IPAMD_ADDRESS                        = "127.0.0.1:50051"
 	POD_STATE_MAP_KEY                          = 0
 	BRANCH_ENI_VETH_PREFIX                     = "vlan"
+	INTERFACE_COUNT_UNKNOWN                    = -1 // Used when caller doesn't know interface count
+	INTERFACE_COUNT_DEFAULT                    = 1  // Default single interface
+	IPAM_JSON_PATH                             = "/var/run/aws-node/ipam.json"
 )
-
-var ErrSkipAttach = errors.New("skipping probe attach: multiNIC enabled and probes not already attached")
 
 func log() logger.Logger {
 	return logger.Get()
@@ -108,7 +111,7 @@ func prometheusRegister() {
 }
 
 type BpfClient interface {
-	CheckAndAttacheBPFProbes(pod types.NamespacedName, policyEndpoint string, numInterfaces int, skipAttachProbes bool) (bool, error)
+	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string, numInterfaces int) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []EbpfFirewallRules, egressFirewallRules []EbpfFirewallRules) error
 	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
@@ -157,6 +160,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		EgressProgToPodsMap:       new(sync.Map),
 		AttachProbesToPodLock:     new(sync.Map),
 		DeletePodIdentifierLock:   new(sync.Map),
+		podNameToInterfaceCount:   new(sync.Map),
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -293,6 +297,15 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 	ebpfClient.networkPolicyMode = networkPolicyMode
 	ebpfClient.isMultiNICEnabled = isMultiNICEnabled
 
+	// Load ipam.json data only when multi-NIC is enabled for interface counts
+	if isMultiNICEnabled {
+		err = ebpfClient.loadIPAMDataFromFile(IPAM_JSON_PATH)
+		if err != nil {
+			log().Errorf("Failed to load IPAM data: %v", err)
+			return nil, err
+		}
+	}
+
 	// Initializes prometheus metrics
 	prometheusRegister()
 
@@ -343,6 +356,9 @@ type bpfClient struct {
 	networkPolicyMode string
 	// multi nic enabled flag
 	isMultiNICEnabled bool
+	// maps pod namespaced name to interface count
+	// This is loaded once at startup and will not be up to date on new pod info
+	podNameToInterfaceCount *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -355,13 +371,13 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 		}
 
 		log().Infof("Validating Probe: %s", bpfProbe)
-		currentProbe, err := ioutil.ReadFile(bpfProbe)
+		currentProbe, err := os.ReadFile(bpfProbe)
 		if err != nil {
 			log().Errorf("error opening Probe: %s error: %v", bpfProbe, err)
 		}
 
 		existingProbePath = hostBinaryPath + bpfProbe
-		existingProbe, err := ioutil.ReadFile(existingProbePath)
+		existingProbe, err := os.ReadFile(existingProbePath)
 		if err != nil {
 			log().Errorf("error opening Probe: %s error: %v", existingProbePath, err)
 		}
@@ -589,7 +605,71 @@ func (l *bpfClient) GetNetworkPolicyMode() string {
 	return l.networkPolicyMode
 }
 
-func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, skipAttachProbes bool) (bool, error) {
+// loadIPAMDataFromFile reads IPAM JSON file from specified path and caches pod to interface count mapping
+func (l *bpfClient) loadIPAMDataFromFile(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read ipam.json file: %v", err)
+	}
+
+	var checkpointData datastore.CheckpointData
+	if err := json.Unmarshal(data, &checkpointData); err != nil {
+		return fmt.Errorf("failed to parse ipam.json: %v", err)
+	}
+
+	// Store interface count per pod from IPAM data
+	for _, entry := range checkpointData.Allocations {
+		// Skip entries with missing pod information
+		if entry.Metadata.K8SPodName == "" || entry.Metadata.K8SPodNamespace == "" {
+			continue
+		}
+
+		podNamespacedName := utils.GetPodNamespacedName(entry.Metadata.K8SPodName, entry.Metadata.K8SPodNamespace)
+		if entry.Metadata.InterfacesCount > 0 {
+			l.podNameToInterfaceCount.Store(podNamespacedName, entry.Metadata.InterfacesCount)
+			log().Debugf("Cached interface count for pod %s: %d", podNamespacedName, entry.Metadata.InterfacesCount)
+		}
+	}
+
+	log().Infof("Loaded IPAM data from %d allocations", len(checkpointData.Allocations))
+	return nil
+}
+
+// getInterfaceCountFromBackupFile attempts to read interface count from ipam.json loaded in podNameToInterfaceCount cache
+func (l *bpfClient) getInterfaceCountFromBackupFile(pod types.NamespacedName, podIdentifier string) (int, error) {
+	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+	if count, ok := l.podNameToInterfaceCount.Load(podNamespacedName); ok {
+		return count.(int), nil
+	}
+	return 0, errors.New("interface count not found in podNameToInterfaceCount cache")
+}
+
+// getInterfaceCountForPod determines the number of interfaces for a pod
+// Returns the interface count or an error if it cannot be determined
+func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentifier string, providedCount int) (int, error) {
+	// If interface count is provided (from RPC call), use it
+	if providedCount > 0 {
+		return providedCount, nil
+	}
+
+	// If multi-NIC is not enabled, default to 1 interface
+	if !l.isMultiNICEnabled {
+		return INTERFACE_COUNT_DEFAULT, nil
+	}
+
+	// Multi-NIC is enabled but we don't have interface count
+	// Try to get interface count from podNameToInterfaceCount cache
+	backupInterfaceCount, err := l.getInterfaceCountFromBackupFile(pod, podIdentifier)
+	if err == nil && backupInterfaceCount > 0 {
+		log().Infof("Found interface count %d from cache for pod %s", backupInterfaceCount, pod.Name)
+		return backupInterfaceCount, nil
+	}
+
+	// No interface count available and multi-NIC enabled - skip attachment
+	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
+}
+
+func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	var ingressProgFD int
 	var egressProgFD int
 
@@ -604,26 +684,27 @@ func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdenti
 	defer attachProbesLock.Unlock()
 
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
-	// If yes, then skip probe attach flow for this pod and update the relevant map entries.
+	// If yes, then skip probe attach flow for this pod.
 	isIngressProbeAttached, isEgressProbeAttached := l.IsEBPFProbeAttached(pod.Name, pod.Namespace)
-
 	if isIngressProbeAttached && isEgressProbeAttached {
-		return true, nil
+		return nil
 	}
 
-	if skipAttachProbes {
-		log().Infof("Pod does not have probes attached yet. Pod: %s PodIdentifier: %s", pod.Name, podIdentifier)
-		return false, nil
+	// Determine the actual number of interfaces to attach probes to
+	actualInterfaceCount, err := l.getInterfaceCountForPod(pod, podIdentifier, numInterfaces)
+	if err != nil {
+		return err
 	}
+
+	numInterfaces = actualInterfaceCount
 
 	for index := 0; index < numInterfaces; index++ {
-		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth
-		// name from the Name and Namespace of the Pod.
+		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth name from the Name and Namespace of the Pod.
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
 		hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 		if err != nil {
 			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
-			return false, err
+			return err
 		}
 
 		log().Infof("AttacheBPFProbes for pod %s in namespace %s with hostVethName %s at interface %d", pod.Name, pod.Namespace, hostVethName, index)
@@ -636,7 +717,7 @@ func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdenti
 			if err != nil {
 				log().Errorf("Failed to Attach Ingress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
-				return false, err
+				return err
 			}
 			log().Infof("Successfully attached Ingress TC probe for pod: %s in namespace %s at interface %d", pod.Name, pod.Namespace, index)
 		}
@@ -649,7 +730,7 @@ func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdenti
 			if err != nil {
 				log().Errorf("Failed to Attach Egress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
-				return false, err
+				return err
 			}
 			log().Infof("Successfully attached Egress TC probe for pod: %s in namespace %s at interface %d", pod.Name, pod.Namespace, index)
 		}
@@ -665,7 +746,7 @@ func (l *bpfClient) CheckAndAttacheBPFProbes(pod types.NamespacedName, podIdenti
 		currentPodSet, _ := l.EgressProgToPodsMap.LoadOrStore(egressProgFD, make(map[string]struct{}))
 		currentPodSet.(map[string]struct{})[podNamespacedName] = struct{}{}
 	}
-	return true, nil
+	return nil
 }
 
 func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (int, error) {

@@ -1,7 +1,10 @@
 package ebpf
 
 import (
+	"errors"
+	"fmt"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -615,59 +618,90 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		testPod       types.NamespacedName
-		podIdentifier string
-		wantErr       error
+		name              string
+		testPod           types.NamespacedName
+		podIdentifier     string
+		numInterfaces     int
+		isMultiNICEnabled bool
+		wantErr           error
+		wantTCAttachCalls int
 	}{
 		{
-			name:          "Ingress and Egress Attach - Existing probes",
-			testPod:       testPod,
-			podIdentifier: utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
-			wantErr:       nil,
+			name:              "Single interface - existing probes",
+			testPod:           testPod,
+			podIdentifier:     utils.GetPodIdentifier(testPod.Name, testPod.Namespace),
+			numInterfaces:     1,
+			isMultiNICEnabled: false,
+			wantErr:           nil,
+			wantTCAttachCalls: 2,
 		},
 		{
-			name:    "Ingress and Egress Attach - New probes",
-			testPod: testPod,
-			wantErr: nil,
+			name:              "Multiple interfaces - 3 interfaces",
+			testPod:           testPod,
+			podIdentifier:     "test-pod-multi",
+			numInterfaces:     3,
+			isMultiNICEnabled: true,
+			wantErr:           nil,
+			wantTCAttachCalls: 6,
+		},
+		{
+			name:              "Multi-NIC enabled but no interface count",
+			testPod:           testPod,
+			podIdentifier:     "test-pod-skip",
+			numInterfaces:     0,
+			isMultiNICEnabled: true,
+			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantTCAttachCalls: 0,
+		},
+		{
+			name:              "Multi-NIC disabled defaults to single interface",
+			testPod:           testPod,
+			podIdentifier:     "test-pod-default",
+			numInterfaces:     0,
+			isMultiNICEnabled: false,
+			wantErr:           nil,
+			wantTCAttachCalls: 2,
 		},
 	}
+
 	for _, tt := range tests {
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-		mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-		mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-		mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-
-		mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-		mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
-
-		testBpfClient := &bpfClient{
-			nodeIP:                    "10.1.1.1",
-			enableIPv6:                false,
-			hostMask:                  "/32",
-			policyEndpointeBPFContext: new(sync.Map),
-			bpfSDKClient:              mockBpfClient,
-			bpfTCClient:               mockTCClient,
-			IngressPodToProgMap:       new(sync.Map),
-			EgressPodToProgMap:        new(sync.Map),
-			IngressProgToPodsMap:      new(sync.Map),
-			EgressProgToPodsMap:       new(sync.Map),
-			AttachProbesToPodLock:     new(sync.Map),
-		}
-
-		sampleBPFContext := BPFContext{
-			ingressPgmInfo: sampleIngressPgmInfo,
-			egressPgmInfo:  sampleEgressPgmInfo,
-		}
-		testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
-
-		utils.GetHostVethName = func(podName, podNamespace string, prefixes []string) (string, error) {
-			return "mockedveth0", nil
-		}
-
 		t.Run(tt.name, func(t *testing.T) {
-			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier)
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+			mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
+			mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
+
+			testBpfClient := &bpfClient{
+				nodeIP:                    "10.1.1.1",
+				enableIPv6:                false,
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+				bpfSDKClient:              mockBpfClient,
+				bpfTCClient:               mockTCClient,
+				IngressPodToProgMap:       new(sync.Map),
+				EgressPodToProgMap:        new(sync.Map),
+				IngressProgToPodsMap:      new(sync.Map),
+				EgressProgToPodsMap:       new(sync.Map),
+				AttachProbesToPodLock:     new(sync.Map),
+				isMultiNICEnabled:         tt.isMultiNICEnabled,
+				podNameToInterfaceCount:   new(sync.Map),
+			}
+
+			sampleBPFContext := BPFContext{
+				ingressPgmInfo: sampleIngressPgmInfo,
+				egressPgmInfo:  sampleEgressPgmInfo,
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
+
+			utils.GetHostVethName = func(podName, podNamespace string, index int, prefixes []string) (string, error) {
+				return fmt.Sprintf("mockedveth%d", index), nil
+			}
+
+			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
@@ -979,6 +1013,251 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 		})
 	}
 
+}
+
+func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
+	testPod := types.NamespacedName{
+		Name:      "testPod",
+		Namespace: "testNS",
+	}
+
+	tests := []struct {
+		name                        string
+		providedCount               int
+		isMultiNICEnabled           bool
+		podNameToInterfaceCountData map[string]int
+		wantCount                   int
+		wantErr                     error
+	}{
+		{
+			name:          "Provided count takes precedence",
+			providedCount: 3,
+			wantCount:     3,
+			wantErr:       nil,
+		},
+		{
+			name:              "Multi-NIC disabled defaults to 1",
+			providedCount:     0,
+			isMultiNICEnabled: false,
+			wantCount:         1,
+			wantErr:           nil,
+		},
+		{
+			name:                        "Multi-NIC enabled with IPAM cache data",
+			providedCount:               0,
+			isMultiNICEnabled:           true,
+			podNameToInterfaceCountData: map[string]int{"testPodtestNS": 2},
+			wantCount:                   2,
+			wantErr:                     nil,
+		},
+		{
+			name:              "Multi-NIC enabled without data returns skip error",
+			providedCount:     0,
+			isMultiNICEnabled: true,
+			wantCount:         0,
+			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				isMultiNICEnabled:       tt.isMultiNICEnabled,
+				podNameToInterfaceCount: new(sync.Map),
+			}
+
+			for key, count := range tt.podNameToInterfaceCountData {
+				testBpfClient.podNameToInterfaceCount.Store(key, count)
+			}
+
+			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(testPod, "test-pod-id", tt.providedCount)
+			assert.Equal(t, tt.wantCount, gotCount)
+			assert.Equal(t, tt.wantErr, gotErr)
+		})
+	}
+}
+
+func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
+	testPod := types.NamespacedName{
+		Name:      "multi-nic-pod",
+		Namespace: "default",
+	}
+	podIdentifier := "multi-nic-pod-default"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCIngressAttach("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressAttach("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
+
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
+		map[string]goelf.BpfData{
+			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_ingress": {
+				Program: goebpfprogs.BpfProgram{ProgFD: 10},
+			},
+		},
+		map[string]goebpfmaps.BpfMap{},
+		nil,
+	).Times(1)
+	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
+		map[string]goelf.BpfData{
+			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_egress": {
+				Program: goebpfprogs.BpfProgram{ProgFD: 11},
+			},
+		},
+		map[string]goebpfmaps.BpfMap{},
+		nil,
+	).Times(1)
+
+	testBpfClient := &bpfClient{
+		nodeIP:                    "10.1.1.1",
+		enableIPv6:                false,
+		hostMask:                  "/32",
+		policyEndpointeBPFContext: new(sync.Map),
+		bpfSDKClient:              mockBpfClient,
+		bpfTCClient:               mockTCClient,
+		IngressPodToProgMap:       new(sync.Map),
+		EgressPodToProgMap:        new(sync.Map),
+		IngressProgToPodsMap:      new(sync.Map),
+		EgressProgToPodsMap:       new(sync.Map),
+		AttachProbesToPodLock:     new(sync.Map),
+		isMultiNICEnabled:         true,
+		ingressBinary:             "tc.v4ingress.bpf.o",
+		egressBinary:              "tc.v4egress.bpf.o",
+	}
+
+	utils.GetHostVethName = func(podName, podNamespace string, index int, prefixes []string) (string, error) {
+		return fmt.Sprintf("mockedveth%d", index), nil
+	}
+
+	err := testBpfClient.AttacheBPFProbes(testPod, podIdentifier, 2)
+	assert.NoError(t, err)
+
+	podNamespacedName := utils.GetPodNamespacedName(testPod.Name, testPod.Namespace)
+	_, ingressExists := testBpfClient.IngressPodToProgMap.Load(podNamespacedName)
+	_, egressExists := testBpfClient.EgressPodToProgMap.Load(podNamespacedName)
+	assert.True(t, ingressExists)
+	assert.True(t, egressExists)
+}
+
+func TestBpfClient_loadIPAMData(t *testing.T) {
+	tests := []struct {
+		name       string
+		ipamData   string
+		wantErr    bool
+		wantCached map[string]int
+	}{
+		{
+			name: "Valid IPAM data",
+			ipamData: `{
+				"allocations": [
+					{
+						"metadata": {
+							"k8sPodName": "test-pod",
+							"k8sPodNamespace": "default",
+							"interfacesCount": 2
+						}
+					},
+					{
+						"metadata": {
+							"k8sPodName": "multi-pod",
+							"k8sPodNamespace": "kube-system",
+							"interfacesCount": 3
+						}
+					}
+				]
+			}`,
+			wantErr: false,
+			wantCached: map[string]int{
+				"test-poddefault":      2,
+				"multi-podkube-system": 3,
+			},
+		},
+		{
+			name:     "Invalid JSON",
+			ipamData: `{invalid json}`,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile, err := os.CreateTemp("", "ipam-test-*.json")
+			assert.NoError(t, err)
+			defer os.Remove(tmpFile.Name())
+
+			_, err = tmpFile.WriteString(tt.ipamData)
+			assert.NoError(t, err)
+			tmpFile.Close()
+
+			testBpfClient := &bpfClient{
+				podNameToInterfaceCount: new(sync.Map),
+			}
+
+			err = testBpfClient.loadIPAMDataFromFile(tmpFile.Name())
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				for key, expectedCount := range tt.wantCached {
+					count, ok := testBpfClient.podNameToInterfaceCount.Load(key)
+					assert.True(t, ok)
+					assert.Equal(t, expectedCount, count)
+				}
+			}
+		})
+	}
+}
+
+func TestBpfClient_getInterfaceCountFromBackupFile(t *testing.T) {
+	testPod := types.NamespacedName{
+		Name:      "test-pod",
+		Namespace: "default",
+	}
+
+	tests := []struct {
+		name      string
+		cacheData map[string]int
+		wantCount int
+		wantErr   bool
+	}{
+		{
+			name:      "Interface count found in cache",
+			cacheData: map[string]int{"test-poddefault": 2},
+			wantCount: 2,
+			wantErr:   false,
+		},
+		{
+			name:      "Interface count not found in cache",
+			cacheData: map[string]int{},
+			wantCount: 0,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				podNameToInterfaceCount: new(sync.Map),
+			}
+
+			for key, count := range tt.cacheData {
+				testBpfClient.podNameToInterfaceCount.Store(key, count)
+			}
+
+			gotCount, gotErr := testBpfClient.getInterfaceCountFromBackupFile(testPod, "test-pod-id")
+			assert.Equal(t, tt.wantCount, gotCount)
+			if tt.wantErr {
+				assert.Error(t, gotErr)
+			} else {
+				assert.NoError(t, gotErr)
+			}
+		})
+	}
 }
 
 func Int32Ptr(i int32) *int32 {
