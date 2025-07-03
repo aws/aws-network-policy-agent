@@ -226,7 +226,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
@@ -245,7 +245,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
