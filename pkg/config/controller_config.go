@@ -27,6 +27,8 @@ const (
 	flagEnableNetworkPolicy            = "enable-network-policy"
 	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
 	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
+	flagRPCPort                        = "rpc-port"
+	defaultRPCPort                     = 50052
 )
 
 // ControllerConfig contains the controller configuration
@@ -53,6 +55,8 @@ type ControllerConfig struct {
 	ConntrackCacheCleanupPeriod int
 	// ConntrackTableSize specifies the conntrack table size for the agent
 	ConntrackCacheTableSize int
+	// Port used by the agent gRPC server (0 means select dynamically starting from the default)
+	RPCPort int
 	// Configurations for the Controller Runtime
 	RuntimeConfig RuntimeConfig
 }
@@ -76,6 +80,8 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
 		"Table size for network policy agent conntrack cache")
+	fs.IntVar(&cfg.RPCPort, flagRPCPort, defaultRPCPort,
+		"Port for the agent gRPC server (0 will trigger dynamic selection)")
 
 	cfg.RuntimeConfig.BindFlags(fs)
 }
@@ -85,6 +91,10 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 	// Validate conntrack cache table size
 	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
+	}
+	// Validate RPC port (0 allows automatic selection)
+	if cfg.RPCPort < 0 || cfg.RPCPort > 65535 {
+		return errors.New("Invalid rpc-port value, must be between 0 and 65535 (or 0 for dynamic)")
 	}
 	return nil
 }

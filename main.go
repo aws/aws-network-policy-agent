@@ -126,7 +126,7 @@ func main() {
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
 	go func() {
-		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
+		if err := rpc.RunRPCHandler(policyEndpointController, ctrlConfig.RPCPort); err != nil {
 			log.Errorf("Failed to set up gRPC Handler %v", err)
 			os.Exit(1)
 		}
