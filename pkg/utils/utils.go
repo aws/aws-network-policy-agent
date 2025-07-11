@@ -36,6 +36,7 @@ var (
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
+	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
 	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
@@ -258,7 +259,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 }
 
 func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
-	protocol := TCP_PROTOCOL_NUMBER //ProtocolTCP
+	protocol := ANY_IP_PROTOCOL
 
 	if denyAll {
 		return RESERVED_IP_PROTOCOL_NUMBER
@@ -269,15 +270,19 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	}
 
 	if l4Info.Protocol == nil {
-		return protocol //Protocol defaults TCP if not specified
+		return protocol //Protocol defaults to ANY_IP_PROTOCOL if not specified
 	}
 
-	if *l4Info.Protocol == corev1.ProtocolUDP {
+	if *l4Info.Protocol == corev1.ProtocolTCP {
+		protocol = TCP_PROTOCOL_NUMBER
+	} else if *l4Info.Protocol == corev1.ProtocolUDP {
 		protocol = UDP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == corev1.ProtocolSCTP {
 		protocol = SCTP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == CATCH_ALL_PROTOCOL {
 		protocol = ANY_IP_PROTOCOL
+	} else if *l4Info.Protocol == DENY_ALL_PROTOCOL {
+		protocol = RESERVED_IP_PROTOCOL_NUMBER
 	}
 
 	return protocol
@@ -306,14 +311,6 @@ func IsMissingFilterError(error string) bool {
 	return false
 }
 
-func IsCatchAllIPEntry(ipAddr string) bool {
-	ipSplit := strings.Split(ipAddr, "/")
-	if ipSplit[1] == "0" { //if ipSplit[0] == "0.0.0.0" && ipSplit[1] == "0" {
-		return true
-	}
-	return false
-}
-
 func IsNodeIP(nodeIP string, ipCidr string) bool {
 	ipAddr, _, _ := net.ParseCIDR(ipCidr)
 	if net.ParseIP(nodeIP).Equal(ipAddr) {
@@ -325,7 +322,7 @@ func IsNodeIP(nodeIP string, ipCidr string) bool {
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
-	if ipSplit[1] != "32" && ipSplit[1] != "128" && ipSplit[1] != "0" {
+	if ipSplit[1] != "32" && ipSplit[1] != "128" {
 		return true
 	}
 	return false
