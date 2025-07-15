@@ -29,6 +29,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 var (
@@ -96,8 +97,8 @@ func msSince(start time.Time) float64 {
 
 func prometheusRegister() {
 	if !prometheusRegistered {
-		prometheus.MustRegister(sdkAPILatency)
-		prometheus.MustRegister(sdkAPIErr)
+		metrics.Registry.MustRegister(sdkAPILatency)
+		metrics.Registry.MustRegister(sdkAPIErr)
 		prometheusRegistered = true
 	}
 }

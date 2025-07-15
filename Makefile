@@ -12,7 +12,6 @@ MAKEFILE_PATH = $(dir $(realpath -s $(firstword $(MAKEFILE_LIST))))
 
 export GOPROXY = direct
 export GOSUMDB = sum.golang.org
-export GOTOOLCHAIN = go$(GOLANG_VERSION)
 
 # aws-ebpf-sdk-go override in case we need to build against a custom version
 EBPF_SDK_OVERRIDE ?= "n"

@@ -84,8 +84,8 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	for _, firewallRule := range firewallRules {
 		// Keep track of except CIDRs to handle later
 		for _, exceptCidr := range firewallRule.Except {
-        	exceptCidrs[string(exceptCidr)] = struct{}{}
-    	}
+			exceptCidrs[string(exceptCidr)] = struct{}{}
+		}
 
 		var cidrL4Info []v1alpha1.Port
 
