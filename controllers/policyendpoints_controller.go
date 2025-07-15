@@ -112,16 +112,10 @@ type PolicyEndpointsReconciler struct {
 	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
-	// NetworkPolicy mode standard/strict
-	networkPolicyMode string
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints/status,verbs=get
-
-func (r *PolicyEndpointsReconciler) SetNetworkPolicyMode(mode string) {
-	r.networkPolicyMode = mode
-}
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log().Infof("Received a new reconcile request request %v", req)
@@ -318,10 +312,10 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			log().Debugf("Target Pod doesn't belong to the current pod Identifier: Name: %s Pod ID: %s", pod.Name, podIdentifier)
 			continue
 		}
-		log().Infof("Processing Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
-		err = r.ebpfClient.AttacheBPFProbes(pod, podIdentifier)
+
+		err := r.ebpfClient.AttacheBPFProbes(pod, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
 		if err != nil {
-			log().Errorf("Attaching eBPF probe failed for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
+			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
@@ -365,10 +359,10 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 		// We update pod_state to default allow/deny if there are no other policies applied
 		if noActiveIngressPolicies && noActiveEgressPolicies {
 			state := DEFAULT_ALLOW
-			if utils.IsStrictMode(r.networkPolicyMode) {
+			if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
 				state = DEFAULT_DENY
 			}
-			log().Infof("No active policies. Updating pod_state map for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.networkPolicyMode)
+			log().Infof("No active policies. Updating pod_state map for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
 			err = r.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, state, true, true)
 			if err != nil {
 				log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
