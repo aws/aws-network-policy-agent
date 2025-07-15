@@ -315,7 +315,7 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 
 		err := r.ebpfClient.AttacheBPFProbes(pod, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
 		if err != nil {
-			log().Errorf("Failed to attach eBPF probes for pod %s: %v", pod.Name, err)
+			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)

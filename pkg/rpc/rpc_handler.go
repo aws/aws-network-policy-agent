@@ -49,6 +49,7 @@ const (
 // server controls RPC service responses.
 type server struct {
 	policyReconciler *controllers.PolicyEndpointsReconciler
+	rpc.UnimplementedNPBackendServer
 }
 
 // EnforceNpToPod processes CNI Enforce NP network request
