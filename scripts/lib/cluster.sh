@@ -4,7 +4,7 @@ function load_default_values(){
 
     CLUSTER_NAME=network-policy-${RANDOM}
     REGION="${REGION:=us-west-2}"
-    AMI_FAMILY="${AMI_FAMILY:=AmazonLinux2}"
+    AMI_FAMILY="${AMI_FAMILY:=AmazonLinux2023}"
     NODEGROUP_TYPE="${NODEGROUP_TYPE:=linux}"
     NODES_CAPACITY="${NODES_CAPACITY:=3}"
     INSTANCE_TYPE="${INSTANCE_TYPE:=t3.large}"
