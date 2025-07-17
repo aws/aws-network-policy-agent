@@ -115,7 +115,7 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
-		log().Info("Replacing '.' character with '_' for pod pin path.")
+		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
@@ -232,7 +232,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
@@ -251,7 +251,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))

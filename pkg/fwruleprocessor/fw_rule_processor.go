@@ -124,7 +124,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			//Include port and protocol combination paired with catch all entries
 			firewallRule.L4Info = append(firewallRule.L4Info, catchAllIPPorts...)
 
-			log().Infof("Updating Map with IP Key: %s", string(firewallRule.IPCidr))
+			log().Debugf("Updating Map with IP Key: %s", string(firewallRule.IPCidr))
 			_, firewallMapKey, _ := net.ParseCIDR(string(firewallRule.IPCidr))
 			// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 			firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
@@ -141,7 +141,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			for _, exceptCIDR := range firewallRule.Except {
 				_, mapKey, _ := net.ParseCIDR(string(exceptCIDR))
 				key := utils.ComputeTrieKey(*mapKey, f.enableIPv6)
-				log().Infof("Parsed Except CIDR IP Key: %s", mapKey.String())
+				log().Debugf("Parsed Except CIDR IP Key: %s", mapKey.String())
 				if len(firewallRule.L4Info) != 0 {
 					mergedL4Info := mergeDuplicateL4Info(firewallRule.L4Info)
 					firewallRule.L4Info = mergedL4Info

@@ -1,7 +1,6 @@
 package ebpf
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
-	"github.com/aws/amazon-vpc-cni-k8s/rpc"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
@@ -22,12 +20,10 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
-	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -60,7 +56,6 @@ var (
 	POLICIES_APPLIED                           = 0
 	DEFAULT_ALLOW                              = 1
 	DEFAULT_DENY                               = 2
-	LOCAL_IPAMD_ADDRESS                        = "127.0.0.1:50051"
 	POD_STATE_MAP_KEY                          = 0
 	BRANCH_ENI_VETH_PREFIX                     = "vlan"
 	INTERFACE_COUNT_UNKNOWN                    = -1 // Used when caller doesn't know interface count
@@ -125,10 +120,6 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 }
 
-type EvProgram struct {
-	wg sync.WaitGroup
-}
-
 type BPFContext struct {
 	ingressPgmInfo   goelf.BpfData
 	egressPgmInfo    goelf.BpfData
@@ -136,7 +127,7 @@ type BPFContext struct {
 }
 
 func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -150,6 +141,8 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		AttachProbesToPodLock:     new(sync.Map),
 		DeletePodIdentifierLock:   new(sync.Map),
 		podNameToInterfaceCount:   new(sync.Map),
+		networkPolicyMode:         networkPolicyMode,
+		isMultiNICEnabled:         isMultiNICEnabled,
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -280,16 +273,8 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		go wait.Forever(ebpfClient.conntrackClient.CleanupConntrackMap, halfDuration)
 	}
 
-	networkPolicyMode, isMultiNICEnabled, err := GetNetworkPolicyConfigsFromIpamd()
-	if err != nil {
-		log().Errorf("Error while fetching NetworkPolicyConfigs from ipamd %v", err)
-		return nil, err
-	}
-	ebpfClient.networkPolicyMode = networkPolicyMode
-	ebpfClient.isMultiNICEnabled = isMultiNICEnabled
-
 	// Load ipam.json data only when multi-NIC is enabled for interface counts
-	if isMultiNICEnabled {
+	if ebpfClient.isMultiNICEnabled {
 		err = ebpfClient.loadIPAMDataFromFile(IPAM_JSON_PATH)
 		if err != nil {
 			log().Errorf("Failed to load IPAM data: %v", err)
@@ -501,34 +486,6 @@ func recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, pol
 	}
 
 	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
-}
-
-func GetNetworkPolicyConfigsFromIpamd() (string, bool, error) {
-
-	ctx := context.Background()
-
-	// grpc connection waits till the ipmad is up and running
-	log().Info("Trying to establish GRPC connection to ipamd")
-	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
-	if err != nil {
-		log().Errorf("Failed to connect to ipamd %v", err)
-		return "", false, err
-	}
-	defer grpcConn.Close()
-
-	ipamd := rpc.NewConfigServerBackendClient(grpcConn)
-	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
-	if err != nil {
-		log().Errorf("Failed to get network policy configs %v", err)
-		return "", false, err
-	}
-	log().Infof("Connected to ipamd grpc endpoint. NetworkPolicyMode: %s MultiNICEnabled: %v", resp.NetworkPolicyMode, resp.MultiNICEnabled)
-	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
-		err = errors.New("Invalid Network Policy Mode")
-		log().Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
-		return "", false, err
-	}
-	return resp.NetworkPolicyMode, resp.MultiNICEnabled, nil
 }
 
 func (l *bpfClient) ReAttachEbpfProbes() error {
