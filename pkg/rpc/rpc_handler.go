@@ -49,6 +49,7 @@ const (
 // server controls RPC service responses.
 type server struct {
 	policyReconciler *controllers.PolicyEndpointsReconciler
+	rpc.UnimplementedNPBackendServer
 }
 
 // EnforceNpToPod processes CNI Enforce NP network request
@@ -70,11 +71,10 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		return nil, err
 	}
 
-	s.policyReconciler.SetNetworkPolicyMode(in.NETWORK_POLICY_MODE)
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	isFirstPodInPodIdentifier := s.policyReconciler.GeteBPFClient().IsFirstPodInPodIdentifier(podIdentifier)
 	err = s.policyReconciler.GeteBPFClient().AttacheBPFProbes(types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE},
-		podIdentifier)
+		podIdentifier, int(in.InterfaceCount))
 	if err != nil {
 		log().Errorf("Attaching eBPF probe failed for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, err)
 		return nil, err
