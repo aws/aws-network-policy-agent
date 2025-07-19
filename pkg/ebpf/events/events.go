@@ -2,23 +2,26 @@ package events
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-network-policy-agent/pkg/aws"
+	awsWrapper "github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 )
@@ -113,11 +116,11 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 }
 
 func setupCW() error {
-	awsCloudConfig := aws.CloudConfig{}
+	awsCloudConfig := awsWrapper.CloudConfig{}
 	fs := pflag.NewFlagSet("", pflag.ExitOnError)
 	awsCloudConfig.BindFlags(fs)
 
-	cloud, err := aws.NewCloud(awsCloudConfig)
+	cloud, err := awsWrapper.NewCloud(awsCloudConfig)
 	if err != nil {
 		log().Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
 		return err
@@ -151,16 +154,18 @@ func getVerdict(verdict int) string {
 	return verdictStr
 }
 
-func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message string) bool {
-	logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
-		Message:   &message,
-		Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
+func publishDataToCloudwatch(logQueue []types.InputLogEvent, message string) bool {
+	logQueue = append(logQueue, types.InputLogEvent{
+		Message:   aws.String(message),
+		Timestamp: aws.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
 	})
 	if len(logQueue) > 0 {
 		log().Debug("Sending logs to CW")
-		input := cloudwatchlogs.PutLogEventsInput{
-			LogEvents:    logQueue,
-			LogGroupName: &logGroupName,
+		ctx := context.Background()
+		input := &cloudwatchlogs.PutLogEventsInput{
+			LogEvents:     logQueue,
+			LogGroupName:  aws.String(logGroupName),
+			LogStreamName: aws.String(logStreamName),
 		}
 
 		if sequenceToken == "" {
@@ -170,19 +175,17 @@ func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message s
 				panic(err)
 			}
 		} else {
-			input = *input.SetSequenceToken(sequenceToken)
+			input.SequenceToken = aws.String(sequenceToken)
 		}
 
-		input = *input.SetLogStreamName(logStreamName)
-
-		resp, err := cwl.PutLogEvents(&input)
+		resp, err := cwl.PutLogEvents(ctx, input)
 		if err != nil {
 			log().Errorf("Push log events Failed %v", err)
 		} else if resp != nil && resp.NextSequenceToken != nil {
 			sequenceToken = *resp.NextSequenceToken
 		}
 
-		logQueue = []*cloudwatchlogs.InputLogEvent{}
+		logQueue = []types.InputLogEvent{}
 		return false
 	}
 	return true
@@ -194,7 +197,7 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 	go func(ringbufferdata <-chan []byte) {
 		done := false
 		for record := range ringbufferdata {
-			var logQueue []*cloudwatchlogs.InputLogEvent
+			var logQueue []types.InputLogEvent
 			var message string
 			direction := "egress"
 			if enableIPv6 {
@@ -261,7 +264,8 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, enableCloudWatchLogs bool
 }
 
 func ensureLogGroupExists(name string) error {
-	resp, err := cwl.DescribeLogGroups(&cloudwatchlogs.DescribeLogGroupsInput{})
+	ctx := context.Background()
+	resp, err := cwl.DescribeLogGroups(ctx, &cloudwatchlogs.DescribeLogGroupsInput{})
 	if err != nil {
 		return err
 	}
@@ -272,14 +276,13 @@ func ensureLogGroupExists(name string) error {
 		}
 	}
 
-	_, err = cwl.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
-		LogGroupName: &name,
+	_, err = cwl.CreateLogGroup(ctx, &cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(name),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			if aerr.Code() == "ResourceAlreadyExistsException" {
-				return nil
-			}
+		var resourceExists *types.ResourceAlreadyExistsException
+		if errors.As(err, &resourceExists) {
+			return nil
 		}
 		return err
 	}
@@ -287,11 +290,11 @@ func ensureLogGroupExists(name string) error {
 }
 
 func createLogStream() error {
-
+	ctx := context.Background()
 	name := "aws-network-policy-agent-audit-" + uuid.New().String()
-	_, err := cwl.CreateLogStream(&cloudwatchlogs.CreateLogStreamInput{
-		LogGroupName:  &logGroupName,
-		LogStreamName: &name,
+	_, err := cwl.CreateLogStream(ctx, &cloudwatchlogs.CreateLogStreamInput{
+		LogGroupName:  aws.String(logGroupName),
+		LogStreamName: aws.String(name),
 	})
 
 	logStreamName = name

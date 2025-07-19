@@ -1,22 +1,40 @@
 package services
 
 import (
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 )
 
 type EC2Metadata interface {
-	Region() (string, error)
-	GetInstanceIdentityDocument() (ec2metadata.EC2InstanceIdentityDocument, error)
+	Region(ctx context.Context) (string, error)
+	GetInstanceIdentityDocument(ctx context.Context) (imds.InstanceIdentityDocument, error)
 }
 
 // NewEC2Metadata constructs new EC2Metadata implementation.
-func NewEC2Metadata(session *session.Session) EC2Metadata {
+func NewEC2Metadata(cfg aws.Config) EC2Metadata {
 	return &defaultEC2Metadata{
-		EC2Metadata: ec2metadata.New(session),
+		client: imds.NewFromConfig(cfg),
 	}
 }
 
 type defaultEC2Metadata struct {
-	*ec2metadata.EC2Metadata
+	client *imds.Client
+}
+
+func (m *defaultEC2Metadata) Region(ctx context.Context) (string, error) {
+	result, err := m.client.GetRegion(ctx, &imds.GetRegionInput{})
+	if err != nil {
+		return "", err
+	}
+	return result.Region, nil
+}
+
+func (m *defaultEC2Metadata) GetInstanceIdentityDocument(ctx context.Context) (imds.InstanceIdentityDocument, error) {
+	result, err := m.client.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
+	if err != nil {
+		return imds.InstanceIdentityDocument{}, err
+	}
+	return result.InstanceIdentityDocument, nil
 }
