@@ -17,12 +17,18 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 
+	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/samber/lo"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
@@ -44,7 +50,8 @@ import (
 )
 
 var (
-	scheme = runtime.NewScheme()
+	scheme              = runtime.NewScheme()
+	LOCAL_IPAMD_ADDRESS = "127.0.0.1:50051"
 )
 
 func init() {
@@ -98,8 +105,10 @@ func main() {
 			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
 		}
 
+		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(log))
+
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
@@ -151,4 +160,31 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 	}
 
 	return controllerConfig, nil
+}
+
+func getNetworkPolicyConfigsFromIpamd(log logger.Logger) (string, bool, error) {
+	ctx := context.Background()
+
+	// grpc connection waits till the ipmad is up and running
+	log.Info("Trying to establish GRPC connection to ipamd")
+	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
+	if err != nil {
+		log.Errorf("Failed to connect to ipamd %v", err)
+		return "", false, err
+	}
+	defer grpcConn.Close()
+
+	ipamd := cnirpc.NewConfigServerBackendClient(grpcConn)
+	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
+	if err != nil {
+		log.Errorf("Failed to get network policy configs %v", err)
+		return "", false, err
+	}
+	log.Infof("Connected to ipamd grpc endpoint. NetworkPolicyMode: %s MultiNICEnabled: %v", resp.NetworkPolicyMode, resp.MultiNICEnabled)
+	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
+		err = errors.New("Invalid Network Policy Mode")
+		log.Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
+		return "", false, err
+	}
+	return resp.NetworkPolicyMode, resp.MultiNICEnabled, nil
 }
