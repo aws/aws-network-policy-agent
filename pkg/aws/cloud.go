@@ -1,14 +1,15 @@
 package aws
 
 import (
+	"context"
+
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/pkg/errors"
 )
 
@@ -37,32 +38,39 @@ type Cloud interface {
 	ClusterName() string
 }
 
-func NewCloud(cfg CloudConfig) (Cloud, error) {
-	sess := session.Must(session.NewSession(aws.NewConfig()))
-	//injectUserAgent(&sess.Handlers)
+func NewCloud(ctx context.Context, cfg CloudConfig) (Cloud, error) {
 
-	metadata := services.NewEC2Metadata(sess)
+	// Load the AWS SDK configuration
+	awsCfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load AWS config")
+	}
+
+	metadata := services.NewEC2Metadata(awsCfg)
 	if len(cfg.Region) == 0 {
-		region, err := metadata.Region()
+		region, err := metadata.Region(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to introspect region from EC2Metadata, specify --aws-region instead if EC2Metadata is unavailable")
 		}
 		cfg.Region = region
 	}
 
-	awsCfg := aws.NewConfig().WithRegion(cfg.Region).WithSTSRegionalEndpoint(endpoints.RegionalSTSEndpoint)
-	sess = sess.Copy(awsCfg)
+	// Update the region in the config
+	if cfg.Region != "" {
+		awsCfg.Region = cfg.Region
+	}
 
-	instanceIdentityDocument, err := metadata.GetInstanceIdentityDocument()
+	instanceIdentityDocument, err := metadata.GetInstanceIdentityDocument(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get instanceIdentityDocument from EC2Metadata")
 	}
-	ec2ServiceClient := ec2.New(sess)
-	cfg.ClusterName = getClusterName(ec2ServiceClient, instanceIdentityDocument)
+
+	ec2ServiceClient := ec2.NewFromConfig(awsCfg)
+	cfg.ClusterName = getClusterName(ctx, ec2ServiceClient, instanceIdentityDocument)
 
 	return &defaultCloud{
 		cfg:            cfg,
-		cloudWatchlogs: services.NewCloudWatchLogs(sess),
+		cloudWatchlogs: services.NewCloudWatchLogs(awsCfg),
 	}, nil
 }
 
@@ -90,11 +98,11 @@ func (c *defaultCloud) ClusterName() string {
 	return c.cfg.ClusterName
 }
 
-func getClusterName(ec2ServiceClient ec2iface.EC2API, instanceIdentityDocument ec2metadata.EC2InstanceIdentityDocument) string {
+func getClusterName(ctx context.Context, ec2ServiceClient *ec2.Client, instanceIdentityDocument imds.InstanceIdentityDocument) string {
 	var clusterName string
 	var err error
 	for _, tag := range clusterNameTags {
-		clusterName, err = getClusterTag(tag, ec2ServiceClient, instanceIdentityDocument)
+		clusterName, err = getClusterTag(ctx, tag, ec2ServiceClient, instanceIdentityDocument)
 		if err == nil && clusterName != "" {
 			break
 		}
@@ -106,25 +114,25 @@ func getClusterName(ec2ServiceClient ec2iface.EC2API, instanceIdentityDocument e
 }
 
 // getClusterTag is used to retrieve a tag from the ec2 instance
-func getClusterTag(tagKey string, ec2ServiceClient ec2iface.EC2API, instanceIdentityDocument ec2metadata.EC2InstanceIdentityDocument) (string, error) {
-	input := ec2.DescribeTagsInput{
-		Filters: []*ec2.Filter{
+func getClusterTag(ctx context.Context, tagKey string, ec2ServiceClient *ec2.Client, instanceIdentityDocument imds.InstanceIdentityDocument) (string, error) {
+	input := &ec2.DescribeTagsInput{
+		Filters: []types.Filter{
 			{
 				Name: aws.String(resourceID),
-				Values: []*string{
-					aws.String(instanceIdentityDocument.InstanceID),
+				Values: []string{
+					instanceIdentityDocument.InstanceID,
 				},
 			}, {
 				Name: aws.String(resourceKey),
-				Values: []*string{
-					aws.String(tagKey),
+				Values: []string{
+					tagKey,
 				},
 			},
 		},
 	}
 
 	//log.Infof("Calling DescribeTags with key %s", tagKey)
-	results, err := ec2ServiceClient.DescribeTags(&input)
+	results, err := ec2ServiceClient.DescribeTags(ctx, input)
 	if err != nil {
 		return "", errors.Wrap(err, "GetClusterTag: Unable to obtain EC2 instance tags")
 	}
@@ -133,5 +141,5 @@ func getClusterTag(tagKey string, ec2ServiceClient ec2iface.EC2API, instanceIden
 		return "", errors.Errorf("GetClusterTag: No tag matching key: %s", tagKey)
 	}
 
-	return aws.StringValue(results.Tags[0].Value), nil
+	return *results.Tags[0].Value, nil
 }
