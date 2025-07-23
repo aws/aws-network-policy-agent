@@ -71,6 +71,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	firewallMap := make(map[string][]byte)
 	cidrsMap := make(map[string]EbpfFirewallRules)
 	exceptCidrs := make(map[string]struct{})
+	nonHostCIDRs := make(map[string]EbpfFirewallRules)
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	_, mapKey, _ := net.ParseCIDR(f.nodeIP + f.hostMask)
@@ -121,12 +122,15 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			// Check if the /m entry is part of any /n CIDRs that we've encountered so far
 			// If found, we need to include the port and protocol combination against the current entry as well since
 			// we use LPM TRIE map and the /m will always win out.
-			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), cidrsMap)
+			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
 			if len(cidrL4Info) > 0 {
 				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
 			}
 		}
 		cidrsMap[string(firewallRule.IPCidr)] = firewallRule
+		if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
+			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule
+		}
 	}
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
@@ -206,9 +210,6 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
 
 	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
 	for cidr, cidrFirewallInfo := range cidrsMap {
-		if !utils.IsNonHostCIDR(cidr) {
-			continue
-		}
 		_, cidrEntry, _ := net.ParseCIDR(cidr)
 		if cidrEntry.Contains(ipToCheck.IP) {
 			log().Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)

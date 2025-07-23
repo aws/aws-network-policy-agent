@@ -120,7 +120,7 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 		//    - Then match if:
 		//        - start_port is ANY_PORT → rule applies to all ports
 		//        - OR l4_dst_port is exactly the start_port
-		//        - OR l4_dst_port falls within the inclusive [start_port, end_port] range
+		//        - OR l4_dst_port falls within (start_port, end_port] range
 		//
 		// 2. Specific Protocol Match:
 		//    - If trie_val->protocol matches the packet's IP protocol (e.g., TCP or UDP),
