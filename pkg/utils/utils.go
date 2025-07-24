@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -115,7 +116,7 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
-		log().Info("Replacing '.' character with '_' for pod pin path.")
+		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
@@ -171,9 +172,14 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-var GetHostVethName = func(podName, podNamespace string, interfacePrefixes []string) (string, error) {
+var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
 	var interfaceName string
 	var errors error
+
+	if interfaceIndex > 0 {
+		podName = fmt.Sprintf("%s.%s", podName, strconv.Itoa(interfaceIndex))
+	}
+
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
 
@@ -227,7 +233,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
@@ -246,7 +252,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))

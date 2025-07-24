@@ -112,7 +112,6 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 		if len(firewallRule.L4Info) == 0 {
 			log().Debugf("No L4 specified. Add Catch all entry CIDR: %s", string(firewallRule.IPCidr))
 			addCatchAllL4Entry(&firewallRule)
-			log().Debugf("Total L4 entries count: %d", len(firewallRule.L4Info))
 		}
 
 		if existingFirewallRuleInfo, ok := cidrsMap[string(firewallRule.IPCidr)]; ok {
@@ -154,12 +153,9 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 		firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
 
 		if len(value.L4Info) != 0 {
-			mergedL4Info := mergeDuplicateL4Info(value.L4Info)
-			value.L4Info = mergedL4Info
-
+			value.L4Info = mergeDuplicateL4Info(value.L4Info)
 		}
-		firewallValue := utils.ComputeTrieValue(value.L4Info, false, false)
-		firewallMap[string(firewallKey)] = firewallValue
+		firewallMap[string(firewallKey)] = utils.ComputeTrieValue(value.L4Info, false, false)
 	}
 
 	return firewallMap, nil
