@@ -9,7 +9,7 @@ import (
 
 // NewMockBpfClient is an exported helper for tests that returns a mock implementation of BpfClient.
 // This function is intended for use in tests in other packages.
-func NewMockBpfClient() BpfClient {
+func NewMockBpfClient() *bpfClient {
 	return &bpfClient{
 		policyEndpointeBPFContext: new(sync.Map),
 		IngressPodToProgMap:       new(sync.Map),
