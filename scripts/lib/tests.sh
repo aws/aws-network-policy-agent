@@ -15,10 +15,9 @@ kind: Job
 metadata:
   name: cyclonus
 spec:
-  backoffLimit: 0
   template:
     spec:
-      restartPolicy: Never
+      restartPolicy: OnFailure
       serviceAccount: cyclonus
       containers:
         - name: cyclonus
