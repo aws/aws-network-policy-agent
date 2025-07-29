@@ -1,11 +1,14 @@
 
 function check_path_cleanup(){
 
+    TEST_AGENT_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
+    export TEST_AGENT_IMAGE_REPOSITORY
+
     local worker_nodes=$(kubectl get nodes -o custom-columns=NAME:.metadata.name --no-headers)
     for node in $worker_nodes
     do
         export NODE=$node
-        envsubst '$NODE' < ${DIR}/test/check-cleanup-pod.yaml > ${DIR}/test/check-cleanup-pod-$node.yaml
+        envsubst '$NODE $TEST_AGENT_IMAGE_REPOSITORY' < ${DIR}/test/check-cleanup-pod.yaml > ${DIR}/test/check-cleanup-pod-$node.yaml
         kubectl apply -f ${DIR}/test/check-cleanup-pod-$node.yaml -n default
         rm -rf ${DIR}/test/check-cleanup-pod-$node.yaml
     done
