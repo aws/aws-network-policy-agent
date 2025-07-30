@@ -1,6 +1,6 @@
 ARG golang_image
 
-FROM $golang_image as builder
+FROM $golang_image AS builder
 
 WORKDIR /workspace
 ENV GOPROXY direct
