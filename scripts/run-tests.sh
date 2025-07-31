@@ -50,4 +50,6 @@ check_path_cleanup
 if [[ $TEST_FAILED == "true" ]]; then
   echo "Test run failed, check failures"
   exit 1
+else
+  echo "Test run succeeded"
 fi
