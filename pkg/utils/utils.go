@@ -37,6 +37,7 @@ var (
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
+	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
 	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
@@ -115,7 +116,7 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
-		log().Info("Replacing '.' character with '_' for pod pin path.")
+		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
@@ -232,7 +233,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 	}
 
 	for _, l4Entry := range l4Info {
@@ -251,7 +252,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
@@ -264,7 +265,7 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 }
 
 func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
-	protocol := TCP_PROTOCOL_NUMBER //ProtocolTCP
+	protocol := ANY_IP_PROTOCOL
 
 	if denyAll {
 		return RESERVED_IP_PROTOCOL_NUMBER
@@ -275,15 +276,19 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	}
 
 	if l4Info.Protocol == nil {
-		return protocol //Protocol defaults TCP if not specified
+		return protocol //Protocol defaults to ANY_IP_PROTOCOL if not specified
 	}
 
-	if *l4Info.Protocol == corev1.ProtocolUDP {
+	if *l4Info.Protocol == corev1.ProtocolTCP {
+		protocol = TCP_PROTOCOL_NUMBER
+	} else if *l4Info.Protocol == corev1.ProtocolUDP {
 		protocol = UDP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == corev1.ProtocolSCTP {
 		protocol = SCTP_PROTOCOL_NUMBER
 	} else if *l4Info.Protocol == CATCH_ALL_PROTOCOL {
 		protocol = ANY_IP_PROTOCOL
+	} else if *l4Info.Protocol == DENY_ALL_PROTOCOL {
+		protocol = RESERVED_IP_PROTOCOL_NUMBER
 	}
 
 	return protocol
@@ -312,14 +317,6 @@ func IsMissingFilterError(error string) bool {
 	return false
 }
 
-func IsCatchAllIPEntry(ipAddr string) bool {
-	ipSplit := strings.Split(ipAddr, "/")
-	if ipSplit[1] == "0" { //if ipSplit[0] == "0.0.0.0" && ipSplit[1] == "0" {
-		return true
-	}
-	return false
-}
-
 func IsNodeIP(nodeIP string, ipCidr string) bool {
 	ipAddr, _, _ := net.ParseCIDR(ipCidr)
 	if net.ParseIP(nodeIP).Equal(ipAddr) {
@@ -331,7 +328,7 @@ func IsNodeIP(nodeIP string, ipCidr string) bool {
 func IsNonHostCIDR(ipAddr string) bool {
 	ipSplit := strings.Split(ipAddr, "/")
 	//Ignore Catch All IP entry as well
-	if ipSplit[1] != "32" && ipSplit[1] != "128" && ipSplit[1] != "0" {
+	if ipSplit[1] != "32" && ipSplit[1] != "128" {
 		return true
 	}
 	return false
