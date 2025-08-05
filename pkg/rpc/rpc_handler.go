@@ -15,8 +15,11 @@ package rpc
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
@@ -42,7 +45,9 @@ var (
 )
 
 const (
-	npgRPCaddress         = "127.0.0.1:50052"
+	rpcBindHost           = "127.0.0.1"
+	defaultRPCPort        = 50052
+	maxPortRetries        = 20 // try defaultRPCPort .. defaultRPCPort+maxPortRetries-1
 	grpcHealthServiceName = "grpc.health.v1.np-agent"
 )
 
@@ -171,10 +176,54 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	return &resp, nil
 }
 
-// RunRPCHandler handles request from gRPC
-func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) error {
-	log().Infof("Serving RPC Handler on Address: %s", npgRPCaddress)
-	listener, err := net.Listen("tcp", npgRPCaddress)
+// getRPCListener attempts to bind the gRPC listener, trying the default port first
+// and then random ports within the range [defaultRPCPort, defaultRPCPort+maxPortRetries).
+// This avoids port‑scanning sequentially, reducing collision chances when multiple
+// agents start simultaneously.
+func getRPCListener(portOverride int) (net.Listener, error) {
+	// If the caller provided an explicit port (>0), try that first and return
+	// immediately if successful or error out if it cannot be bound.
+	if portOverride > 0 {
+		addr := fmt.Sprintf("%s:%d", rpcBindHost, portOverride)
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			log().Infof("Serving RPC Handler on Address: %s", addr)
+			return l, nil
+		}
+		return nil, errors.Wrapf(err, "network policy agent: explicit rpc-port %d unavailable", portOverride)
+	}
+
+	// Build the candidate port list.
+	ports := make([]int, maxPortRetries)
+	for i := 0; i < maxPortRetries; i++ {
+		ports[i] = defaultRPCPort + i
+	}
+
+	// Shuffle the list except for the first element (the default remains first).
+	rand.Seed(time.Now().UnixNano())
+	if len(ports) > 1 {
+		rand.Shuffle(len(ports)-1, func(i, j int) {
+			ports[i+1], ports[j+1] = ports[j+1], ports[i+1]
+		})
+	}
+
+	// Attempt to bind.
+	for _, port := range ports {
+		addr := fmt.Sprintf("%s:%d", rpcBindHost, port)
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			log().Infof("Serving RPC Handler on Address: %s", addr)
+			return l, nil
+		}
+		log().Warnf("Port %d unavailable for RPC server: %v. Trying another...", port, err)
+	}
+	return nil, errors.New("network policy agent: no free TCP ports found for RPC server")
+}
+
+// RunRPCHandler starts the gRPC server bound either to the explicit
+// rpcPort (if >0) or selects a free port dynamically when rpcPort==0.
+func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, rpcPort int) error {
+	listener, err := getRPCListener(rpcPort)
 	if err != nil {
 		log().Errorf("Failed to listen gRPC port: %v", err)
 		return errors.Wrap(err, "network policy agent: failed to listen to gRPC port")
