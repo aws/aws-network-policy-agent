@@ -27,6 +27,10 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 	return nil
 }
 
+func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+	return nil
+}
+
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	return nil
 }
@@ -41,6 +45,10 @@ func (m *MockBpfClient) IsEBPFProbeAttached(podName string, podNamespace string)
 
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	return false
+}
+
+func (m *MockBpfClient) IsProgFdShared(targetPodName string, targetPodNamespace string) (bool, error) {
+	return false, nil
 }
 func (m *MockBpfClient) GetIngressPodToProgMap() *sync.Map {
 	return nil

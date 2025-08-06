@@ -103,11 +103,13 @@ func prometheusRegister() {
 }
 
 type BpfClient interface {
-	AttacheBPFProbes(pod types.NamespacedName, policyEndpoint string, numInterfaces int) error
+	AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error
+	DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error
 	UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error
 	UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error
 	IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool)
 	IsFirstPodInPodIdentifier(podIdentifier string) bool
+	IsProgFdShared(targetPodName string, targetPodNamespace string) (bool, error)
 	GetIngressPodToProgMap() *sync.Map
 	GetEgressPodToProgMap() *sync.Map
 	GetIngressProgToPodsMap() *sync.Map
@@ -803,6 +805,28 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
+func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+	value, _ := l.PodIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
+	podIdentifierLock := value.(*sync.Mutex)
+	podIdentifierLock.Lock()
+	defer podIdentifierLock.Unlock()
+	log().Debugf("Got the podIdentifierLock for Pod: %s Namespace: %s PodIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
+
+	isProgFdShared, err := l.IsProgFdShared(pod.Name, pod.Namespace)
+	l.DeletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
+	l.DeletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
+
+	if err == nil && !isProgFdShared {
+		err := l.DeleteBPFProgramAndMaps(podIdentifier)
+		if err != nil {
+			log().Errorf("BPF programs and Maps delete failed for podIdentifier: %s, error: %v", podIdentifier, err)
+			return err
+		}
+		l.PodIdentifierLock.Delete(podIdentifier)
+	}
+	return nil
+}
+
 func (l *bpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
 	start := time.Now()
 	err := l.deleteBPFProgramAndMaps(podIdentifier, "ingress")
@@ -1037,6 +1061,41 @@ func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 		}
 	}
 	return firstPodInPodIdentifier
+}
+
+func (l *bpfClient) IsProgFdShared(targetPodName string, targetPodNamespace string) (bool, error) {
+	targetpodNamespacedName := utils.GetPodNamespacedName(targetPodName, targetPodNamespace)
+	// check ingress caches
+	if targetProgFD, ok := l.IngressPodToProgMap.Load(targetpodNamespacedName); ok {
+		if currentList, ok := l.IngressProgToPodsMap.Load(targetProgFD); ok {
+			podsList, ok := currentList.(map[string]struct{})
+			if ok {
+				if len(podsList) > 1 {
+					log().Debugf("Found shared ingress progFD for target: %s, progFD: %d", targetPodName, targetProgFD)
+					return true, nil
+				}
+				return false, nil // Not shared (only one pod)
+			}
+		}
+	}
+
+	// Check Egress Maps if not found in Ingress
+	if targetProgFD, ok := l.EgressPodToProgMap.Load(targetpodNamespacedName); ok {
+		if currentList, ok := l.EgressProgToPodsMap.Load(targetProgFD); ok {
+			podsList, ok := currentList.(map[string]struct{})
+			if ok {
+				if len(podsList) > 1 {
+					log().Debugf("Found shared egress progFD for target: %s, progFD: %d", targetPodName, targetProgFD)
+					return true, nil
+				}
+				return false, nil // Not shared (only one pod)
+			}
+		}
+	}
+
+	// If not found in both maps, return an error
+	log().Debugf("Pod not found in either IngressPodToProgMap or EgressPodToProgMap: %s", targetpodNamespacedName)
+	return false, fmt.Errorf("pod not found in either IngressPodToProgMap or EgressPodToProgMap: %s", targetpodNamespacedName)
 }
 
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
