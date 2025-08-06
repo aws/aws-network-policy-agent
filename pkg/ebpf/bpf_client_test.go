@@ -395,7 +395,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			EgressPodToProgMap:        new(sync.Map),
 			IngressProgToPodsMap:      new(sync.Map),
 			EgressProgToPodsMap:       new(sync.Map),
-			AttachProbesToPodLock:     new(sync.Map),
+			PodIdentifierLock:         new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -427,7 +427,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				EgressPodToProgMap:        new(sync.Map),
 				IngressProgToPodsMap:      new(sync.Map),
 				EgressProgToPodsMap:       new(sync.Map),
-				AttachProbesToPodLock:     new(sync.Map),
+				PodIdentifierLock:         new(sync.Map),
 				isMultiNICEnabled:         tt.isMultiNICEnabled,
 				podNameToInterfaceCount:   new(sync.Map),
 			}
@@ -806,7 +806,7 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		EgressPodToProgMap:        new(sync.Map),
 		IngressProgToPodsMap:      new(sync.Map),
 		EgressProgToPodsMap:       new(sync.Map),
-		AttachProbesToPodLock:     new(sync.Map),
+		PodIdentifierLock:         new(sync.Map),
 		isMultiNICEnabled:         true,
 		ingressBinary:             "tc.v4ingress.bpf.o",
 		egressBinary:              "tc.v4egress.bpf.o",

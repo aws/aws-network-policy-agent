@@ -69,7 +69,7 @@ func (m *MockBpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
 	return nil
 }
 
-func (m *MockBpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
+func (m *MockBpfClient) GetPodIdentifierLockMap() *sync.Map {
 	return nil
 }
 

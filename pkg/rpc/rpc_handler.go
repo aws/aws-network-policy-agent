@@ -147,23 +147,22 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	var err error
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 
-	value, _ := s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
-	deletePodIdentifierLock := value.(*sync.Mutex)
-	deletePodIdentifierLock.Lock()
-	log().Debugf("Got the deletePodIdentifierLock for Pod: %s Namespace: %s PodIdentifier: %s", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, podIdentifier)
+	ebpfClient := s.policyReconciler.GeteBPFClient()
+	value, _ := ebpfClient.GetPodIdentifierLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
+	podIdentifierLock := value.(*sync.Mutex)
+	podIdentifierLock.Lock()
+	defer podIdentifierLock.Unlock()
+	log().Debugf("Got the podIdentifierLock for Pod: %s Namespace: %s PodIdentifier: %s", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, podIdentifier)
 
 	isProgFdShared, err := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	s.policyReconciler.GeteBPFClient().DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	ebpfClient.DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	ebpfClient.DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	if err == nil && !isProgFdShared {
-		err = s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
+		err = ebpfClient.DeleteBPFProgramAndMaps(podIdentifier)
 		if err != nil {
 			log().Errorf("BPF programs and Maps delete failed for podIdentifier: %s, error: %v", podIdentifier, err)
 		}
-		deletePodIdentifierLock.Unlock()
-		s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().Delete(podIdentifier)
-	} else {
-		deletePodIdentifierLock.Unlock()
+		ebpfClient.GetPodIdentifierLockMap().Delete(podIdentifier)
 	}
 	resp := rpc.DeleteNpReply{
 		Success: true,
