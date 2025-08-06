@@ -140,7 +140,7 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 			clientPod = deployClient(clientName)
 		})
 
-		It("should allow on /16 and 3006 port, deny on rest /16 ports, allow all on rest of endpoints", func() {
+		It("should allow on /16 and 3306 port, deny on rest /16 ports, allow all on rest of endpoints", func() {
 			time.Sleep(30 * time.Second)
 
 			// fetch the logs

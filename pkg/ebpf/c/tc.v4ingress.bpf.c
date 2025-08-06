@@ -66,6 +66,8 @@ struct data_t {
 	__u32  dest_port;
 	__u32  protocol;
 	__u32  verdict;
+	__u32 packet_sz;
+	__u8 is_egress;
 };
 
 struct bpf_map_def_pvt SEC("maps") ingress_map = {
@@ -110,9 +112,22 @@ static inline int evaluateByLookUp(struct keystruct trie_key, struct conntrack_k
 			return BPF_DROP;
 		}
 
-		if ((trie_val->protocol == ANY_IP_PROTOCOL) || (trie_val->protocol == ip->protocol &&
-					((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
-						(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
+		// 1. ANY_IP_PROTOCOL:
+		//    - If the rule specifies ANY_IP_PROTOCOL (i.e., applies to all L4 protocols),
+		//    - Then match if:
+		//        - start_port is ANY_PORT → rule applies to all ports
+		//        - OR l4_dst_port is exactly the start_port
+		//        - OR l4_dst_port falls within (start_port, end_port] range
+		//
+		// 2. Specific Protocol Match:
+		//    - If trie_val->protocol matches the packet's IP protocol (e.g., TCP or UDP),
+		//    - Then apply the same port match logic as above.
+		if ((trie_val->protocol == ANY_IP_PROTOCOL && 
+			((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+			(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port))) || 
+			(trie_val->protocol == ip->protocol &&
+			((trie_val->start_port == ANY_PORT) || (l4_dst_port == trie_val->start_port) ||
+			(l4_dst_port > trie_val->start_port && l4_dst_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
 			struct conntrack_value new_flow_val = {};
 			if (pst->state == DEFAULT_ALLOW) {
@@ -217,6 +232,8 @@ int handle_ingress(struct __sk_buff *skb)
 		evt.dest_ip = flow_key.dest_ip;
 		evt.dest_port = flow_key.dest_port;
 		evt.protocol = flow_key.protocol;
+		evt.packet_sz = skb->len;
+		evt.is_egress = 0;
 
 		__u32 key = 0; 
 		struct pod_state *pst = bpf_map_lookup_elem(&ingress_pod_state_map, &key);

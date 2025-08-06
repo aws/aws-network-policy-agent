@@ -12,7 +12,6 @@ MAKEFILE_PATH = $(dir $(realpath -s $(firstword $(MAKEFILE_LIST))))
 
 export GOPROXY = direct
 export GOSUMDB = sum.golang.org
-export GOTOOLCHAIN = go$(GOLANG_VERSION)
 
 # aws-ebpf-sdk-go override in case we need to build against a custom version
 EBPF_SDK_OVERRIDE ?= "n"
@@ -331,5 +330,6 @@ clean: # Clean temporary files and build artifacts from the project
 
 build-test-binaries: # Builds the test suite binaries
 	mkdir -p ${MAKEFILE_PATH}test/build
+	cd ${MAKEFILE_PATH} && \
 	find ${MAKEFILE_PATH}test -name '*suite_test.go' -type f  | xargs dirname  | xargs ginkgo build
 	find ${MAKEFILE_PATH}test -name "*.test" -print0 | xargs -0 -I {} mv {} ${MAKEFILE_PATH}test/build

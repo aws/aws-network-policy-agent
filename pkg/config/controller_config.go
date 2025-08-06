@@ -3,15 +3,21 @@ package config
 import (
 	"errors"
 
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
+
 	"github.com/spf13/pflag"
 )
 
 const (
 	flagLogLevel                       = "log-level"
 	flagLogFile                        = "log-file"
+	flagLogFileMaxSize                 = "log-file-max-size"
+	flagLogFileMaxBackups              = "log-file-max-backups"
 	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
-	defaultLogLevel                    = "info"
+	defaultLogLevel                    = "debug"
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
+	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
+	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
@@ -29,6 +35,10 @@ type ControllerConfig struct {
 	LogLevel string
 	// Local log file for Network Policy Agent
 	LogFile string
+	// Network Policy Agent local log file max size
+	LogFileMaxSize int
+	// Count of rotated Network Policy Agent local log files
+	LogFileMaxBackups int
 	// MaxConcurrentReconciles specifies the max number of reconcile loops
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
@@ -52,6 +62,10 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Set the controller log level - info, debug")
 	fs.StringVar(&cfg.LogFile, flagLogFile, defaultLogFile, ""+
 		"Set the controller log file - if not specified logs are written to stdout")
+	fs.IntVar(&cfg.LogFileMaxSize, flagLogFileMaxSize, defaultLogFileMaxSize, ""+
+		"Set the controller log file max size in megabytes before it gets rotated")
+	fs.IntVar(&cfg.LogFileMaxBackups, flagLogFileMaxBackups, defaultLogFileMaxBackups, ""+
+		"Set the controller maximum number of rotated log files to retain")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
 		"Maximum number of concurrent reconcile loops")
 	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")

@@ -13,3 +13,6 @@ amazon-network-policy-controller-k8s
 
 # Test build files
 test/build/
+
+results.log
+eks-cluster.yaml
