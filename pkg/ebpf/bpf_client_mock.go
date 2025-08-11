@@ -39,10 +39,6 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, 
 	return nil
 }
 
-func (m *MockBpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool) {
-	return false, false
-}
-
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	return false
 }
