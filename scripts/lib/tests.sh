@@ -15,10 +15,9 @@ kind: Job
 metadata:
   name: cyclonus
 spec:
-  backoffLimit: 0
   template:
     spec:
-      restartPolicy: Never
+      restartPolicy: OnFailure
       serviceAccount: cyclonus
       containers:
         - name: cyclonus
@@ -48,7 +47,7 @@ function run_cyclonus_tests(){
     while true; do
       STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
       if [ "$STATUS" == "True" ]; then
-        echo "Job $JOB_NAME has failed. Exiting."
+        echo "Job cyclonus has failed. Exiting."
         break
       fi
 

@@ -2,21 +2,26 @@ package events
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-network-policy-agent/pkg/aws"
+	awsWrapper "github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-sdk-go-v2/aws"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	goebpfevents "github.com/aws/aws-ebpf-sdk-go/pkg/events"
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
-	"github.com/go-logr/logr"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 )
@@ -31,6 +36,34 @@ var (
 	NON_EKS_CW_PATH     = "/aws/"
 )
 
+func log() logger.Logger {
+	return logger.Get()
+}
+
+const VerdictDeny uint32 = 0
+
+var (
+	dropCountTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_count_total",
+			Help: "Total number of packets dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+
+	dropBytesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "network_policy_drop_bytes_total",
+			Help: "Total number of bytes dropped by network policy agent",
+		},
+		[]string{"direction"},
+	)
+)
+
+func init() {
+	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal)
+}
+
 type ringBufferDataV4_t struct {
 	SourceIP   uint32
 	SourcePort uint32
@@ -38,6 +71,8 @@ type ringBufferDataV4_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
 type ringBufferDataV6_t struct {
@@ -47,12 +82,15 @@ type ringBufferDataV6_t struct {
 	DestPort   uint32
 	Protocol   uint32
 	Verdict    uint32
+	PacketSz   uint32
+	IsEgress   uint8
 }
 
-func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
 	// Enable logging and setup ring buffer
+	ctx := context.Background()
 	if mapFD <= 0 {
-		logger.Info("MapFD is invalid")
+		log().Errorf("MapFD is invalid %d", mapFD)
 		return fmt.Errorf("Invalid Ringbuffer FD: %d", mapFD)
 	}
 
@@ -61,31 +99,31 @@ func ConfigurePolicyEventsLogging(logger logr.Logger, enableCloudWatchLogs bool,
 	eventsClient := goebpfevents.New()
 	eventChanList, err := eventsClient.InitRingBuffer(mapFDList)
 	if err != nil {
-		logger.Info("Failed to Initialize Ring Buffer", "err:", err)
+		log().Errorf("Failed to Initialize Ring Buffer err: %v", err)
 		return err
 	} else {
 		if enableCloudWatchLogs {
-			logger.Info("Cloudwatch log support is enabled")
-			err = setupCW(logger)
+			log().Info("Cloudwatch log support is enabled")
+			err = setupCW(ctx)
 			if err != nil {
-				logger.Error(err, "unable to initialize Cloudwatch Logs for Policy events")
+				log().Errorf("unable to initialize Cloudwatch Logs for Policy events %v", err)
 				return err
 			}
 		}
-		logger.Info("Configure Event loop ... ")
-		capturePolicyEvents(eventChanList[mapFD], logger, enableCloudWatchLogs, enableIPv6)
+		log().Debug("Configure Event loop ... ")
+		capturePolicyEvents(ctx, eventChanList[mapFD], enableCloudWatchLogs, enableIPv6)
 	}
 	return nil
 }
 
-func setupCW(logger logr.Logger) error {
-	awsCloudConfig := aws.CloudConfig{}
+func setupCW(ctx context.Context) error {
+	awsCloudConfig := awsWrapper.CloudConfig{}
 	fs := pflag.NewFlagSet("", pflag.ExitOnError)
 	awsCloudConfig.BindFlags(fs)
 
-	cloud, err := aws.NewCloud(awsCloudConfig)
+	cloud, err := awsWrapper.NewCloud(ctx, awsCloudConfig)
 	if err != nil {
-		logger.Error(err, "unable to initialize AWS cloud session for Cloudwatch logs")
+		log().Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
 		return err
 	}
 
@@ -97,10 +135,10 @@ func setupCW(logger logr.Logger) error {
 	if clusterName == utils.DEFAULT_CLUSTER_NAME {
 		customlogGroupName = NON_EKS_CW_PATH + clusterName + "/cluster"
 	}
-	logger.Info("Setup CW", "Setting loggroup Name", customlogGroupName)
-	err = ensureLogGroupExists(customlogGroupName)
+	log().Infof("Setting loggroup Name %s", customlogGroupName)
+	err = ensureLogGroupExists(ctx, customlogGroupName)
 	if err != nil {
-		logger.Error(err, "unable to validate log group presence. Please check IAM permissions")
+		log().Errorf("unable to validate log group presence. Please check IAM permissions %v", err)
 		return err
 	}
 	logGroupName = customlogGroupName
@@ -117,86 +155,106 @@ func getVerdict(verdict int) string {
 	return verdictStr
 }
 
-func publishDataToCloudwatch(logQueue []*cloudwatchlogs.InputLogEvent, message string, log logr.Logger) bool {
-	logQueue = append(logQueue, &cloudwatchlogs.InputLogEvent{
-		Message:   &message,
-		Timestamp: awssdk.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
+func publishDataToCloudwatch(ctx context.Context, logQueue []types.InputLogEvent, message string) bool {
+	logQueue = append(logQueue, types.InputLogEvent{
+		Message:   aws.String(message),
+		Timestamp: aws.Int64(time.Now().UnixNano() / int64(time.Millisecond)),
 	})
 	if len(logQueue) > 0 {
-		log.Info("Sending logs to CW")
-		input := cloudwatchlogs.PutLogEventsInput{
-			LogEvents:    logQueue,
-			LogGroupName: &logGroupName,
+		log().Debug("Sending logs to CW")
+		input := &cloudwatchlogs.PutLogEventsInput{
+			LogEvents:     logQueue,
+			LogGroupName:  aws.String(logGroupName),
+			LogStreamName: aws.String(logStreamName),
 		}
 
 		if sequenceToken == "" {
-			err := createLogStream()
+			err := createLogStream(ctx)
 			if err != nil {
-				log.Info("Failed to create log stream")
+				log().Errorf("Failed to create log stream %v", err)
 				panic(err)
 			}
 		} else {
-			input = *input.SetSequenceToken(sequenceToken)
+			input.SequenceToken = aws.String(sequenceToken)
 		}
 
-		input = *input.SetLogStreamName(logStreamName)
-
-		resp, err := cwl.PutLogEvents(&input)
+		resp, err := cwl.PutLogEvents(ctx, input)
 		if err != nil {
-			log.Info("Push log events", "Failed ", err)
+			log().Errorf("Push log events Failed %v", err)
 		} else if resp != nil && resp.NextSequenceToken != nil {
 			sequenceToken = *resp.NextSequenceToken
 		}
 
-		logQueue = []*cloudwatchlogs.InputLogEvent{}
+		logQueue = []types.InputLogEvent{}
 		return false
 	}
 	return true
 }
 
-func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCloudWatchLogs bool, enableIPv6 bool) {
+func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
 		done := false
 		for record := range ringbufferdata {
-			var logQueue []*cloudwatchlogs.InputLogEvent
+			var logQueue []types.InputLogEvent
 			var message string
+			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Info("Failed to read from Ring buf", err)
+					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteToIPv6(rb.SourceIP).String(), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteToIPv6(rb.DestIP).String(), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				if rb.IsEgress == 0 {
+					direction = "ingress"
+				}
+
+				if rb.Verdict == VerdictDeny {
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+				} else {
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+				}
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
 				if err := binary.Read(buf, binary.LittleEndian, &rb); err != nil {
-					log.Info("Failed to read from Ring buf", err)
+					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
-				log.Info("Flow Info:  ", "Src IP", utils.ConvByteArrayToIP(rb.SourceIP), "Src Port", rb.SourcePort,
-					"Dest IP", utils.ConvByteArrayToIP(rb.DestIP), "Dest Port", rb.DestPort,
-					"Proto", protocol, "Verdict", verdict)
+				if rb.IsEgress == 0 {
+					direction = "ingress"
+				}
+
+				if rb.Verdict == VerdictDeny {
+					dropCountTotal.WithLabelValues(direction).Add(float64(1))
+					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+				} else {
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+				}
 
 				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
 			}
 
 			if enableCloudWatchLogs {
-				done = publishDataToCloudwatch(logQueue, message, log)
+				done = publishDataToCloudwatch(ctx, logQueue, message)
 				if done {
 					break
 				}
@@ -205,8 +263,8 @@ func capturePolicyEvents(ringbufferdata <-chan []byte, log logr.Logger, enableCl
 	}(ringbufferdata)
 }
 
-func ensureLogGroupExists(name string) error {
-	resp, err := cwl.DescribeLogGroups(&cloudwatchlogs.DescribeLogGroupsInput{})
+func ensureLogGroupExists(ctx context.Context, name string) error {
+	resp, err := cwl.DescribeLogGroups(ctx, &cloudwatchlogs.DescribeLogGroupsInput{})
 	if err != nil {
 		return err
 	}
@@ -217,26 +275,24 @@ func ensureLogGroupExists(name string) error {
 		}
 	}
 
-	_, err = cwl.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
-		LogGroupName: &name,
+	_, err = cwl.CreateLogGroup(ctx, &cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(name),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			if aerr.Code() == "ResourceAlreadyExistsException" {
-				return nil
-			}
+		var resourceExists *types.ResourceAlreadyExistsException
+		if errors.As(err, &resourceExists) {
+			return nil
 		}
 		return err
 	}
 	return nil
 }
 
-func createLogStream() error {
-
+func createLogStream(ctx context.Context) error {
 	name := "aws-network-policy-agent-audit-" + uuid.New().String()
-	_, err := cwl.CreateLogStream(&cloudwatchlogs.CreateLogStreamInput{
-		LogGroupName:  &logGroupName,
-		LogStreamName: &name,
+	_, err := cwl.CreateLogStream(ctx, &cloudwatchlogs.CreateLogStreamInput{
+		LogGroupName:  aws.String(logGroupName),
+		LogStreamName: aws.String(name),
 	})
 
 	logStreamName = name

@@ -5,12 +5,9 @@ import (
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestComputeTrieKey(t *testing.T) {
@@ -53,7 +50,6 @@ func TestComputeTrieKey(t *testing.T) {
 }
 
 func TestComputeTrieValue(t *testing.T) {
-	test_utilsLogger := ctrl.Log.WithName("ebpf-client")
 	protocolTCP := corev1.ProtocolTCP
 	protocolUDP := corev1.ProtocolUDP
 	protocolSCTP := corev1.ProtocolSCTP
@@ -331,7 +327,7 @@ func TestComputeTrieValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ComputeTrieValue(tt.args.Ports, test_utilsLogger, tt.args.allowAll, tt.args.denyAll)
+			got := ComputeTrieValue(tt.args.Ports, tt.args.allowAll, tt.args.denyAll)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -387,7 +383,7 @@ func TestGetPodIdentifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -415,7 +411,7 @@ func TestGetDotPodIdentifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace, logr.New(&log.NullLogSink{}))
+			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -555,46 +551,6 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 	}
 }
 
-func TestIsCatchAllIPEntry(t *testing.T) {
-	type args struct {
-		ipAddr string
-	}
-
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{
-			name: "IPv4 Catch All IP Entry",
-			args: args{
-				ipAddr: "0.0.0.0/0",
-			},
-			want: true,
-		},
-		{
-			name: "IPv4 Host IP Entry",
-			args: args{
-				ipAddr: "1.1.1.1/32",
-			},
-			want: false,
-		},
-		{
-			name: "Random /m IPv4 CIDR",
-			args: args{
-				ipAddr: "1.1.1.2/24",
-			},
-			want: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsCatchAllIPEntry(tt.args.ipAddr)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestIsNonHostCIDR(t *testing.T) {
 	type args struct {
 		ipAddr string
@@ -610,7 +566,7 @@ func TestIsNonHostCIDR(t *testing.T) {
 			args: args{
 				ipAddr: "0.0.0.0/0",
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name: "IPv4 Host IP Entry",
@@ -654,9 +610,10 @@ func TestGetHostVethName(t *testing.T) {
 	defer func() { getLinkByNameFunc = originalFunc }() // Restore after test
 
 	tests := []struct {
-		name string
-		args args
-		want string
+		name    string
+		args    args
+		want    string
+		wantErr string
 	}{
 		{
 			name: "host interface not found",
@@ -666,7 +623,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"eni", "vlan"},
 				mockNetlink:     false,
 			},
-			want: "",
+			want:    "",
+			wantErr: "failed to find link",
 		},
 		{
 			name: "Pod with host interface starting as eni",
@@ -676,7 +634,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"eni"},
 				mockNetlink:     true,
 			},
-			want: "eni9cfdfc6963c",
+			want:    "eni9cfdfc6963c",
+			wantErr: "",
 		},
 		{
 			name: "Pod with host interface starting as vlan",
@@ -686,7 +645,8 @@ func TestGetHostVethName(t *testing.T) {
 				interfacePrefix: []string{"vlan"},
 				mockNetlink:     true,
 			},
-			want: "vlan9cfdfc6963c",
+			want:    "vlan9cfdfc6963c",
+			wantErr: "",
 		},
 	}
 	for _, tt := range tests {
@@ -697,8 +657,13 @@ func TestGetHostVethName(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetHostVethName(tt.args.podName, tt.args.podNamespace, tt.args.interfacePrefix, logr.New(&log.NullLogSink{}))
+			got, err := GetHostVethName(tt.args.podName, tt.args.podNamespace, 0, tt.args.interfacePrefix)
 			assert.Equal(t, tt.want, got)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
 		})
 	}
 }
