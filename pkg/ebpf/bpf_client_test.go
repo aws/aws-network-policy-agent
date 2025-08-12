@@ -80,19 +80,19 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				hostMask:            "/32",
-				IngressPodToProgMap: new(sync.Map),
-				EgressPodToProgMap:  new(sync.Map),
+				ingressPodToProgMap: new(sync.Map),
+				egressPodToProgMap:  new(sync.Map),
 			}
 
 			if tt.ingressAttached {
 				podIdentifier := utils.GetPodNamespacedName(tt.podName, tt.podNamespace)
-				testBpfClient.IngressPodToProgMap.Store(podIdentifier, ingressProgFD)
+				testBpfClient.ingressPodToProgMap.Store(podIdentifier, ingressProgFD)
 			}
 			if tt.egressAttached {
 				podIdentifier := utils.GetPodNamespacedName(tt.podName, tt.podNamespace)
-				testBpfClient.EgressPodToProgMap.Store(podIdentifier, egressProgFD)
+				testBpfClient.egressPodToProgMap.Store(podIdentifier, egressProgFD)
 			}
-			gotIngress, gotEgress := testBpfClient.IsEBPFProbeAttached(tt.podName, tt.podNamespace)
+			gotIngress, gotEgress := testBpfClient.isEBPFProbeAttached(tt.podName, tt.podNamespace)
 			assert.Equal(t, tt.want.ingress, gotIngress)
 			assert.Equal(t, tt.want.egress, gotEgress)
 		})
@@ -391,11 +391,11 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			policyEndpointeBPFContext: new(sync.Map),
 			bpfSDKClient:              mockBpfClient,
 			bpfTCClient:               mockTCClient,
-			IngressPodToProgMap:       new(sync.Map),
-			EgressPodToProgMap:        new(sync.Map),
-			IngressProgToPodsMap:      new(sync.Map),
-			EgressProgToPodsMap:       new(sync.Map),
-			AttachProbesToPodLock:     new(sync.Map),
+			ingressPodToProgMap:       new(sync.Map),
+			egressPodToProgMap:        new(sync.Map),
+			ingressProgToPodsMap:      new(sync.Map),
+			egressProgToPodsMap:       new(sync.Map),
+			podIdentifierLock:         new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -423,11 +423,11 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				policyEndpointeBPFContext: new(sync.Map),
 				bpfSDKClient:              mockBpfClient,
 				bpfTCClient:               mockTCClient,
-				IngressPodToProgMap:       new(sync.Map),
-				EgressPodToProgMap:        new(sync.Map),
-				IngressProgToPodsMap:      new(sync.Map),
-				EgressProgToPodsMap:       new(sync.Map),
-				AttachProbesToPodLock:     new(sync.Map),
+				ingressPodToProgMap:       new(sync.Map),
+				egressPodToProgMap:        new(sync.Map),
+				ingressProgToPodsMap:      new(sync.Map),
+				egressProgToPodsMap:       new(sync.Map),
+				podIdentifierLock:         new(sync.Map),
 				isMultiNICEnabled:         tt.isMultiNICEnabled,
 				podNameToInterfaceCount:   new(sync.Map),
 			}
@@ -802,11 +802,11 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		policyEndpointeBPFContext: new(sync.Map),
 		bpfSDKClient:              mockBpfClient,
 		bpfTCClient:               mockTCClient,
-		IngressPodToProgMap:       new(sync.Map),
-		EgressPodToProgMap:        new(sync.Map),
-		IngressProgToPodsMap:      new(sync.Map),
-		EgressProgToPodsMap:       new(sync.Map),
-		AttachProbesToPodLock:     new(sync.Map),
+		ingressPodToProgMap:       new(sync.Map),
+		egressPodToProgMap:        new(sync.Map),
+		ingressProgToPodsMap:      new(sync.Map),
+		egressProgToPodsMap:       new(sync.Map),
+		podIdentifierLock:         new(sync.Map),
 		isMultiNICEnabled:         true,
 		ingressBinary:             "tc.v4ingress.bpf.o",
 		egressBinary:              "tc.v4egress.bpf.o",
@@ -820,8 +820,8 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 	assert.NoError(t, err)
 
 	podNamespacedName := utils.GetPodNamespacedName(testPod.Name, testPod.Namespace)
-	_, ingressExists := testBpfClient.IngressPodToProgMap.Load(podNamespacedName)
-	_, egressExists := testBpfClient.EgressPodToProgMap.Load(podNamespacedName)
+	_, ingressExists := testBpfClient.ingressPodToProgMap.Load(podNamespacedName)
+	_, egressExists := testBpfClient.egressPodToProgMap.Load(podNamespacedName)
 	assert.True(t, ingressExists)
 	assert.True(t, egressExists)
 }
@@ -944,4 +944,61 @@ func TestBpfClient_getInterfaceCountFromBackupFile(t *testing.T) {
 
 func Int32Ptr(i int32) *int32 {
 	return &i
+}
+
+func TestIsProgFdShared(t *testing.T) {
+	type want struct {
+		isProgFdShared bool
+	}
+	podToProgFd := map[string]int{
+		"pod1A": 2,
+		"pod2A": 2,
+		"pod1B": 15,
+	}
+	tests := []struct {
+		name         string
+		podName      string
+		podNamespace string
+		want         want
+		wantErr      error
+	}{
+		{
+			name:         "ProgFD Shared",
+			podName:      "pod1",
+			podNamespace: "A",
+			want: want{
+				isProgFdShared: true,
+			},
+			wantErr: nil,
+		},
+		{
+			name:         "ProgFD Not Shared",
+			podName:      "pod1",
+			podNamespace: "B",
+			want: want{
+				isProgFdShared: false,
+			},
+			wantErr: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				ingressPodToProgMap:  new(sync.Map),
+				egressPodToProgMap:   new(sync.Map),
+				ingressProgToPodsMap: new(sync.Map),
+				egressProgToPodsMap:  new(sync.Map),
+			}
+
+			// Set up test data
+			for pod, progFd := range podToProgFd {
+				testBpfClient.ingressPodToProgMap.Store(pod, progFd)
+				currentPodSet, _ := testBpfClient.ingressProgToPodsMap.LoadOrStore(progFd, make(map[string]struct{}))
+				currentPodSet.(map[string]struct{})[pod] = struct{}{}
+			}
+
+			isProgFdShared, _ := testBpfClient.isProgFdShared(tt.podName, tt.podNamespace)
+			assert.Equal(t, tt.want.isProgFdShared, isProgFdShared)
+		})
+	}
 }

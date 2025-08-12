@@ -12,11 +12,11 @@ import (
 func NewMockBpfClient() *bpfClient {
 	return &bpfClient{
 		policyEndpointeBPFContext: new(sync.Map),
-		IngressPodToProgMap:       new(sync.Map),
-		EgressPodToProgMap:        new(sync.Map),
-		IngressProgToPodsMap:      new(sync.Map),
-		EgressProgToPodsMap:       new(sync.Map),
-		GlobalMaps:                new(sync.Map),
+		ingressPodToProgMap:       new(sync.Map),
+		egressPodToProgMap:        new(sync.Map),
+		ingressProgToPodsMap:      new(sync.Map),
+		egressProgToPodsMap:       new(sync.Map),
+		globalMaps:                new(sync.Map),
 		hostMask:                  "/32",
 	}
 }
@@ -24,6 +24,10 @@ func NewMockBpfClient() *bpfClient {
 type MockBpfClient struct{}
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+	return nil
+}
+
+func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	return nil
 }
 
@@ -35,41 +39,11 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, 
 	return nil
 }
 
-func (m *MockBpfClient) IsEBPFProbeAttached(podName string, podNamespace string) (bool, bool) {
-	return false, false
-}
-
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 	return false
 }
-func (m *MockBpfClient) GetIngressPodToProgMap() *sync.Map {
-	return nil
-}
-func (m *MockBpfClient) GetEgressPodToProgMap() *sync.Map {
-	return nil
-}
-func (m *MockBpfClient) GetIngressProgToPodsMap() *sync.Map {
-	return nil
-}
-func (m *MockBpfClient) GetEgressProgToPodsMap() *sync.Map {
-	return nil
-}
-
-func (m *MockBpfClient) DeletePodFromIngressProgPodCaches(podName string, podNamespace string) {
-}
-
-func (m *MockBpfClient) DeletePodFromEgressProgPodCaches(podName string, podNamespace string) {
-}
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
-	return nil
-}
-
-func (m *MockBpfClient) DeleteBPFProgramAndMaps(podIdentifier string) error {
-	return nil
-}
-
-func (m *MockBpfClient) GetDeletePodIdentifierLockMap() *sync.Map {
 	return nil
 }
 
