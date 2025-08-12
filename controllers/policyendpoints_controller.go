@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -189,42 +188,6 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	}
 
 	return nil
-}
-
-func (r *PolicyEndpointsReconciler) IsProgFdShared(targetPodName string,
-	targetPodNamespace string) (bool, error) {
-	targetpodNamespacedName := utils.GetPodNamespacedName(targetPodName, targetPodNamespace)
-	// check ingress caches
-	if targetProgFD, ok := r.ebpfClient.GetIngressPodToProgMap().Load(targetpodNamespacedName); ok {
-		if currentList, ok := r.ebpfClient.GetIngressProgToPodsMap().Load(targetProgFD); ok {
-			podsList, ok := currentList.(map[string]struct{})
-			if ok {
-				if len(podsList) > 1 {
-					log().Debugf("Found shared ingress progFD for target: %s, progFD: %d", targetPodName, targetProgFD)
-					return true, nil
-				}
-				return false, nil // Not shared (only one pod)
-			}
-		}
-	}
-
-	// Check Egress Maps if not found in Ingress
-	if targetProgFD, ok := r.ebpfClient.GetEgressPodToProgMap().Load(targetpodNamespacedName); ok {
-		if currentList, ok := r.ebpfClient.GetEgressProgToPodsMap().Load(targetProgFD); ok {
-			podsList, ok := currentList.(map[string]struct{})
-			if ok {
-				if len(podsList) > 1 {
-					log().Debugf("Found shared egress progFD for target: %s, progFD: %d", targetPodName, targetProgFD)
-					return true, nil
-				}
-				return false, nil // Not shared (only one pod)
-			}
-		}
-	}
-
-	// If not found in both maps, return an error
-	log().Debugf("Pod not found in either IngressPodToProgMap or EgressPodToProgMap: %s", targetpodNamespacedName)
-	return false, fmt.Errorf("pod not found in either IngressPodToProgMap or EgressPodToProgMap: %s", targetpodNamespacedName)
 }
 
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,
