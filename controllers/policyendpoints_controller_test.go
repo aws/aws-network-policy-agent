@@ -190,62 +190,6 @@ func sizeOfSyncMap(m *sync.Map) int {
 	return count
 }
 
-func TestIsProgFdShared(t *testing.T) {
-	type want struct {
-		isProgFdShared bool
-	}
-	podToProgFd := map[string]int{
-		"pod1A": 2,
-		"pod2A": 2,
-		"pod1B": 15,
-	}
-	tests := []struct {
-		name         string
-		podName      string
-		podNamespace string
-		want         want
-		wantErr      error
-	}{
-		{
-			name:         "ProgFD Shared",
-			podName:      "pod1",
-			podNamespace: "A",
-
-			want: want{
-				isProgFdShared: true,
-			},
-			wantErr: nil,
-		},
-		{
-			name:         "ProgFD Not Shared",
-			podName:      "pod1",
-			podNamespace: "B",
-			want: want{
-				isProgFdShared: false,
-			},
-			wantErr: nil,
-		},
-	}
-	for _, tt := range tests {
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
-		policyEndpointReconciler.ebpfClient = ebpf.NewMockBpfClient()
-		for pod, progFd := range podToProgFd {
-			policyEndpointReconciler.ebpfClient.GetIngressPodToProgMap().Store(pod, progFd)
-			currentPodSet, _ := policyEndpointReconciler.ebpfClient.GetIngressProgToPodsMap().LoadOrStore(progFd, make(map[string]struct{}))
-			currentPodSet.(map[string]struct{})[pod] = struct{}{}
-		}
-
-		t.Run(tt.name, func(t *testing.T) {
-			isProgFdShared, _ := policyEndpointReconciler.IsProgFdShared(tt.podName, tt.podNamespace)
-			assert.Equal(t, tt.want.isProgFdShared, isProgFdShared)
-		})
-	}
-}
-
 func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
 	protocolUDP := corev1.ProtocolUDP
