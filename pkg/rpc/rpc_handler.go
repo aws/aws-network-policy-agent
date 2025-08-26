@@ -16,7 +16,6 @@ package rpc
 import (
 	"context"
 	"net"
-	"sync"
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
@@ -144,27 +143,15 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 	}
 
 	log().Infof("Received Delete Network Policy Request for Pod: %s Namespace: %s", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	var err error
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+	pod := types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE}
 
-	value, _ := s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().LoadOrStore(podIdentifier, &sync.Mutex{})
-	deletePodIdentifierLock := value.(*sync.Mutex)
-	deletePodIdentifierLock.Lock()
-	log().Debugf("Got the deletePodIdentifierLock for Pod: %s Namespace: %s PodIdentifier: %s", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, podIdentifier)
-
-	isProgFdShared, err := s.policyReconciler.IsProgFdShared(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	s.policyReconciler.GeteBPFClient().DeletePodFromIngressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	s.policyReconciler.GeteBPFClient().DeletePodFromEgressProgPodCaches(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
-	if err == nil && !isProgFdShared {
-		err = s.policyReconciler.GeteBPFClient().DeleteBPFProgramAndMaps(podIdentifier)
-		if err != nil {
-			log().Errorf("BPF programs and Maps delete failed for podIdentifier: %s, error: %v", podIdentifier, err)
-		}
-		deletePodIdentifierLock.Unlock()
-		s.policyReconciler.GeteBPFClient().GetDeletePodIdentifierLockMap().Delete(podIdentifier)
-	} else {
-		deletePodIdentifierLock.Unlock()
+	err := s.policyReconciler.GeteBPFClient().DeleteBPFProbes(pod, podIdentifier)
+	if err != nil {
+		log().Errorf("Failed to delete BPF probes for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, err)
+		return &rpc.DeleteNpReply{Success: false}, err
 	}
+
 	resp := rpc.DeleteNpReply{
 		Success: true,
 	}
