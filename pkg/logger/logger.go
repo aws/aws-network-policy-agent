@@ -3,6 +3,7 @@ package logger
 import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	"go.uber.org/zap"
 )
 
 var log Logger
@@ -52,5 +53,6 @@ func Get() Logger {
 
 func GetControllerRuntimeLogger() logr.Logger {
 	zapSugared := Get().(*structuredLogger).zapLogger
-	return zapr.NewLogger(zapSugared.Desugar())
+	zapLogger := zapSugared.Desugar().WithOptions(zap.AddCallerSkip(-2))
+	return zapr.NewLogger(zapLogger)
 }
