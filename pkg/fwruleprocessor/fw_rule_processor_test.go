@@ -11,13 +11,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules(t *testing.T) {
+func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv4(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
-	//protocolUDP := corev1.ProtocolUDP
-	//protocolSCTP := corev1.ProtocolSCTP
 
 	var testIP v1alpha1.NetworkAddress
-	var gotKeys []string
 
 	nodeIP := "10.1.1.1"
 	_, nodeIPCIDR, _ := net.ParseCIDR(nodeIP + "/32")
@@ -27,6 +24,8 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules(t *testing.T) {
 	testPort = 80
 	testIP = "10.1.1.2/32"
 	_, testIPCIDR, _ := net.ParseCIDR(string(testIP))
+
+	_, catchAllCIDR, _ := net.ParseCIDR(string("0.0.0.0/0"))
 
 	testIPKey := utils.ComputeTrieKey(*testIPCIDR, false)
 	type args struct {
@@ -56,11 +55,106 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules(t *testing.T) {
 			},
 			want: []string{string(nodeIPKey), string(testIPKey)},
 		},
+		{
+			name: "CatchAll CIDR",
+			args: args{
+				[]EbpfFirewallRules{
+					{
+						IPCidr: "0.0.0.0/0",
+					},
+				},
+			},
+			want: []string{string(nodeIPKey), string(utils.ComputeTrieKey(*catchAllCIDR, false))},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewFirewallRuleProcessor("10.1.1.1", "/32", false).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			var gotKeys []string
+			if tt.wantErr != nil {
+				assert.EqualError(t, err, tt.wantErr.Error())
+			} else {
+				for key, _ := range got {
+					gotKeys = append(gotKeys, key)
+				}
+				sort.Strings(tt.want)
+				sort.Strings(gotKeys)
+				assert.Equal(t, tt.want, gotKeys)
+			}
+		})
+	}
+}
+
+func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv6(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+
+	nodeIP := "2001:db8:abcd:0012::1"
+	_, nodeIPCIDR, _ := net.ParseCIDR(nodeIP + "/128")
+	nodeIPKey := utils.ComputeTrieKey(*nodeIPCIDR, true)
+
+	var testPort int32
+	testPort = 80
+	_, testIPCIDR, _ := net.ParseCIDR("2001:db8:abcd:0012::10/128")
+
+	_, catchAllCIDR, _ := net.ParseCIDR("::/0")
+
+	testIPKey := utils.ComputeTrieKey(*testIPCIDR, true)
+	type args struct {
+		firewallRules []EbpfFirewallRules
+	}
+
+	tests := []struct {
+		name    string
+		args    args
+		want    []string
+		wantErr error
+	}{
+		{
+			name: "CIDR with Port and Protocol",
+			args: args{
+				[]EbpfFirewallRules{
+					{
+						IPCidr: "2001:db8:abcd:0012::10/128",
+						L4Info: []v1alpha1.Port{
+							{
+								Protocol: &protocolTCP,
+								Port:     &testPort,
+							},
+						},
+					},
+				},
+			},
+			want: []string{string(nodeIPKey), string(testIPKey)},
+		},
+		{
+			name: "CatchAll IPv4 CIDR",
+			args: args{
+				[]EbpfFirewallRules{
+					{
+						IPCidr: "::/0",
+					},
+				},
+			},
+			want: []string{string(nodeIPKey), string(utils.ComputeTrieKey(*catchAllCIDR, true))},
+		},
+		{
+			name: "CatchAll CIDR IPv4 ignored in rule computation",
+			args: args{
+				[]EbpfFirewallRules{
+					{
+						IPCidr: "0.0.0.0/0",
+					},
+				},
+			},
+			want: []string{string(nodeIPKey)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			var gotKeys []string
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
 			} else {

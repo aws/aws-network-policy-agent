@@ -39,10 +39,6 @@ import (
 	networking "k8s.io/api/networking/v1"
 )
 
-const (
-	defaultLocalConntrackCacheCleanupPeriodInSeconds = 300
-)
-
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -84,11 +80,12 @@ func prometheusRegister() {
 }
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
-func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient) *PolicyEndpointsReconciler {
+func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
 		k8sClient:  k8sClient,
 		nodeIP:     nodeIP,
 		ebpfClient: ebpfClient,
+		enableIPv6: enableIPv6,
 	}
 
 	prometheusRegister()
@@ -111,6 +108,7 @@ type PolicyEndpointsReconciler struct {
 	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
+	enableIPv6 bool
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
@@ -244,13 +242,13 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		if len(ingressRules) == 0 && !isIngressIsolated {
 			//Add allow-all entry to Ingress rule set
 			log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-			r.addCatchAllEntry(ctx, &ingressRules)
+			r.addCatchAllEntry(&ingressRules)
 		}
 
 		if len(egressRules) == 0 && !isEgressIsolated {
 			//Add allow-all entry to Egress rule set
 			log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-			r.addCatchAllEntry(ctx, &egressRules)
+			r.addCatchAllEntry(&egressRules)
 		}
 
 		// Setup/configure eBPF probes/maps for local pods
@@ -339,14 +337,14 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod ty
 				// No active ingress rules for this pod, but we only should land here
 				// if there are active egress rules. So, we need to add an allow-all entry to ingress rule set
 				log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-				r.addCatchAllEntry(ctx, &ingressRules)
+				r.addCatchAllEntry(&ingressRules)
 			}
 
 			if noActiveEgressPolicies {
 				// No active egress rules for this pod but we only should land here
 				// if there are active ingress rules. So, we need to add an allow-all entry to egress rule set
 				log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-				r.addCatchAllEntry(ctx, &egressRules)
+				r.addCatchAllEntry(&egressRules)
 			}
 
 			err = r.updateeBPFMaps(ctx, podIdentifier, ingressRules, egressRules)
@@ -647,18 +645,18 @@ func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx
 	}
 }
 
-func (r *PolicyEndpointsReconciler) addCatchAllEntry(ctx context.Context, firewallRules *[]fwrp.EbpfFirewallRules) {
+func (r *PolicyEndpointsReconciler) addCatchAllEntry(firewallRules *[]fwrp.EbpfFirewallRules) {
 	//Add allow-all entry to firewall rule set
-	catchAllRule := policyk8sawsv1.EndpointInfo{
-		CIDR: "0.0.0.0/0",
+	var catchAllCIDR string
+	if r.enableIPv6 {
+		catchAllCIDR = "::/0"
+	} else {
+		catchAllCIDR = "0.0.0.0/0"
 	}
 	*firewallRules = append(*firewallRules,
 		fwrp.EbpfFirewallRules{
-			IPCidr: catchAllRule.CIDR,
-			L4Info: catchAllRule.Ports,
+			IPCidr: policyk8sawsv1.NetworkAddress(catchAllCIDR),
 		})
-
-	return
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -706,14 +704,14 @@ func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdent
 		// No active ingress rules for this pod, but we only should land here
 		// if there are active egress rules. So, we need to add an allow-all entry to ingress rule set
 		log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-		r.addCatchAllEntry(context.Background(), &ingressRules)
+		r.addCatchAllEntry(&ingressRules)
 	}
 
 	if len(egressRules) == 0 && !isEgressIsolated {
 		// No active egress rules for this pod but we only should land here
 		// if there are active ingress rules. So, we need to add an allow-all entry to egress rule set
 		log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-		r.addCatchAllEntry(context.Background(), &egressRules)
+		r.addCatchAllEntry(&egressRules)
 	}
 
 	return ingressRules, egressRules, nil

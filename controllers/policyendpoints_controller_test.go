@@ -44,7 +44,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile call for Create PolicyEndpoint with PodEndpoint local to Node", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{})
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -90,7 +90,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile for Create and Delete PE", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{})
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -500,7 +500,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -757,8 +757,7 @@ func TestAddCatchAllEntry(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			policyEndpointReconciler.addCatchAllEntry(context.Background(),
-				&tt.firewallRules)
+			policyEndpointReconciler.addCatchAllEntry(&tt.firewallRules)
 			assert.Equal(t, tt.want, sampleFirewallRulesWithCatchAllEntry)
 		})
 	}
@@ -915,7 +914,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1160,7 +1159,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
