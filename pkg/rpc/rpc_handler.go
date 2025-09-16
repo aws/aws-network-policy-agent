@@ -16,6 +16,7 @@ package rpc
 import (
 	"context"
 	"net"
+	"os"
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
@@ -41,7 +42,7 @@ var (
 )
 
 const (
-	npgRPCaddress         = "127.0.0.1:50052"
+	npaSocketPath         = "/var/run/aws-node/npa.sock"
 	grpcHealthServiceName = "grpc.health.v1.np-agent"
 )
 
@@ -160,11 +161,17 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 
 // RunRPCHandler handles request from gRPC
 func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) error {
-	log().Infof("Serving RPC Handler on Address: %s", npgRPCaddress)
-	listener, err := net.Listen("tcp", npgRPCaddress)
+	log().Infof("Serving RPC Handler on Unix socket: %s", npaSocketPath)
+
+	if _, err := os.Stat(npaSocketPath); err == nil {
+		log().Infof("Removing stale socket file: %s", npaSocketPath)
+		os.Remove(npaSocketPath)
+	}
+
+	listener, err := net.Listen("unix", npaSocketPath)
 	if err != nil {
-		log().Errorf("Failed to listen gRPC port: %v", err)
-		return errors.Wrap(err, "network policy agent: failed to listen to gRPC port")
+		log().Errorf("Failed to listen on unix socket: %v", err)
+		return errors.Wrap(err, "network policy agent: failed to listen on unix socket")
 	}
 	grpcServer := grpc.NewServer()
 	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler})
