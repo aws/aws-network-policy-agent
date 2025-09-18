@@ -42,7 +42,6 @@ var (
 )
 
 const (
-	npaSocketPath         = "/var/run/aws-node/npa.sock"
 	grpcHealthServiceName = "grpc.health.v1.np-agent"
 )
 
@@ -160,18 +159,21 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 }
 
 // RunRPCHandler handles request from gRPC
-func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) error {
+func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, npaSocketPath string) (<-chan error, error) {
 	log().Infof("Serving RPC Handler on Unix socket: %s", npaSocketPath)
 
 	if _, err := os.Stat(npaSocketPath); err == nil {
 		log().Infof("Removing stale socket file: %s", npaSocketPath)
-		os.Remove(npaSocketPath)
+		err = os.Remove(npaSocketPath)
+		if err != nil {
+			log().Warnf("got error in removing socket file %v", err)
+		}
 	}
 
 	listener, err := net.Listen("unix", npaSocketPath)
 	if err != nil {
 		log().Errorf("Failed to listen on unix socket: %v", err)
-		return errors.Wrap(err, "network policy agent: failed to listen on unix socket")
+		return nil, errors.Wrap(err, "network policy agent: failed to listen on unix socket")
 	}
 	grpcServer := grpc.NewServer()
 	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler})
@@ -182,10 +184,13 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler) erro
 
 	// Register reflection service on gRPC server.
 	reflection.Register(grpcServer)
-	if err := grpcServer.Serve(listener); err != nil {
-		log().Errorf("Failed to start server on gRPC port: %v", err)
-		return errors.Wrap(err, "network policy agent: failed to start server on gPRC port")
-	}
+	errCh := make(chan error, 1)
+	go func() {
+		if err := grpcServer.Serve(listener); err != nil {
+			errCh <- errors.Wrap(err, "network policy agent: grpc serve failed")
+		}
+		close(errCh)
+	}()
 	log().Info("Done with RPC Handler initialization")
-	return nil
+	return errCh, nil
 }
