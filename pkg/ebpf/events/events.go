@@ -218,7 +218,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+					log().Errorf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
 						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
 				} else {
 					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
@@ -243,7 +243,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+					log().Errorf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
 						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
 				} else {
 					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
