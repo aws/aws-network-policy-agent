@@ -44,6 +44,9 @@ struct lpm_trie_val {
 	__u32 protocol;
 	__u32 start_port;
 	__u32 end_port;
+	__u32 policy_id;        // Hash of policy name+namespace
+	__u8  rule_precedence;  // Priority level (0-255)
+	__u8  reserved[3];      // Padding for alignment
 };
 
 struct conntrack_key {
@@ -68,6 +71,9 @@ struct data_t {
 	__u32  verdict;
 	__u32 packet_sz;
 	__u8 is_egress;
+	__u32  policy_id;           // Policy that made the decision
+	__u8   rule_precedence;     // Precedence level of the rule
+	__u8   reserved[3];         // Padding for alignment
 };
 
 struct bpf_map_def_pvt SEC("maps") ingress_map = {
@@ -92,6 +98,25 @@ struct bpf_map_def_pvt SEC("maps") ingress_pod_state_map = {
     .pinning     = PIN_GLOBAL_NS,
 };
 
+#define MAX_POLICY_NAME_LEN 63
+#define MAX_NAMESPACE_LEN 63
+
+struct policy_info {
+    char policy_name[MAX_POLICY_NAME_LEN + 1];      // Null-terminated
+    char policy_namespace[MAX_NAMESPACE_LEN + 1];   // Null-terminated
+    __u64 creation_timestamp;                       // For tie-breaking
+    __u8  policy_type;                             // Ingress=1, Egress=2, Both=3
+    __u8  reserved[7];                             // Padding for alignment
+};
+
+struct bpf_map_def_pvt SEC("maps") policy_metadata_map = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(__u32),  // policy_id
+    .value_size = sizeof(struct policy_info),
+    .max_entries = 2048,        // Support up to 2048 unique policies
+    .pinning = PIN_GLOBAL_NS,
+};
+
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
@@ -99,14 +124,18 @@ static __always_inline int evaluateByLookUp(struct keystruct trie_key, struct co
 	//Check if it's in the allowed list
 	struct lpm_trie_val *trie_val = bpf_map_lookup_elem(&ingress_map, &trie_key);
 	if (trie_val == NULL) {
-		evt.verdict = 0;		    
+		evt.verdict = 0;
+		evt.policy_id = 0; // No policy matched
+		evt.rule_precedence = 0;
 		bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 		return BPF_DROP;
 	}
 
 	for (int i = 0; i < MAX_PORT_PROTOCOL; i++, trie_val++){
 		if (trie_val->protocol == RESERVED_IP_PROTOCOL) {
-			evt.verdict = 0;	
+			evt.verdict = 0;
+			evt.policy_id = trie_val->policy_id;
+			evt.rule_precedence = trie_val->rule_precedence;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_DROP;
 		}
@@ -136,11 +165,15 @@ static __always_inline int evaluateByLookUp(struct keystruct trie_key, struct co
 			}
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
+			evt.policy_id = trie_val->policy_id;
+			evt.rule_precedence = trie_val->rule_precedence;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
 		}
 	}
-	evt.verdict = 0;		    
+	evt.verdict = 0;
+	evt.policy_id = trie_val ? trie_val->policy_id : 0; // Policy matched but port didn't
+	evt.rule_precedence = trie_val ? trie_val->rule_precedence : 0;
 	bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 	return BPF_DROP;
 }
@@ -295,6 +328,8 @@ int handle_ingress(struct __sk_buff *skb)
 			new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
+			evt.policy_id = 0; // Default allow - no specific policy
+			evt.rule_precedence = 0;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
 		}

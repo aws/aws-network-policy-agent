@@ -1071,10 +1071,15 @@ func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace stri
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
 	start := time.Now()
 	duration := msSince(start)
-	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
+	mapEntries, policyMetadata, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
 		return err
+	}
+
+	// Update policy metadata cache for event logging
+	if len(policyMetadata) > 0 {
+		events.UpdatePolicyCache(policyMetadata)
 	}
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)

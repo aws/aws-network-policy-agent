@@ -26,7 +26,7 @@ var (
 	ANY_IP_PROTOCOL                 = 254
 	TRIE_KEY_LENGTH                 = 8
 	TRIE_V6_KEY_LENGTH              = 20
-	TRIE_VALUE_LENGTH               = 288
+	TRIE_VALUE_LENGTH               = 480 // 24 entries * 20 bytes each (protocol:4 + start_port:4 + end_port:4 + policy_id:4 + precedence:1 + reserved:3)
 	BPF_PROGRAMS_PIN_PATH_DIRECTORY = "/sys/fs/bpf/globals/aws/programs/"
 	BPF_MAPS_PIN_PATH_DIRECTORY     = "/sys/fs/bpf/globals/aws/maps/"
 	TC_INGRESS_PROG                 = "handle_ingress"
@@ -216,6 +216,10 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 }
 
 func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
+	return ComputeTrieValueWithPolicy(l4Info, allowAll, denyAll, 0, 0)
+}
+
+func ComputeTrieValueWithPolicy(l4Info []v1alpha1.Port, allowAll, denyAll bool, policyID uint32, precedence uint8) []byte {
 	var startPort, endPort, protocol int
 
 	value := make([]byte, TRIE_VALUE_LENGTH)
@@ -233,7 +237,13 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
-		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], policyID)
+		startOffset += 4
+		value[startOffset] = precedence
+		startOffset += 1
+		// Reserved bytes (3 bytes for alignment)
+		startOffset += 3
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v policyID: %v precedence: %v", protocol, startPort, endPort, policyID, precedence)
 	}
 
 	for _, l4Entry := range l4Info {
@@ -252,13 +262,19 @@ func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
 		if l4Entry.EndPort != nil {
 			endPort = int(*l4Entry.EndPort)
 		}
-		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v policyID: %v precedence: %v", protocol, startPort, endPort, policyID, precedence)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
 		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], policyID)
+		startOffset += 4
+		value[startOffset] = precedence
+		startOffset += 1
+		// Reserved bytes (3 bytes for alignment)
+		startOffset += 3
 	}
 
 	return value
@@ -421,9 +437,7 @@ func ConvByteToConntrackV6(keyByte []byte) ConntrackKeyV6 {
 }
 
 func CopyV6Bytes(dest *[16]byte, src [16]byte) {
-	for i := 0; i < len(src); i++ {
-		dest[i] = src[i]
-	}
+	*dest = src
 }
 
 type BPFTrieKey struct {

@@ -44,6 +44,9 @@ struct lpm_trie_val {
     __u32 protocol;
     __u32 start_port;
     __u32 end_port;
+    __u32 policy_id;        // Hash of policy name+namespace
+    __u8  rule_precedence;  // Priority level (0-255)
+    __u8  reserved[3];      // Padding for alignment
 };
 
 struct conntrack_key {
@@ -68,6 +71,9 @@ struct data_t {
 	__u32  verdict;
 	__u32 packet_sz;
 	__u8 is_egress;
+	__u32  policy_id;           // Policy that made the decision
+	__u8   rule_precedence;     // Precedence level of the rule
+	__u8   reserved[3];         // Padding for alignment
 };
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
@@ -23,9 +24,13 @@ var (
 )
 
 type EbpfFirewallRules struct {
-	IPCidr v1alpha1.NetworkAddress
-	Except []v1alpha1.NetworkAddress
-	L4Info []v1alpha1.Port
+	IPCidr          v1alpha1.NetworkAddress
+	Except          []v1alpha1.NetworkAddress
+	L4Info          []v1alpha1.Port
+	PolicyID        uint32 // NEW: Hash of policy name+namespace
+	PolicyName      string // NEW: Policy name for logging
+	PolicyNamespace string // NEW: Policy namespace for logging
+	Precedence      uint8  // NEW: Rule precedence
 }
 
 type FirewallRuleProcessor struct {
@@ -66,9 +71,10 @@ func NewFirewallRuleProcessor(nodeIP string, hostMask string, enableIPv6 bool) *
 //   6. Finally, all CIDRs are encoded into trie keys and their corresponding merged/derived L4 info is encoded
 //      into the values, forming the output map.
 
-func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, map[uint32]utils.PolicyInfo, error) {
 
 	firewallMap := make(map[string][]byte)
+	policyMetadata := make(map[uint32]utils.PolicyInfo)
 	cidrsMap := make(map[string]EbpfFirewallRules)
 	exceptCidrs := make(map[string]struct{})
 	nonHostCIDRs := make(map[string]EbpfFirewallRules)
@@ -82,7 +88,23 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	//Sort the rules
 	sortFirewallRulesByPrefixLength(firewallRules, f.hostMask)
 
-	for _, firewallRule := range firewallRules {
+	// Group rules by CIDR to handle multiple policies affecting same CIDR
+	cidrRules := make(map[string][]EbpfFirewallRules)
+	for _, rule := range firewallRules {
+		cidr := string(rule.IPCidr)
+		if !strings.Contains(cidr, "/") {
+			cidr += f.hostMask
+		}
+		cidrRules[cidr] = append(cidrRules[cidr], rule)
+	}
+
+	// Process each CIDR group
+	for _, rules := range cidrRules {
+		// Select winning rule based on precedence
+		winningRule := f.selectWinningRule(rules)
+
+		// Process the winning rule
+		firewallRule := winningRule
 		// Keep track of except CIDRs to handle later
 		for _, exceptCidr := range firewallRule.Except {
 			exceptCidrs[string(exceptCidr)] = struct{}{}
@@ -155,10 +177,22 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 		if len(value.L4Info) != 0 {
 			value.L4Info = mergeDuplicateL4Info(value.L4Info)
 		}
-		firewallMap[string(firewallKey)] = utils.ComputeTrieValue(value.L4Info, false, false)
+
+		// Use new function with policy information
+		firewallMap[string(firewallKey)] = utils.ComputeTrieValueWithPolicy(value.L4Info, false, false, value.PolicyID, value.Precedence)
+
+		// Store policy metadata
+		if value.PolicyID != 0 {
+			policyMetadata[value.PolicyID] = utils.PolicyInfo{
+				Name:              value.PolicyName,
+				Namespace:         value.PolicyNamespace,
+				CreationTimestamp: time.Now().Unix(),
+				PolicyType:        utils.DeterminePolicyType(true, true), // Will be updated by caller
+			}
+		}
 	}
 
-	return firewallMap, nil
+	return firewallMap, policyMetadata, nil
 }
 
 // sorting Firewall Rules in Ascending Order of Prefix length
@@ -262,4 +296,35 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	}
 
 	return result
+}
+
+// selectWinningRule selects the rule with highest precedence from multiple rules for the same CIDR
+func (f *FirewallRuleProcessor) selectWinningRule(rules []EbpfFirewallRules) EbpfFirewallRules {
+	if len(rules) == 1 {
+		return rules[0]
+	}
+
+	// Sort by precedence (highest first), then by policy name for deterministic results
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Precedence != rules[j].Precedence {
+			return rules[i].Precedence > rules[j].Precedence
+		}
+		// Tie-breaker: lexicographic order of policy name for consistency
+		if rules[i].PolicyName != rules[j].PolicyName {
+			return rules[i].PolicyName < rules[j].PolicyName
+		}
+		// Final tie-breaker: namespace
+		return rules[i].PolicyNamespace < rules[j].PolicyNamespace
+	})
+
+	winningRule := rules[0]
+
+	// Log if there were competing rules
+	if len(rules) > 1 {
+		log().Infof("Policy precedence conflict resolved for CIDR %s: %s/%s (precedence %d) wins over %d other policies",
+			string(winningRule.IPCidr), winningRule.PolicyNamespace, winningRule.PolicyName,
+			winningRule.Precedence, len(rules)-1)
+	}
+
+	return winningRule
 }

@@ -387,21 +387,46 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				return nil, nil, isIngressIsolated, isEgressIsolated, err
 			}
 
+			// Extract policy information
+			policyName := currentPE.Spec.PolicyRef.Name
+			policyNamespace := currentPE.Spec.PolicyRef.Namespace
+			policyID := utils.GeneratePolicyID(policyName, policyNamespace)
+
 			for _, endPointInfo := range currentPE.Spec.Ingress {
+				precedence := utils.CalculatePrecedence(string(endPointInfo.CIDR), endPointInfo.Ports, utils.PolicyInfo{
+					Name:              policyName,
+					Namespace:         policyNamespace,
+					CreationTimestamp: time.Now().Unix(),
+				})
+
 				ingressRules = append(ingressRules,
 					fwrp.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
+						IPCidr:          endPointInfo.CIDR,
+						Except:          endPointInfo.Except,
+						L4Info:          endPointInfo.Ports,
+						PolicyID:        policyID,
+						PolicyName:      policyName,
+						PolicyNamespace: policyNamespace,
+						Precedence:      precedence,
 					})
 			}
 
 			for _, endPointInfo := range currentPE.Spec.Egress {
+				precedence := utils.CalculatePrecedence(string(endPointInfo.CIDR), endPointInfo.Ports, utils.PolicyInfo{
+					Name:              policyName,
+					Namespace:         policyNamespace,
+					CreationTimestamp: time.Now().Unix(),
+				})
+
 				egressRules = append(egressRules,
 					fwrp.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
+						IPCidr:          endPointInfo.CIDR,
+						Except:          endPointInfo.Except,
+						L4Info:          endPointInfo.Ports,
+						PolicyID:        policyID,
+						PolicyName:      policyName,
+						PolicyNamespace: policyNamespace,
+						Precedence:      precedence,
 					})
 			}
 			log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
@@ -655,7 +680,11 @@ func (r *PolicyEndpointsReconciler) addCatchAllEntry(firewallRules *[]fwrp.EbpfF
 	}
 	*firewallRules = append(*firewallRules,
 		fwrp.EbpfFirewallRules{
-			IPCidr: policyk8sawsv1.NetworkAddress(catchAllCIDR),
+			IPCidr:          policyk8sawsv1.NetworkAddress(catchAllCIDR),
+			PolicyID:        0, // Default policy - no specific policy
+			PolicyName:      "default-allow",
+			PolicyNamespace: "system",
+			Precedence:      0, // Lowest precedence
 		})
 }
 

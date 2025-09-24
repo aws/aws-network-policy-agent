@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	awsWrapper "github.com/aws/aws-network-policy-agent/pkg/aws"
@@ -60,30 +61,70 @@ var (
 	)
 )
 
+// Policy lookup cache
+var (
+	policyCache      = make(map[uint32]utils.PolicyInfo)
+	policyCacheMutex sync.RWMutex
+)
+
 func init() {
 	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal)
 }
 
+// UpdatePolicyCache updates the policy cache with new policy information
+func UpdatePolicyCache(policies map[uint32]utils.PolicyInfo) {
+	policyCacheMutex.Lock()
+	defer policyCacheMutex.Unlock()
+
+	// Update cache with new policies
+	for id, policy := range policies {
+		policyCache[id] = policy
+	}
+}
+
+// lookupPolicyInfo retrieves policy information by ID
+func lookupPolicyInfo(policyID uint32) (string, string) {
+	if policyID == 0 {
+		return "default", "default"
+	}
+
+	policyCacheMutex.RLock()
+	if policy, exists := policyCache[policyID]; exists {
+		policyCacheMutex.RUnlock()
+		return policy.Name, policy.Namespace
+	}
+	policyCacheMutex.RUnlock()
+
+	// Cache miss - this should be rare in steady state
+	return "cache-miss", "cache-miss"
+}
+
 type ringBufferDataV4_t struct {
-	SourceIP   uint32
-	SourcePort uint32
-	DestIP     uint32
-	DestPort   uint32
-	Protocol   uint32
-	Verdict    uint32
-	PacketSz   uint32
-	IsEgress   uint8
+	SourceIP       uint32
+	SourcePort     uint32
+	DestIP         uint32
+	DestPort       uint32
+	Protocol       uint32
+	Verdict        uint32
+	PacketSz       uint32
+	IsEgress       uint8
+	PolicyID       uint32   // NEW: Policy that made the decision
+	RulePrecedence uint8    // NEW: Precedence level of the rule
+	Reserved       [3]uint8 // Padding
 }
 
 type ringBufferDataV6_t struct {
-	SourceIP   [16]byte
-	SourcePort uint32
-	DestIP     [16]byte
-	DestPort   uint32
-	Protocol   uint32
-	Verdict    uint32
-	PacketSz   uint32
-	IsEgress   uint8
+	SourceIP       [16]byte
+	SourcePort     uint32
+	DestIP         [16]byte
+	DestPort       uint32
+	Protocol       uint32
+	Verdict        uint32
+	PacketSz       uint32
+	IsEgress       uint8
+	PolicyID       uint32   // NEW: Policy that made the decision
+	RulePrecedence uint8    // NEW: Precedence level of the rule
+	Reserved       [3]uint8 // Padding
 }
 
 func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
@@ -215,17 +256,24 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					direction = "ingress"
 				}
 
+				// Lookup policy information
+				policyName, policyNamespace := lookupPolicyInfo(rb.PolicyID)
+
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
-						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Policy: %s/%s Precedence: %d",
+						utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, verdict, direction,
+						policyNamespace, policyName, rb.RulePrecedence)
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
-						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Policy: %s/%s Precedence: %d",
+						utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, verdict, direction,
+						policyNamespace, policyName, rb.RulePrecedence)
 				}
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -240,17 +288,24 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					direction = "ingress"
 				}
 
+				// Lookup policy information
+				policyName, policyNamespace := lookupPolicyInfo(rb.PolicyID)
+
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
-						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Policy: %s/%s Precedence: %d",
+						utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, verdict, direction,
+						policyNamespace, policyName, rb.RulePrecedence)
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
-						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Policy: %s/%s Precedence: %d",
+						utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, verdict, direction,
+						policyNamespace, policyName, rb.RulePrecedence)
 				}
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
 			}
 
 			if enableCloudWatchLogs {
