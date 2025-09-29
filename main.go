@@ -52,6 +52,7 @@ import (
 var (
 	scheme              = runtime.NewScheme()
 	LOCAL_IPAMD_ADDRESS = "127.0.0.1:50051"
+	npaSocketPath       = "/var/run/aws-node/npa.sock"
 )
 
 func init() {
@@ -111,7 +112,7 @@ func main() {
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled))
 		ebpfClient.ReAttachEbpfProbes()
 
-		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
+		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
 
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
@@ -134,9 +135,15 @@ func main() {
 
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
+	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
+	errCh, err := rpc.RunRPCHandler(policyEndpointController, npaSocketPath)
+	if err != nil {
+		log.Errorf("Failed to set up gRPC Handler %v", err)
+		os.Exit(1)
+	}
 	go func() {
-		if err := rpc.RunRPCHandler(policyEndpointController); err != nil {
-			log.Errorf("Failed to set up gRPC Handler %v", err)
+		if err := <-errCh; err != nil {
+			log.Errorf("gRPC server stopped: %v", err)
 			os.Exit(1)
 		}
 	}()
