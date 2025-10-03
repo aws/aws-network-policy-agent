@@ -23,6 +23,7 @@ import (
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
@@ -151,9 +152,13 @@ func main() {
 	log.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		log.Errorf("problem running manager %v", err)
+		// Cleanup async services before exit
+		events.ShutdownAsyncServices()
 		os.Exit(1)
 	}
 
+	// Cleanup async services on normal exit
+	events.ShutdownAsyncServices()
 }
 
 // loadControllerConfig loads the controller configuration

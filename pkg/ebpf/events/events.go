@@ -144,10 +144,10 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 		return err
 	} else {
 		if enableCloudWatchLogs {
-			log().Info("Cloudwatch log support is enabled")
-			err = setupCW(ctx)
+			log().Info("Cloudwatch log support is enabled - initializing async uploader")
+			err = setupAsyncCW(ctx)
 			if err != nil {
-				log().Errorf("unable to initialize Cloudwatch Logs for Policy events %v", err)
+				log().Errorf("unable to initialize async Cloudwatch uploader for Policy events %v", err)
 				return err
 			}
 		}
@@ -157,6 +157,55 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 	return nil
 }
 
+// setupAsyncCW initializes the async CloudWatch uploader
+func setupAsyncCW(ctx context.Context) error {
+	awsCloudConfig := awsWrapper.CloudConfig{}
+	fs := pflag.NewFlagSet("", pflag.ExitOnError)
+	awsCloudConfig.BindFlags(fs)
+
+	cloud, err := awsWrapper.NewCloud(ctx, awsCloudConfig)
+	if err != nil {
+		log().Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
+		return err
+	}
+
+	cwlClient := cloud.CloudWatchLogs()
+	clusterName := cloud.ClusterName()
+
+	customlogGroupName := EKS_CW_PATH + clusterName + "/cluster"
+	if clusterName == utils.DEFAULT_CLUSTER_NAME {
+		customlogGroupName = NON_EKS_CW_PATH + clusterName + "/cluster"
+	}
+	log().Infof("Setting loggroup Name %s", customlogGroupName)
+
+	// Ensure log group exists (synchronous setup, but only done once)
+	err = ensureLogGroupExistsAsync(ctx, customlogGroupName, cwlClient)
+	if err != nil {
+		log().Errorf("unable to create log group %s, err: %v", customlogGroupName, err)
+		return err
+	}
+
+	// Create log stream for async uploader
+	streamName, err := createLogStreamAsync(ctx, customlogGroupName, cwlClient)
+	if err != nil {
+		log().Errorf("unable to create log stream, err: %v", err)
+		return err
+	}
+
+	// Initialize async uploader
+	config := AsyncCloudWatchConfig{
+		BatchSize:     100,             // Batch up to 100 events
+		BatchTimeout:  5 * time.Second, // Or send every 5 seconds
+		ChannelBuffer: 1000,            // Buffer up to 1000 events
+		LogGroupName:  customlogGroupName,
+		LogStreamName: streamName,
+		CWLClient:     cwlClient,
+	}
+
+	return InitializeAsyncCloudWatchUploader(ctx, config)
+}
+
+// Keep the old setupCW for backward compatibility if needed
 func setupCW(ctx context.Context) error {
 	awsCloudConfig := awsWrapper.CloudConfig{}
 	fs := pflag.NewFlagSet("", pflag.ExitOnError)
@@ -236,9 +285,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
-		done := false
 		for record := range ringbufferdata {
-			var logQueue []types.InputLogEvent
 			var message string
 			direction := "egress"
 			if enableIPv6 {
@@ -309,10 +356,8 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 			}
 
 			if enableCloudWatchLogs {
-				done = publishDataToCloudwatch(ctx, logQueue, message)
-				if done {
-					break
-				}
+				// Send to async uploader (non-blocking)
+				SendAsyncCloudWatchEvent(message)
 			}
 		}
 	}(ringbufferdata)
@@ -343,6 +388,42 @@ func ensureLogGroupExists(ctx context.Context, name string) error {
 	return nil
 }
 
+// ensureLogGroupExistsAsync is the async version for log group creation
+func ensureLogGroupExistsAsync(ctx context.Context, name string, cwlClient services.CloudWatchLogs) error {
+	resp, err := cwlClient.DescribeLogGroups(ctx, &cloudwatchlogs.DescribeLogGroupsInput{})
+	if err != nil {
+		return err
+	}
+
+	for _, logGroup := range resp.LogGroups {
+		if *logGroup.LogGroupName == name {
+			return nil
+		}
+	}
+
+	_, err = cwlClient.CreateLogGroup(ctx, &cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(name),
+	})
+	if err != nil {
+		var resourceExists *types.ResourceAlreadyExistsException
+		if errors.As(err, &resourceExists) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// createLogStreamAsync creates a log stream for the async uploader
+func createLogStreamAsync(ctx context.Context, logGroupName string, cwlClient services.CloudWatchLogs) (string, error) {
+	name := "aws-network-policy-agent-audit-" + uuid.New().String()
+	_, err := cwlClient.CreateLogStream(ctx, &cloudwatchlogs.CreateLogStreamInput{
+		LogGroupName:  aws.String(logGroupName),
+		LogStreamName: aws.String(name),
+	})
+	return name, err
+}
+
 func createLogStream(ctx context.Context) error {
 	name := "aws-network-policy-agent-audit-" + uuid.New().String()
 	_, err := cwl.CreateLogStream(ctx, &cloudwatchlogs.CreateLogStreamInput{
@@ -352,4 +433,9 @@ func createLogStream(ctx context.Context) error {
 
 	logStreamName = name
 	return err
+}
+
+// ShutdownAsyncServices shuts down async CloudWatch uploader
+func ShutdownAsyncServices() {
+	ShutdownAsyncCloudWatchUploader()
 }
