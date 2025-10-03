@@ -14,6 +14,7 @@ import (
 	awsWrapper "github.com/aws/aws-network-policy-agent/pkg/aws"
 	"github.com/aws/aws-network-policy-agent/pkg/aws/services"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	"github.com/aws/aws-network-policy-agent/pkg/podmapper"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 
@@ -320,7 +321,22 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 						policyNamespace, policyName, rb.RulePrecedence)
 				}
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
+				// Get pod names for source and destination IPs
+				srcIP := utils.ConvByteToIPv6(rb.SourceIP).String()
+				dstIP := utils.ConvByteToIPv6(rb.DestIP).String()
+				srcPodName := podmapper.GetPodNameForIP(srcIP)
+				dstPodName := podmapper.GetPodNameForIP(dstIP)
+
+				// Build message with pod names
+				message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + dstIP + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
+				
+				// Add pod names if available
+				if srcPodName != podmapper.UnknownPod {
+					message += ";" + "SrcPod: " + srcPodName
+				}
+				if dstPodName != podmapper.UnknownPod {
+					message += ";" + "DstPod: " + dstPodName
+				}
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -352,7 +368,22 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 						policyNamespace, policyName, rb.RulePrecedence)
 				}
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
+				// Get pod names for source and destination IPs
+				srcIP := utils.ConvByteArrayToIP(rb.SourceIP)
+				dstIP := utils.ConvByteArrayToIP(rb.DestIP)
+				srcPodName := podmapper.GetPodNameForIP(srcIP)
+				dstPodName := podmapper.GetPodNameForIP(dstIP)
+
+				// Build message with pod names
+				message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + dstIP + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
+				
+				// Add pod names if available
+				if srcPodName != podmapper.UnknownPod {
+					message += ";" + "SrcPod: " + srcPodName
+				}
+				if dstPodName != podmapper.UnknownPod {
+					message += ";" + "DstPod: " + dstPodName
+				}
 			}
 
 			if enableCloudWatchLogs {
@@ -435,7 +466,8 @@ func createLogStream(ctx context.Context) error {
 	return err
 }
 
-// ShutdownAsyncServices shuts down async CloudWatch uploader
+// ShutdownAsyncServices shuts down async CloudWatch uploader and pod mapper
 func ShutdownAsyncServices() {
 	ShutdownAsyncCloudWatchUploader()
+	podmapper.ShutdownPodMapper()
 }

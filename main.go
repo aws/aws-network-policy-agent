@@ -24,6 +24,7 @@ import (
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
+	"github.com/aws/aws-network-policy-agent/pkg/podmapper"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
@@ -96,6 +97,14 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
+
+	// Initialize pod mapper for IP-to-pod name resolution
+	if err := podmapper.InitializePodMapper(ctx, podmapper.PodMapperConfig{}); err != nil {
+		log.Warnf("Failed to initialize pod mapper: %v", err)
+	} else {
+		log.Info("Pod mapper initialized successfully")
+	}
+
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
 		log.Info("Network Policy is enabled, registering the policyEndpointController...")
@@ -154,11 +163,13 @@ func main() {
 		log.Errorf("problem running manager %v", err)
 		// Cleanup async services before exit
 		events.ShutdownAsyncServices()
+		podmapper.ShutdownPodMapper()
 		os.Exit(1)
 	}
 
 	// Cleanup async services on normal exit
 	events.ShutdownAsyncServices()
+	podmapper.ShutdownPodMapper()
 }
 
 // loadControllerConfig loads the controller configuration
