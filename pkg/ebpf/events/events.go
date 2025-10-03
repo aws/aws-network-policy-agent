@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -282,12 +281,71 @@ func publishDataToCloudwatch(ctx context.Context, logQueue []types.InputLogEvent
 	return true
 }
 
+// generateEMFLog generates an EMF formatted log based on verdict and direction
+func generateEMFLog(
+	nodeName, direction, verdictStr, policyName, policyNamespace,
+	srcIP, dstIP, srcPodName, dstPodName, protocol string,
+	srcPort, dstPort, verdict int,
+) string {
+	// Normalize pod names - use empty string if unknown
+	if srcPodName == podmapper.UnknownPod {
+		srcPodName = ""
+	}
+	if dstPodName == podmapper.UnknownPod {
+		dstPodName = ""
+	}
+
+	// Route to appropriate EMF log function based on verdict and direction
+	switch verdict {
+	case int(utils.ACCEPT.Index()):
+		if direction == "ingress" {
+			return CreateEMFLogForIngressAccept(
+				nodeName, policyName, policyNamespace,
+				srcIP, dstIP, dstPodName, protocol,
+				srcPort, dstPort,
+			)
+		} else {
+			return CreateEMFLogForEgressAccept(
+				nodeName, policyName, policyNamespace,
+				srcIP, dstIP, srcPodName, protocol,
+				srcPort, dstPort,
+			)
+		}
+	case int(utils.DENY.Index()):
+		if direction == "ingress" {
+			return CreateEMFLogForIngressDenied(
+				nodeName, srcIP, dstIP, dstPodName, protocol,
+				srcPort, dstPort,
+			)
+		} else {
+			return CreateEMFLogForEgressDenied(
+				nodeName, srcIP, dstIP, srcPodName, protocol,
+				srcPort, dstPort,
+			)
+		}
+	case int(utils.EXPIRED_DELETED.Index()):
+		if direction == "ingress" {
+			return CreateEMFLogForIngressDropped(
+				nodeName, srcIP, dstIP, dstPodName, protocol,
+				srcPort, dstPort,
+			)
+		} else {
+			return CreateEMFLogForEgressDropped(
+				nodeName, srcIP, dstIP, srcPodName, protocol,
+				srcPort, dstPort,
+			)
+		}
+	default:
+		log().Warnf("Unknown verdict type: %d", verdict)
+		return ""
+	}
+}
+
 func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
 		for record := range ringbufferdata {
-			var message string
 			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
@@ -327,15 +385,16 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				srcPodName := podmapper.GetPodNameForIP(srcIP)
 				dstPodName := podmapper.GetPodNameForIP(dstIP)
 
-				// Build message with pod names
-				message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + dstIP + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
-				
-				// Add pod names if available
-				if srcPodName != podmapper.UnknownPod {
-					message += ";" + "SrcPod: " + srcPodName
-				}
-				if dstPodName != podmapper.UnknownPod {
-					message += ";" + "DstPod: " + dstPodName
+				// Generate EMF formatted log for CloudWatch
+				if enableCloudWatchLogs {
+					emfLog := generateEMFLog(
+						nodeName, direction, verdict, policyName, policyNamespace,
+						srcIP, dstIP, srcPodName, dstPodName, protocol,
+						int(rb.SourcePort), int(rb.DestPort), int(rb.Verdict),
+					)
+					if emfLog != "" {
+						SendAsyncCloudWatchEvent(emfLog)
+					}
 				}
 			} else {
 				var rb ringBufferDataV4_t
@@ -374,21 +433,17 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				srcPodName := podmapper.GetPodNameForIP(srcIP)
 				dstPodName := podmapper.GetPodNameForIP(dstIP)
 
-				// Build message with pod names
-				message = "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + dstIP + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "PolicyName: " + policyName + ";" + "PolicyNamespace: " + policyNamespace + ";" + "Precedence: " + strconv.Itoa(int(rb.RulePrecedence))
-				
-				// Add pod names if available
-				if srcPodName != podmapper.UnknownPod {
-					message += ";" + "SrcPod: " + srcPodName
+				// Generate EMF formatted log for CloudWatch
+				if enableCloudWatchLogs {
+					emfLog := generateEMFLog(
+						nodeName, direction, verdict, policyName, policyNamespace,
+						srcIP, dstIP, srcPodName, dstPodName, protocol,
+						int(rb.SourcePort), int(rb.DestPort), int(rb.Verdict),
+					)
+					if emfLog != "" {
+						SendAsyncCloudWatchEvent(emfLog)
+					}
 				}
-				if dstPodName != podmapper.UnknownPod {
-					message += ";" + "DstPod: " + dstPodName
-				}
-			}
-
-			if enableCloudWatchLogs {
-				// Send to async uploader (non-blocking)
-				SendAsyncCloudWatchEvent(message)
 			}
 		}
 	}(ringbufferdata)
