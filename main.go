@@ -19,6 +19,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
@@ -70,11 +72,15 @@ func main() {
 		initLogger.Errorf("unable to load policy endpoint controller config %v", err)
 		os.Exit(1)
 	}
-
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
 	log.Infof("Starting network policy agent with log level: %s", ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
+	if ctrlConfig.EnableProfiling {
+		go func() {
+			log.Errorf("failed to setup pprof server: %v", http.ListenAndServe("localhost:6060", nil))
+		}()
+	}
 	restCFG, err := config.BuildRestConfig(ctrlConfig.RuntimeConfig)
 	if err != nil {
 		log.Errorf("unable to build REST config %v", err)
