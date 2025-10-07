@@ -70,7 +70,7 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv4(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			got, _, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
 			var gotKeys []string
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
@@ -153,7 +153,7 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv6(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			got, _, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
 			var gotKeys []string
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
