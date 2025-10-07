@@ -171,6 +171,7 @@ func MapWalk(mapID int) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
+					fmt.Println("Added At (ns) - ", iterValue.AddedAtNs)
 					fmt.Println("*******************************")
 				}
 
