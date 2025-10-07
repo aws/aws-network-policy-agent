@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 	"unsafe"
 
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
@@ -54,6 +55,7 @@ func (c *conntrackClient) InitializeLocalCache() {
 
 func (c *conntrackClient) CleanupConntrackMap() {
 	log().Info("Check for any stale entries in the conntrack map")
+	cleanupStartedNs := time.Now().UnixNano()
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
@@ -169,7 +171,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			}
 		}
 		// Check if the local cache and kernel cache is in sync
-		for localConntrackEntry, _ := range c.localConntrackV4Cache {
+		for localConntrackEntry := range c.localConntrackV4Cache {
 			newKey := utils.ConntrackKey{}
 			newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Source_ip))
 			newKey.Source_port = localConntrackEntry.Source_port
@@ -177,14 +179,21 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			newKey.Dest_port = localConntrackEntry.Dest_port
 			newKey.Protocol = localConntrackEntry.Protocol
 			newKey.Owner_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Owner_ip))
-			_, ok := kernelConntrackV4Cache[newKey]
-			if !ok {
-				// Delete the entry in local cache since kernel entry is still missing so expired case
+			if _, ok := kernelConntrackV4Cache[newKey]; !ok {
+				var val utils.ConntrackVal
+				err := goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&localConntrackEntry)), uintptr(unsafe.Pointer(&val)), mapID)
+				if err != nil {
+					log().Errorf("Failed to read conntrack value for key: %v", err)
+					continue
+				}
+				if val.AddedAtNs != 0 && val.AddedAtNs >= uint64(cleanupStartedNs) {
+					continue
+				}
+
 				expiredFlow := localConntrackEntry
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String())
 				log().Infof("Conntrack cleanup Delete - %s", key)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
-
 			}
 		}
 		//c.localConntrackV4Cache = make(map[utils.ConntrackKey]bool)
@@ -196,6 +205,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 
 func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	log().Info("Check for any stale entries in the conntrack map")
+	cleanupStartedNs := time.Now().UnixNano()
 	bpfMapApi := &goebpfmaps.BpfMap{}
 	mapInfo, err := bpfMapApi.GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
 	if err != nil {
@@ -326,10 +336,19 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 
 		}
 		// Check if the local cache and kernel cache is in sync
-		for localConntrackEntry, _ := range c.localConntrackV6Cache {
-			_, ok := kernelConntrackV6Cache[localConntrackEntry]
-			if !ok {
-				// Delete the entry in local cache since kernel entry is still missing so expired case
+		for localConntrackEntry := range c.localConntrackV6Cache {
+			if _, ok := kernelConntrackV6Cache[localConntrackEntry]; !ok {
+				entryBytes := utils.ConvConntrackV6ToByte(localConntrackEntry)
+				var val utils.ConntrackVal
+				err := goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&entryBytes[0])), uintptr(unsafe.Pointer(&val)), mapID)
+				if err != nil {
+					log().Errorf("Failed to read conntrack value for key(v6): %v", err)
+					continue
+				}
+				if val.AddedAtNs != 0 && val.AddedAtNs >= uint64(cleanupStartedNs) {
+					continue
+				}
+
 				expiredFlow := localConntrackEntry
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
 				log().Infof("Conntrack cleanup Delete - %s", key)

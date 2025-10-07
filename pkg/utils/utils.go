@@ -403,7 +403,9 @@ type ConntrackKey struct {
 }
 
 type ConntrackVal struct {
-	Value uint8
+	Value     uint8
+	_         [7]byte
+	AddedAtNs uint64
 }
 
 func ConvConntrackV6ToByte(key ConntrackKeyV6) []byte {

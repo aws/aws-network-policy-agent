@@ -57,6 +57,7 @@ struct conntrack_key {
 
 struct conntrack_value {
    __u8 val; // 0 => default-allow, 1 => policies-applied
+   __u64 added_at_ns;
 };
 
 struct data_t {
@@ -129,13 +130,14 @@ static __always_inline int evaluateByLookUp(struct keystruct trie_key, struct co
 			((trie_val->start_port == ANY_PORT) || (flow_key.dest_port == trie_val->start_port) ||
 			(flow_key.dest_port > trie_val->start_port && flow_key.dest_port <= trie_val->end_port)))) {
 			//Inject in to conntrack map
-			struct conntrack_value new_flow_val = {};
+            struct conntrack_value new_flow_val = {};
 			if (pst->state == DEFAULT_ALLOW) {
 				new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
 			} else {
 				new_flow_val.val = CT_VAL_POLICIES_APPLIED;
 			}
-			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
+            new_flow_val.added_at_ns = bpf_ktime_get_ns();
+            bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
 			return BPF_OK;
@@ -261,9 +263,10 @@ int handle_egress(struct __sk_buff *skb)
 			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == POLICIES_APPLIED) {
 				return BPF_OK;
 			}
-			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == DEFAULT_ALLOW) {
-				flow_val->val = CT_VAL_DEFAULT_ALLOW;
-				bpf_map_update_elem(&aws_conntrack_map, &flow_key, flow_val, 0); // 0 -> BPF_ANY
+	if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == DEFAULT_ALLOW) {
+		flow_val->val = CT_VAL_DEFAULT_ALLOW;
+		flow_val->added_at_ns = bpf_ktime_get_ns();
+		bpf_map_update_elem(&aws_conntrack_map, &flow_key, flow_val, 0); // 0 -> BPF_ANY
 				return BPF_OK;
 			}
 			if (flow_val->val == CT_VAL_DEFAULT_ALLOW && pst->state == POLICIES_APPLIED) {
@@ -294,6 +297,7 @@ int handle_egress(struct __sk_buff *skb)
 		if (pst->state == DEFAULT_ALLOW) {
 			struct conntrack_value new_flow_val = {};
 			new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
+			new_flow_val.added_at_ns = bpf_ktime_get_ns();
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);

@@ -60,6 +60,7 @@ struct conntrack_key {
 
 struct conntrack_value {
 	__u8 val; // 0 => default-allow, 1 => policies-applied
+	__u64 added_at_ns;
 };
 
 struct data_t {
@@ -137,6 +138,7 @@ static __always_inline int evaluateByLookUp(struct keystruct trie_key, struct co
 			} else {
 				new_flow_val.val = CT_VAL_POLICIES_APPLIED;
 			}
+			new_flow_val.added_at_ns = bpf_ktime_get_ns();
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
@@ -264,6 +266,7 @@ int handle_ingress(struct __sk_buff *skb)
 			}
 			if (flow_val->val == CT_VAL_POLICIES_APPLIED && pst->state == DEFAULT_ALLOW) {
 				flow_val->val = CT_VAL_DEFAULT_ALLOW;
+				flow_val->added_at_ns = bpf_ktime_get_ns();
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, flow_val, 0); // 0 -> BPF_ANY
 				return BPF_OK;
 			}
@@ -294,6 +297,7 @@ int handle_ingress(struct __sk_buff *skb)
 		if (pst->state == DEFAULT_ALLOW) {
 			struct conntrack_value new_flow_val = {};
 			new_flow_val.val = CT_VAL_DEFAULT_ALLOW;
+			new_flow_val.added_at_ns = bpf_ktime_get_ns();
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &new_flow_val, 0); // 0 - BPF_ANY
 			evt.verdict = 1;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
