@@ -13,7 +13,7 @@ def main():
     # AWS Network Policy doesn't support all these combinations. We maintain a mapping of the test number and the number of
     # probes that are expected to pass on each testcase+step combination for IPv4 and IPv6 cluster.
     # For the test numbers not included in this map, it is expected that all the probes should be passing
-    if args.ip_family == "IPv6":
+    if args.ip_family.lower() == "ipv6":
         expected_results={ 2:{'Step 1': 80}, 3:{'Step 1': 80}, 8:{'Step 1': 80}, 12:{'Step 1': 64}, 23:{'Step 1': 80}, 25:{'Step 1': 80}, 26:{'Step 1': 80}, 28:{'Step 1': 80}, 29:{'Step 1': 80}, 31:{'Step 1': 50}, 32:{'Step 1': 64}, 98:{'Step 1': 79}, 102:{'Step 1': 71}, 104:{'Step 1': 71}, 106:{'Step 1': 71}, 108:{'Step 1': 71}, 111:{'Step 1': 79}, 112:{'Step 1': 80} }
     else:
         expected_results={ 2:{'Step 1': 80}, 3:{'Step 1': 80}, 8:{'Step 1': 80}, 12:{'Step 1': 80}, 23:{'Step 1': 80}, 25:{'Step 1': 80}, 26:{'Step 1': 80}, 28:{'Step 1': 80}, 29:{'Step 1': 80}, 31:{'Step 1': 50}, 32:{'Step 1': 64}, 98:{'Step 1': 80}, 111:{'Step 1': 80}, 112:{'Step 1': 80}}
