@@ -225,6 +225,49 @@ Map ID:  226
 ========================================================================================
 ```
 
+## Metrics
+
+Network Policy Agent exposes Prometheus metrics on port 8162 (configurable via `--metrics-bind-addr` flag). The drop metrics are only available when the `--enable-policy-event-logs` flag is set to `true`.
+
+### Available Metrics
+
+#### `network_policy_drop_count_total`
+
+Type: Counter
+
+Description: Total number of packets dropped by network policy agent
+
+Labels:
+- `direction`: Traffic direction (ingress/egress)
+
+#### `network_policy_drop_bytes_total`
+
+Type: Counter
+
+Description: Total number of bytes dropped by network policy agent
+
+Labels:
+- `direction`: Traffic direction (ingress/egress)
+
+### Accessing Metrics
+
+Metrics can be scraped using Prometheus or accessed directly via HTTP:
+
+```console
+curl localhost:8162/metrics
+```
+
+**Sample Output:**
+
+```
+# HELP network_policy_drop_bytes_total Total number of bytes dropped by network policy agent
+# TYPE network_policy_drop_bytes_total counter
+network_policy_drop_bytes_total{direction="ingress"} 1.0665324e+07
+# HELP network_policy_drop_count_total Total number of packets dropped by network policy agent
+# TYPE network_policy_drop_count_total counter
+network_policy_drop_count_total{direction="ingress"} 144126
+```
+
 ## Contributing
 
 See [CONTRIBUTING](CONTRIBUTING.md) for more information.
