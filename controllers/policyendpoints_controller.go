@@ -362,6 +362,7 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 	var ingressRules, egressRules []fwrp.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
+	var lastPE *policyk8sawsv1.PolicyEndpoint
 
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(policyEndpointList.([]string)))
@@ -404,10 +405,14 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 						L4Info: endPointInfo.Ports,
 					})
 			}
-			log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
-			ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(ctx, currentPE, len(ingressRules), len(egressRules))
-			isIngressIsolated = isIngressIsolated || ingressIsolated
-			isEgressIsolated = isEgressIsolated || egressIsolated
+			lastPE = currentPE
+		}
+		log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
+		// Check isolation after aggregating all rules from all PolicyEndpoints
+		if lastPE != nil {
+			ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(ctx, lastPE, len(ingressRules), len(egressRules))
+			isIngressIsolated = ingressIsolated
+			isEgressIsolated = egressIsolated
 		}
 	}
 	if len(ingressRules) > 0 {
