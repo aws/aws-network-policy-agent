@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	awsWrapper "github.com/aws/aws-network-policy-agent/pkg/aws"
@@ -40,6 +41,13 @@ func log() logger.Logger {
 	return logger.Get()
 }
 
+func getFlowLog() logger.Logger {
+	flowLogOnce.Do(func() {
+		flowLog = logger.NewFlowLogger()
+	})
+	return flowLog
+}
+
 const VerdictDeny uint32 = 0
 
 var (
@@ -58,6 +66,8 @@ var (
 		},
 		[]string{"direction"},
 	)
+	flowLog     logger.Logger
+	flowLogOnce sync.Once
 )
 
 func init() {
@@ -218,10 +228,10 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+					getFlowLog().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
 						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+					getFlowLog().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
 						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
 				}
 
@@ -243,10 +253,10 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+					getFlowLog().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
 						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+					getFlowLog().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
 						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
 				}
 
