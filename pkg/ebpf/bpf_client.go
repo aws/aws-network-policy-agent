@@ -45,6 +45,7 @@ var (
 	IPv6_HOST_MASK                                   = "/128"
 	CONNTRACK_MAP_PIN_PATH                           = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 	POLICY_EVENTS_MAP_PIN_PATH                       = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
+	POLICY_EVENTS_SCOPE_MAP_PIN_PATH                 = "/sys/fs/bpf/globals/aws/maps/global_policy_events_scope"
 	CATCH_ALL_PROTOCOL               corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                                  = "eni"
 	POLICIES_APPLIED                                 = 0
@@ -52,6 +53,7 @@ var (
 	DEFAULT_DENY                                     = 2
 	POD_STATE_MAP_KEY                                = 0
 	CLUSTER_POLICY_POD_STATE_MAP_KEY                 = 1
+	POLICY_EVENTS_SCOPE_MAP_KEY                      = 0
 	BRANCH_ENI_VETH_PREFIX                           = "vlan"
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
@@ -85,6 +87,10 @@ type pod_state struct {
 	state uint8
 }
 
+type policy_scope struct {
+	scope uint8
+}
+
 func msSince(start time.Time) float64 {
 	return float64(time.Since(start) / time.Millisecond)
 }
@@ -115,9 +121,10 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
+func NewBpfClient(nodeIP string, enablePolicyEventLogs bool, policyEventsLogsScope string, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
+	var policyEventsScopeMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
 		// Maps PolicyEndpoint resource to it's eBPF context
@@ -146,7 +153,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
 
 	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
-	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
+	isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent := false, false, false
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New()
@@ -181,7 +188,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 	var interfaceNametoIngressPinPath map[string]string
 	var interfaceNametoEgressPinPath map[string]string
 	eventBufferFD := 0
-	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err = ebpfClient.recoverBPFState(ebpfClient.bpfTCClient, ebpfClient.bpfSDKClient, ebpfClient.policyEndpointeBPFContext,
+	isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent, eventBufferFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err = ebpfClient.recoverBPFState(ebpfClient.bpfTCClient, ebpfClient.bpfSDKClient, ebpfClient.policyEndpointeBPFContext,
 		ebpfClient.globalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
 		//Log the error and move on
@@ -196,7 +203,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 	// - Current events binary packaged with network policy agent is different than the one installed
 	//   during the previous installation (or)
 	// - Either Conntrack Map (or) Events Map is currently missing on the node
-	if eventsUpdateRequired || (!isConntrackMapPresent || !isPolicyEventsMapPresent) {
+	if eventsUpdateRequired || (!isConntrackMapPresent || !isPolicyEventsMapPresent || !isPolicyEventsScopeMapPresent) {
 		log().Info("Install the default global maps")
 		eventsProbe := EVENTS_BINARY
 		if enableIPv6 {
@@ -226,6 +233,10 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 			if mapName == AWS_EVENTS_MAP {
 				eventBufferFD = int(mapInfo.MapFD)
 			}
+			if mapName == AWS_EVENTS_SCOPE_MAP {
+				policyEventsScopeMap = mapInfo
+				isPolicyEventsScopeMapPresent = true
+			}
 		}
 	}
 
@@ -243,6 +254,36 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6)
 	log().Info("Initialized Conntrack client")
+
+	//if present update the PolicyEventsScope Map
+	if isPolicyEventsScopeMapPresent {
+		recoveredPolicyEventsScopeMap, ok := ebpfClient.globalMaps.Load(POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
+		if ok {
+			policyEventsScopeMap = recoveredPolicyEventsScopeMap.(goebpfmaps.BpfMap)
+			log().Info("Derived existing policyEventsScopeMap identifier")
+		} else {
+			log().Errorf("Unable to get policyEventsScopeMap post recovery..error: %v", err)
+			sdkAPIErr.WithLabelValues("RecoveryFailed").Inc()
+			return nil, err
+		}
+
+		key := uint32(POLICY_EVENTS_SCOPE_MAP_KEY)
+		scope := uint8(utils.ACCEPT.Index())
+
+		if policyEventsLogsScope == "DENY" {
+			scope = uint8(utils.DENY.Index())
+		}
+		
+		value := policy_scope{scope: scope}
+		log().Infof("Will update Policy Events Scope Map: key=%d value=%v", key, value)
+		err := policyEventsScopeMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&value)), 0)
+
+		if err != nil {
+			log().Errorf("Policy Events Scope Map update failed: %v", err)
+			sdkAPIErr.WithLabelValues("updateEbpfMap-policy-events-scope").Inc()
+		}
+		log().Infof("Updated Policy Events Scope Map: key=%d value=%v", key, value)
+	}
 
 	if enablePolicyEventLogs {
 		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
@@ -379,8 +420,8 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 }
 
 func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
-	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, map[string]string, map[string]string, error) {
-	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
+	updateEgressProbe, updateEventsProbe bool) (bool, bool, bool, int, map[string]string, map[string]string, error) {
+	isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent := false, false, false
 	eventsMapFD := 0
 	var interfaceNametoIngressPinPath = make(map[string]string)
 	var interfaceNametoEgressPinPath = make(map[string]string)
@@ -392,7 +433,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		if err != nil {
 			log().Errorf("failed to recover global maps %v", err)
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
+			return isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
 		}
 		log().Infof("Total no of  global maps recovered count: %d", len(recoveredGlobalMaps))
 		for globalMapName, globalMap := range recoveredGlobalMaps {
@@ -406,6 +447,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				isPolicyEventsMapPresent = true
 				eventsMapFD = int(globalMap.MapFD)
 				log().Infof("Policy event Map is already present on the node Recovered FD: %d", eventsMapFD)
+			}
+			if globalMapName == POLICY_EVENTS_SCOPE_MAP_PIN_PATH {
+				log().Info("Policy event scope Map is already present on the node")
+				isPolicyEventsScopeMapPresent = true
+				globalMaps.Store(globalMapName, globalMap)
 			}
 		}
 	}
@@ -505,7 +551,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		if err != nil {
 			log().Errorf("GetAllBpfProgramsAndMaps failed %v", err)
 			sdkAPIErr.WithLabelValues("GetAllBpfProgramsAndMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
+			return isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
 		}
 		log().Infof("GetAllBpfProgramsAndMaps returned %d", len(bpfState))
 		progIdToPinPath := make(map[int]string)
@@ -543,7 +589,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		log().Info("Collected all data for reattaching probes")
 	}
 
-	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
+	return isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
 }
 
 func (l *bpfClient) ReAttachEbpfProbes() error {
