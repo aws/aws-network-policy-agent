@@ -1,0 +1,29 @@
+# Conntrack Race Condition Test Configuration
+
+# Kubernetes settings
+namespace: conntrack-test
+client_pod: test-client
+server_pod: test-server
+server_port: 8080
+
+# NPA (Network Policy Agent) settings
+npa_namespace: kube-system
+npa_pod_label: k8s-app=aws-node  # Adjust based on your NPA deployment
+
+# Timing parameters (in seconds)
+# Note: For faster testing, these are reduced from production values
+kernel_timeout: 30        # Kernel conntrack timeout (production: ~180s)
+cleanup_period: 60        # NPA cleanup cycle period (production: 300s)
+
+# Test parameters
+iterations: 5             # Number of test attempts
+connections_per_wave: 100  # Connections created per wave (Phase 1)
+
+# Advanced settings (optional)
+# retry_delay: 5          # Delay between retries (seconds)
+# max_wait_time: 600      # Maximum time to wait for cleanup cycle (seconds)
+
+# Notes:
+# - Reduce kernel_timeout for faster testing (requires node configuration)
+# - Increase iterations to improve race detection probability
+# - Adjust cleanup_period to match your NPA configuration

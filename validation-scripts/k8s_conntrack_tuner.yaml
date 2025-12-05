@@ -1,0 +1,196 @@
+---
+# Privileged DaemonSet to set kernel conntrack timeout on all nodes
+# This is required for faster testing of the race condition
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: conntrack-tuner
+  namespace: kube-system
+  labels:
+    app: conntrack-tuner
+    purpose: testing
+spec:
+  selector:
+    matchLabels:
+      app: conntrack-tuner
+  template:
+    metadata:
+      labels:
+        app: conntrack-tuner
+    spec:
+      hostNetwork: true
+      hostPID: true
+      # Tolerate all taints to run on all nodes
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: tuner
+        # Using Alpine with bpftool from static binary
+        image: alpine:latest
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: bpffs
+          mountPath: /sys/fs/bpf
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          echo "========================================"
+          echo "Conntrack Timeout Tuner Starting"
+          echo "========================================"
+          echo ""
+          
+          # Install wget (busybox has it but Alpine's might be better)
+          echo "Installing bpftool from static binary..."
+          
+          # Download static bpftool binary directly (no package manager)
+          echo "  Downloading..."
+          if wget -q -O /tmp/bpftool.tar.gz https://github.com/libbpf/bpftool/releases/download/v7.3.0/bpftool-v7.3.0-amd64.tar.gz 2>&1; then
+            echo "  ✓ Download complete"
+            
+            echo "  Extracting..."
+            if tar -xzf /tmp/bpftool.tar.gz -C /usr/local/bin/ 2>&1; then
+              chmod +x /usr/local/bin/bpftool
+              rm /tmp/bpftool.tar.gz
+              echo "✓ bpftool installed successfully"
+              
+              if [ -x /usr/local/bin/bpftool ]; then
+                echo "  Version: $(bpftool --version 2>&1 | head -1 || echo 'unable to get version')"
+              else
+                echo "  ⚠ bpftool extracted but not executable"
+              fi
+            else
+              echo "  ⚠ Failed to extract bpftool"
+            fi
+          else
+            echo "  ⚠ Failed to download bpftool"
+            echo "  eBPF polling will not be available"
+          fi
+          echo ""
+          
+          # Check if conntrack module is loaded
+          if [ ! -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]; then
+            echo "ERROR: Conntrack module not loaded"
+            echo "This is expected if netfilter/conntrack is not in use"
+            exit 1
+          fi
+          
+          # Show current timeout
+          echo "Current TCP established timeout:"
+          cat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established
+          echo "seconds"
+          echo ""
+          
+          # Set new timeout
+          echo "Setting TCP established timeout to 30 seconds..."
+          echo 30 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established
+          
+          # Verify
+          NEW_TIMEOUT=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established)
+          echo "New timeout: ${NEW_TIMEOUT} seconds"
+          echo ""
+          
+          if [ "$NEW_TIMEOUT" = "30" ]; then
+            echo "✓ Successfully set conntrack timeout to 30 seconds"
+          else
+            echo "✗ Failed to set conntrack timeout"
+            exit 1
+          fi
+          
+          echo ""
+          echo "Available tools for debugging:"
+          echo "  - bpftool: $(which bpftool 2>/dev/null || echo 'not found')"
+          if [ -n "$(which bpftool 2>/dev/null)" ]; then
+            echo "    Version: $(bpftool --version 2>&1 | head -1)"
+          fi
+          echo ""
+          echo "========================================"
+          echo "Configuration complete on $(hostname)"
+          echo "========================================"
+          echo ""
+          echo "To reset to default (180s):"
+          echo "  echo 180 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established"
+          echo ""
+          echo "To query eBPF maps:"
+          echo "  bpftool map list"
+          echo "  bpftool map dump name conntrack_map"
+          echo ""
+          echo "Keeping pod running... (delete DaemonSet to stop)"
+          
+          # Keep the pod running
+          while true; do
+            sleep 3600
+          done
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      volumes:
+      - name: bpffs
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+# Reset DaemonSet - Run this to restore default timeouts
+# NOTE: Do not apply this at the same time as conntrack-tuner!
+# Usage: 
+#   1. Delete conntrack-tuner first: kubectl delete -f k8s_conntrack_tuner.yaml
+#   2. Then apply this: kubectl apply -f k8s_conntrack_reset.yaml
+#   3. Wait for completion
+#   4. Delete this: kubectl delete -f k8s_conntrack_reset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: conntrack-reset
+  namespace: kube-system
+  labels:
+    app: conntrack-reset
+    purpose: cleanup
+spec:
+  selector:
+    matchLabels:
+      app: conntrack-reset
+  template:
+    metadata:
+      labels:
+        app: conntrack-reset
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: reset
+        image: busybox:latest
+        securityContext:
+          privileged: true
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          echo "Resetting conntrack timeout to default (180s)..."
+          
+          if [ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]; then
+            echo 180 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established
+            NEW_TIMEOUT=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established)
+            echo "✓ Reset to: ${NEW_TIMEOUT} seconds on $(hostname)"
+          else
+            echo "✓ Conntrack module not loaded on $(hostname), nothing to reset"
+          fi
+          
+          # Exit after one-time execution
+          exit 0
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      restartPolicy: OnFailure
