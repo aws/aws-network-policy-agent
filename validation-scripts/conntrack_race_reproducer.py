@@ -158,7 +158,7 @@ class ConntrackRaceReproducer:
     
     # Fixed port range for deterministic 5-tuple collision
     FIXED_PORT_START = 50000
-    FIXED_PORT_COUNT = 100  # Ports 50000-50099
+    FIXED_PORT_COUNT = 20  # Ports 50000-50019
     
     def __init__(self, config: TestConfig):
         self.config = config
@@ -168,7 +168,9 @@ class ConntrackRaceReproducer:
         self.learned_cleanup_timing: Optional[int] = None  # Seconds after kernel timeout
         self.last_spray_absolute_time: Optional[float] = None  # Absolute wall-clock time of last spray
         self.server_node: Optional[str] = None
+        self.client_node: Optional[str] = None
         self.tuner_pod: Optional[str] = None
+        self.client_tuner_pod: Optional[str] = None  # Tuner pod on client's node
         self.fixed_ports = list(range(self.FIXED_PORT_START, self.FIXED_PORT_START + self.FIXED_PORT_COUNT))
         
     def validate_environment(self) -> bool:
@@ -213,15 +215,25 @@ class ConntrackRaceReproducer:
             return False
         logger.info(f"✓ Server IP: {server_ip}")
         
+        # Find client node and tuner pod for conntrack checks
+        self.client_node = self.kube.get_pod_node(self.config.namespace, self.config.client_pod)
+        if self.client_node:
+            logger.info(f"✓ Client node: {self.client_node}")
+            self.client_tuner_pod = self.kube.get_tuner_pod_on_node(self.client_node)
+            if self.client_tuner_pod:
+                logger.info(f"✓ Client tuner pod found: {self.client_tuner_pod}")
+            else:
+                logger.warning("⚠ Client tuner pod not found - kernel conntrack checks will be limited")
+        
         # Find server node and tuner pod for eBPF polling
         self.server_node = self.kube.get_pod_node(self.config.namespace, self.config.server_pod)
         if self.server_node:
             logger.info(f"✓ Server node: {self.server_node}")
             self.tuner_pod = self.kube.get_tuner_pod_on_node(self.server_node)
             if self.tuner_pod:
-                logger.info(f"✓ Tuner pod found: {self.tuner_pod}")
+                logger.info(f"✓ Server tuner pod found: {self.tuner_pod}")
             else:
-                logger.warning("⚠ Tuner pod not found - eBPF polling will be limited")
+                logger.warning("⚠ Server tuner pod not found - eBPF polling will be limited")
         
         # Test connectivity
         logger.info("Testing server connectivity...")
@@ -404,15 +416,15 @@ except Exception as e:
         """Create connections using specific source ports for deterministic 5-tuple collision"""
         results = {'success': 0, 'failed': 0, 'timeout': 0}
         
-        logger.info(f"Creating {len(ports)} connections with fixed ports {ports[0]}-{ports[-1]} (10 parallel threads)...")
+        logger.info(f"Creating {len(ports)} connections with fixed ports {ports[0]}-{ports[-1]} (4 parallel threads)...")
         
         def create_single_connection(port):
             """Helper function for parallel execution"""
             success, output = self.create_connection_with_port(target_ip, self.config.server_port, port, timeout=2)
             return port, success, output
         
-        # Use ThreadPoolExecutor with 10 parallel threads
-        max_workers = 10
+        # Use ThreadPoolExecutor with 4 parallel threads
+        max_workers = 4
         completed = 0
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -491,6 +503,248 @@ except Exception as e:
         except Exception as e:
             logger.error(f"[eBPF Polling] Error: {e}")
             return None
+    
+    def ip_to_hex_be(self, ip_str: str) -> str:
+        """Convert IP address to big-endian hex representation (network byte order)"""
+        parts = ip_str.split('.')
+        # Big-endian: normal byte order (no reversal)
+        return ' '.join([f'{int(p):02x}' for p in parts])
+    
+    def port_to_hex_le(self, port: int) -> str:
+        """Convert port to little-endian hex representation"""
+        # Port is uint16, little-endian
+        return f'{port & 0xff:02x} {(port >> 8) & 0xff:02x}'
+    
+    def check_kernel_conntrack(self, source_ip: str, source_port: int, 
+                               dest_ip: str, dest_port: int, 
+                               protocol: str = "tcp") -> bool:
+        """
+        Check if a 5-tuple exists in kernel conntrack table.
+        Returns: True if found, False otherwise
+        
+        Reads /proc/net/nf_conntrack directly instead of using conntrack command.
+        This avoids needing the conntrack binary and works with just file system access.
+        """
+        if not self.client_tuner_pod:
+            logger.debug("No client tuner pod available - cannot check kernel conntrack")
+            return False
+        
+        try:
+            # Read /proc/net/nf_conntrack directly
+            # Format: ipv4 2 tcp 6 117 ESTABLISHED src=X.X.X.X dst=Y.Y.Y.Y sport=NNNN dport=MMMM ...
+            cmd = ['cat', '/proc/net/nf_conntrack']
+            
+            result = self.kube.exec_in_pod(
+                'kube-system',
+                self.client_tuner_pod,
+                cmd
+            )
+            
+            output = result.stdout
+            
+            # Search for the specific 5-tuple
+            # Look for lines containing our source IP, dest IP, source port, and dest port
+            # The format can have src/dst in either order depending on connection direction
+            for line in output.split('\n'):
+                if protocol in line.lower():
+                    # Check if this line has our 5-tuple (forward or reverse direction)
+                    has_src_ip = f'src={source_ip}' in line
+                    has_dst_ip = f'dst={dest_ip}' in line
+                    has_sport = f'sport={source_port}' in line
+                    has_dport = f'dport={dest_port}' in line
+                    
+                    if has_src_ip and has_dst_ip and has_sport and has_dport:
+                        return True
+            
+            return False
+            
+        except subprocess.CalledProcessError:
+            # Command failed or file not accessible
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking kernel conntrack: {e}")
+            return False
+    
+    def check_ebpf_map(self, source_ip: str, source_port: int,
+                      dest_ip: str, dest_port: int,
+                      owner_ip: str, protocol: str = "tcp") -> bool:
+        """
+        Check if a 5-tuple exists in eBPF conntrack map.
+        Returns: True if found, False otherwise
+        """
+        if not self.tuner_pod:
+            logger.debug("No tuner pod available - cannot check eBPF map")
+            return False
+        
+        try:
+            # Query eBPF map
+            cmd = ['bpftool', 'map', 'dump', 'pinned', 
+                   '/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map']
+            
+            result = self.kube.exec_in_pod('kube-system', self.tuner_pod, cmd)
+            output = result.stdout
+            
+            # Build expected hex pattern for the 5-tuple
+            # Actual format: source_ip(4) source_port(2) padding(2) dest_ip(4) dest_port(2) protocol(1) padding(1) owner_ip(4)
+            proto_byte = "06" if protocol == "tcp" else "11"
+            padding_2 = "00 00"  # 2-byte padding after source port
+            padding_1 = "00"     # 1-byte padding after protocol
+            
+            # Convert IPs to big-endian (network byte order), ports to little-endian
+            src_ip_hex = self.ip_to_hex_be(source_ip)
+            dst_ip_hex = self.ip_to_hex_be(dest_ip)
+            owner_ip_hex = self.ip_to_hex_be(owner_ip)
+            src_port_hex = self.port_to_hex_le(source_port)
+            dst_port_hex = self.port_to_hex_le(dest_port)
+            
+            # Build pattern with padding bytes
+            pattern = f"{src_ip_hex} {src_port_hex} {padding_2} {dst_ip_hex} {dst_port_hex} {proto_byte} {padding_1} {owner_ip_hex}"
+            pattern_normalized = pattern.replace(' ', '').lower()
+            
+            # Normalize output for comparison (remove spaces, lowercase)
+            output_normalized = output.replace(' ', '').replace('\n', '').lower()
+            
+            # Search for pattern
+            if pattern_normalized in output_normalized:
+                return True
+            
+            return False
+            
+        except subprocess.CalledProcessError:
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking eBPF map: {e}")
+            return False
+    
+    def check_5tuple_in_conntrack(self, source_ip: str, source_port: int,
+                                  dest_ip: str, dest_port: int,
+                                  protocol: str = "tcp") -> Tuple[bool, bool]:
+        """
+        Check if a 5-tuple exists in kernel conntrack AND eBPF map.
+        Returns: (in_kernel, in_ebpf)
+        """
+        # Check kernel conntrack
+        in_kernel = self.check_kernel_conntrack(source_ip, source_port, dest_ip, dest_port, protocol)
+        
+        # Check eBPF map (try both owner IPs: source and dest)
+        # The NPA code stores entries with both source and dest as owner
+        in_ebpf_src = self.check_ebpf_map(source_ip, source_port, dest_ip, dest_port, source_ip, protocol)
+        in_ebpf_dst = self.check_ebpf_map(source_ip, source_port, dest_ip, dest_port, dest_ip, protocol)
+        in_ebpf = in_ebpf_src or in_ebpf_dst
+        
+        return (in_kernel, in_ebpf)
+    
+    def verify_all_connections(self, client_ip: str, server_ip: str, ports: List[int]) -> Dict[str, List[int]]:
+        """
+        Check all ports in kernel conntrack and eBPF map for validation.
+        Optimized: reads kernel and eBPF data ONCE, then checks all ports in memory.
+        Returns: dict with lists of ports in each state
+        """
+        results = {
+            'kernel_only': [],      # In kernel but not eBPF (RACE pattern)
+            'ebpf_only': [],        # In eBPF but not kernel (unusual)
+            'both': [],             # In both (normal active)
+            'neither': []           # In neither (expired/cleaned)
+        }
+        
+        logger.info(f"\n  [Validation] Checking ALL {len(ports)} connections in kernel/eBPF...")
+        logger.info(f"  Optimized: Reading data sources once, then checking in memory...")
+        
+        # Step 1: Read kernel conntrack ONCE
+        logger.info(f"  Reading kernel conntrack table...")
+        kernel_entries = set()
+        if self.client_tuner_pod:
+            try:
+                cmd = ['cat', '/proc/net/nf_conntrack']
+                result = self.kube.exec_in_pod('kube-system', self.client_tuner_pod, cmd)
+                
+                # Parse and cache all relevant entries
+                for line in result.stdout.split('\n'):
+                    if 'tcp' in line.lower():
+                        # Extract all ports from this line
+                        for port in ports:
+                            if (f'src={client_ip}' in line and f'dst={server_ip}' in line and
+                                f'sport={port}' in line and f'dport={self.config.server_port}' in line):
+                                kernel_entries.add(port)
+                                break
+                
+                logger.info(f"  Found {len(kernel_entries)} entries in kernel conntrack")
+            except Exception as e:
+                logger.warning(f"  Failed to read kernel conntrack: {e}")
+        
+        # Step 2: Read eBPF map ONCE
+        logger.info(f"  Reading eBPF conntrack map...")
+        ebpf_entries = set()
+        if self.tuner_pod:
+            try:
+                cmd = ['bpftool', 'map', 'dump', 'pinned', 
+                       '/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map']
+                result = self.kube.exec_in_pod('kube-system', self.tuner_pod, cmd)
+                output = result.stdout
+                
+                # DEBUG: Show raw eBPF map output sample
+                logger.info(f"  [DEBUG] Raw eBPF map output (first 500 chars):")
+                logger.info(f"  {output[:500]}...")
+                logger.info(f"  [DEBUG] Total output length: {len(output)} chars")
+                logger.info(f"  [DEBUG] Number of 'key:' entries: {output.count('key:')}")
+                
+                # Normalize output once
+                output_normalized = output.replace(' ', '').replace('\n', '').lower()
+                
+                # Check all ports against the single eBPF dump
+                proto_byte = "06"  # TCP
+                padding_2 = "00 00"  # 2-byte padding after source port
+                padding_1 = "00"     # 1-byte padding after protocol
+                dst_ip_hex = self.ip_to_hex_be(server_ip)
+                dst_port_hex = self.port_to_hex_le(self.config.server_port)
+                src_ip_hex = self.ip_to_hex_be(client_ip)
+                
+                # DEBUG: Show example pattern for first port
+                first_port = ports[0]
+                first_port_hex = self.port_to_hex_le(first_port)
+                example_pattern_src = f"{src_ip_hex} {first_port_hex} {padding_2} {dst_ip_hex} {dst_port_hex} {proto_byte} {padding_1} {src_ip_hex}"
+                example_pattern_dst = f"{src_ip_hex} {first_port_hex} {padding_2} {dst_ip_hex} {dst_port_hex} {proto_byte} {padding_1} {dst_ip_hex}"
+                logger.info(f"  [DEBUG] Example search patterns for port {first_port}:")
+                logger.info(f"    Pattern (src owner): {example_pattern_src}")
+                logger.info(f"    Pattern (dst owner): {example_pattern_dst}")
+                logger.info(f"    Normalized (src): {example_pattern_src.replace(' ', '').lower()}")
+                logger.info(f"    Normalized (dst): {example_pattern_dst.replace(' ', '').lower()}")
+                
+                for port in ports:
+                    src_port_hex = self.port_to_hex_le(port)
+                    
+                    # Try with source as owner (with padding bytes)
+                    pattern_src = f"{src_ip_hex} {src_port_hex} {padding_2} {dst_ip_hex} {dst_port_hex} {proto_byte} {padding_1} {src_ip_hex}"
+                    # Try with dest as owner  
+                    pattern_dst = f"{src_ip_hex} {src_port_hex} {padding_2} {dst_ip_hex} {dst_port_hex} {proto_byte} {padding_1} {dst_ip_hex}"
+                    
+                    pattern_src_norm = pattern_src.replace(' ', '').lower()
+                    pattern_dst_norm = pattern_dst.replace(' ', '').lower()
+                    
+                    if pattern_src_norm in output_normalized or pattern_dst_norm in output_normalized:
+                        ebpf_entries.add(port)
+                
+                logger.info(f"  Found {len(ebpf_entries)} entries in eBPF map")
+            except Exception as e:
+                logger.warning(f"  Failed to read eBPF map: {e}")
+        
+        # Step 3: Categorize all ports based on cached data (instant)
+        logger.info(f"  Categorizing {len(ports)} ports...")
+        for port in ports:
+            in_kernel = port in kernel_entries
+            in_ebpf = port in ebpf_entries
+            
+            if in_kernel and not in_ebpf:
+                results['kernel_only'].append(port)
+            elif in_ebpf and not in_kernel:
+                results['ebpf_only'].append(port)
+            elif in_kernel and in_ebpf:
+                results['both'].append(port)
+            else:
+                results['neither'].append(port)
+        
+        logger.info(f"  ✓ Categorization complete")
+        return results
     
     def verify_connection_denial(self) -> bool:
         """Check if connections are being denied (race condition occurred)"""
@@ -627,8 +881,8 @@ except Exception as e:
             success, output = self.create_connection_with_port(server_ip, self.config.server_port, port, timeout=1)
             return success, output, port
         
-        # Use ThreadPoolExecutor with 10 parallel threads for maximum speed
-        max_workers = 10
+        # Use ThreadPoolExecutor with 4 parallel threads
+        max_workers = 4
         completed = 0
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -685,14 +939,69 @@ except Exception as e:
             logger.warning(f"  ⚠ {len(bind_errors)} bind errors detected - may need to reduce parallelism")
             logger.warning(f"    Affected ports: {bind_errors[:5]}{'...' if len(bind_errors) > 5 else ''}")
         
-        race_detected = False
+        # FIRST ITERATION ONLY: Comprehensive validation of ALL connections
+        if is_learning_phase:
+            logger.info(f"\n[Phase 5 - Full Validation] Checking ALL {spray_count} connections (First iteration only)")
+            logger.info(f"  This validates our kernel/eBPF verification logic...")
+            
+            client_ip = self.kube.get_pod_ip(self.config.namespace, self.config.client_pod)
+            validation_results = self.verify_all_connections(client_ip, server_ip, self.fixed_ports)
+            
+            logger.info(f"\n  Full Validation Results:")
+            logger.info(f"    🔥 Kernel ONLY (race pattern):  {len(validation_results['kernel_only'])}/{spray_count} ports")
+            logger.info(f"    ✓  BOTH (active connections):  {len(validation_results['both'])}/{spray_count} ports")
+            logger.info(f"    ✗  NEITHER (expired/cleaned):  {len(validation_results['neither'])}/{spray_count} ports")
+            logger.info(f"    ?  eBPF ONLY (unusual):        {len(validation_results['ebpf_only'])}/{spray_count} ports")
+            
+            if len(validation_results['kernel_only']) > 0:
+                logger.info(f"\n  Kernel-only ports (race candidates): {validation_results['kernel_only'][:20]}{'...' if len(validation_results['kernel_only']) > 20 else ''}")
         
-        # Only REFUSED errors indicate race condition
+        race_detected = False
+        confirmed_race_denials = []
+        
+        # Verify REFUSED errors by checking kernel vs eBPF conntrack
         if len(race_denials) > 0:
-            logger.error(f"🔥 RACE CONDITION DETECTED! {len(race_denials)}/{spray_count} connections REFUSED")
-            logger.error(f"   Cleanup deleted active eBPF entries during 5-tuple reuse")
-            logger.error(f"   Affected ports: {race_denials[:10]}{'...' if len(race_denials) > 10 else ''}")
-            race_detected = True
+            logger.info(f"\n  Verifying {len(race_denials)} REFUSED connections against kernel/eBPF conntrack...")
+            
+            # Get client IP
+            client_ip = self.kube.get_pod_ip(self.config.namespace, self.config.client_pod)
+            
+            # Sample verification (check up to 10 ports to avoid overwhelming the system)
+            sample_size = min(len(race_denials), 10)
+            sample_ports = race_denials[:sample_size]
+            
+            for port in sample_ports:
+                # Check if this 5-tuple is in kernel but NOT in eBPF
+                in_kernel, in_ebpf = self.check_5tuple_in_conntrack(
+                    client_ip, port, server_ip, self.config.server_port
+                )
+                
+                if in_kernel and not in_ebpf:
+                    # CONFIRMED RACE CONDITION!
+                    confirmed_race_denials.append(port)
+                    logger.error(f"    ✓ Port {port}: CONFIRMED RACE (kernel: ✓, eBPF: ✗)")
+                elif not in_kernel and not in_ebpf:
+                    logger.info(f"    • Port {port}: Both expired (kernel: ✗, eBPF: ✗) - normal cleanup")
+                elif in_kernel and in_ebpf:
+                    logger.warning(f"    ⚠ Port {port}: Both present (kernel: ✓, eBPF: ✓) - server/other issue")
+                else:
+                    logger.warning(f"    ? Port {port}: Unusual state (kernel: ✗, eBPF: ✓)")
+            
+            # If we found ANY confirmed race conditions in the sample, it's a race
+            if len(confirmed_race_denials) > 0:
+                logger.error(f"\n  🔥 CONFIRMED RACE CONDITION!")
+                logger.error(f"     {len(confirmed_race_denials)}/{sample_size} sampled ports show race pattern")
+                logger.error(f"     (kernel has entry, eBPF missing) → Cleanup deleted active entries")
+                logger.error(f"     Confirmed ports: {confirmed_race_denials}")
+                race_detected = True
+            else:
+                logger.warning(f"  ⚠ REFUSED errors detected but could not confirm race pattern")
+                logger.warning(f"     This may be a server issue or timing mismatch")
+        
+        # Legacy logging for backward compatibility
+        if len(race_denials) > 0:
+            logger.info(f"\n  Summary: {len(race_denials)}/{spray_count} connections REFUSED")
+            logger.info(f"  Affected ports: {race_denials[:10]}{'...' if len(race_denials) > 10 else ''}")
         
         if len(timeouts) > 10:  # Significant number of timeouts
             logger.warning(f"⚠ High timeout rate: {len(timeouts)}/{spray_count}")

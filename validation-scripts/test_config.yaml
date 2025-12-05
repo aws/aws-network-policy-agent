@@ -17,7 +17,7 @@ cleanup_period: 60        # NPA cleanup cycle period (production: 300s)
 
 # Test parameters
 iterations: 5             # Number of test attempts
-connections_per_wave: 100  # Connections created per wave (Phase 1)
+connections_per_wave: 20  # Connections created per wave (Phase 1)
 
 # Advanced settings (optional)
 # retry_delay: 5          # Delay between retries (seconds)
