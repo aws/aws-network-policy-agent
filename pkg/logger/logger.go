@@ -53,8 +53,6 @@ func Get() Logger {
 
 func GetControllerRuntimeLogger() logr.Logger {
 	zapSugared := Get().(*structuredLogger).zapLogger
-	// Get the base zap logger without the AddCallerSkip that was added for structured logger methods
-	// zapr needs to calculate its own caller skip, so we start fresh
-	zapLogger := zapSugared.Desugar().WithOptions(zap.AddCallerSkip(-2))
+	zapLogger := zapSugared.Desugar().WithOptions(zap.AddCallerSkip(1))
 	return zapr.NewLogger(zapLogger)
 }
