@@ -496,7 +496,7 @@ func TestGetBPFMapPinPathFromPodIdentifier(t *testing.T) {
 	tests := []struct {
 		name string
 		args args
-		want string
+		want map[string]string
 	}{
 		{
 			name: "Sample Ingress PodIdentifier",
@@ -504,7 +504,10 @@ func TestGetBPFMapPinPathFromPodIdentifier(t *testing.T) {
 				podIdentifier: "hello-udp-748dc8d996-default",
 				direction:     "ingress",
 			},
-			want: "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_ingress_map",
+			want: map[string]string{
+				"network-policy":         "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_ingress_map",
+				"cluster-network-policy": "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_cp_ingress_map",
+			},
 		},
 		{
 			name: "Sample Egress PodIdentifier",
@@ -512,13 +515,17 @@ func TestGetBPFMapPinPathFromPodIdentifier(t *testing.T) {
 				podIdentifier: "hello-udp-748dc8d996-default",
 				direction:     "egress",
 			},
-			want: "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_egress_map",
+			want: map[string]string{
+				"network-policy":         "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_egress_map",
+				"cluster-network-policy": "/sys/fs/bpf/globals/aws/maps/hello-udp-748dc8d996-default_cp_egress_map",
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetBPFMapPinPathFromPodIdentifier(tt.args.podIdentifier, tt.args.direction)
-			assert.Equal(t, tt.want, got)
+			npmap, cnpmap := GetBPFMapPinPathFromPodIdentifier(tt.args.podIdentifier, tt.args.direction)
+			assert.Equal(t, tt.want["network-policy"], npmap)
+			assert.Equal(t, tt.want["cluster-network-policy"], cnpmap)
 		})
 	}
 }

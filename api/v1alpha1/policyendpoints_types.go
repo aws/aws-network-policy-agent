@@ -33,6 +33,28 @@ type PolicyReference struct {
 
 type NetworkAddress string
 
+// DomainName describes one or more domain names to be used as a peer.
+//
+// DomainName can be an exact match, or use the wildcard specifier '*' to match
+// one or more labels.
+//
+// '*', the wildcard specifier, matches one or more entire labels. It does not
+// support partial matches. '*' may only be specified as a prefix.
+//
+//	Examples:
+//	  - `kubernetes.io` matches only `kubernetes.io`.
+//	    It does not match "www.kubernetes.io", "blog.kubernetes.io",
+//	    "my-kubernetes.io", or "wikipedia.org".
+//	  - `blog.kubernetes.io` matches only "blog.kubernetes.io".
+//	    It does not match "www.kubernetes.io" or "kubernetes.io".
+//	  - `*.kubernetes.io` matches subdomains of kubernetes.io.
+//	    "www.kubernetes.io", "blog.kubernetes.io", and
+//	    "latest.blog.kubernetes.io" match, however "kubernetes.io", and
+//	    "wikipedia.org" do not.
+//
+// +kubebuilder:validation:Pattern=`^(\*\.)?([a-zA-z0-9]([-a-zA-Z0-9_]*[a-zA-Z0-9])?\.)+[a-zA-z0-9]([-a-zA-Z0-9_]*[a-zA-Z0-9])?\.?$`
+type DomainName string
+
 // Port contains information about the transport port/protocol
 type Port struct {
 	// Protocol specifies the transport protocol, default TCP
@@ -49,7 +71,11 @@ type Port struct {
 // EndpointInfo defines the network endpoint information for the policy ingress/egress
 type EndpointInfo struct {
 	// CIDR is the network address(s) of the endpoint
-	CIDR NetworkAddress `json:"cidr"`
+	CIDR NetworkAddress `json:"cidr,omitempty"`
+
+	// DomainName is the FQDN for the endpoint (mutually exclusive with CIDR, egress-only)
+	// Note: This field should only be used in egress rules, not ingress
+	DomainName DomainName `json:"domainName,omitempty"`
 
 	// Except is the exceptions to the CIDR ranges mentioned above.
 	Except []NetworkAddress `json:"except,omitempty"`

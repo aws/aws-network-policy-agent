@@ -22,6 +22,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"time"
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
@@ -38,6 +39,7 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"k8s.io/client-go/discovery"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -101,9 +103,34 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
+
+	disc, err := discovery.NewDiscoveryClientForConfig(restCFG)
+	if err != nil {
+		log.Errorf("unable to create discovery client %v", err)
+		os.Exit(1)
+	}
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
+	var clusterPolicyEndpointController *controllers.ClusterPolicyEndpointsReconciler
 	if ctrlConfig.EnableNetworkPolicy {
-		log.Info("Network Policy is enabled, registering the policyEndpointController...")
+		log.Info("Network Policy is enabled, checking CRDs...")
+		// Check if required CRDs exist. Need to remove this eventually when the CPE CRD is available everywhere
+		requiredGV := "networking.k8s.aws/v1alpha1"
+		requiredResource := "clusterpolicyendpoints"
+
+		skipCPEController := true
+
+		resources, err := disc.ServerResourcesForGroupVersion(requiredGV)
+		if err != nil {
+			log.Errorf("Cannot list resources in the cluster in GVK %s, err %v", requiredGV, err)
+		} else {
+			for _, r := range resources.APIResources {
+				if r.Name == requiredResource {
+					log.Infof("CRD found in the required GVK resource %s", requiredResource)
+					skipCPEController = false
+					break
+				}
+			}
+		}
 
 		var nodeIP string
 		if !ctrlConfig.EnableIPv6 {
@@ -124,6 +151,33 @@ func main() {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
 			os.Exit(1)
 		}
+		if !skipCPEController {
+			log.Info("ClusterPolicyEndpoint CRD found, registering the controller clusterpolicyendpoints controller")
+			clusterPolicyEndpointController = controllers.NewClusterPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
+			if err = clusterPolicyEndpointController.SetupWithManager(ctx, mgr); err != nil {
+				log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
+				os.Exit(1)
+			}
+		} else {
+			log.Info("ClusterPolicyEndpoint CRD not found, skip registering the controller clusterpolicyendpoints controller")
+			// Start goroutine to monitor CRD availability. This can be removed after CPE CRD is available everywhere
+			go func() {
+				log.Infof("Starting CRD availability monitor for %s", requiredResource)
+				for {
+					time.Sleep(30 * time.Second)
+					discovererdResources, err := disc.ServerResourcesForGroupVersion(requiredGV)
+					if err == nil {
+						for _, r := range discovererdResources.APIResources {
+							if r.Name == requiredResource {
+								log.Infof("CRD now available, restarting agent: %s", requiredResource)
+								os.Exit(0)
+							}
+						}
+					}
+					log.Infof("CRD still not available, continuing to monitor: %s, %v", requiredResource, err)
+				}
+			}()
+		}
 	} else {
 		log.Info("Network Policy is disabled, skip the policyEndpointController registration")
 	}
@@ -142,7 +196,7 @@ func main() {
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
 	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
-	errCh, err := rpc.RunRPCHandler(policyEndpointController, npaSocketPath)
+	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath)
 	if err != nil {
 		log.Errorf("Failed to set up gRPC Handler %v", err)
 		os.Exit(1)
