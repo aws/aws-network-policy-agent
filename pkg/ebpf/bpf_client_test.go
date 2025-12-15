@@ -145,7 +145,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 
 	sampleIngressPgmInfo := goelf.BpfData{
 		Maps: map[string]goebpfmaps.BpfMap{
-			TC_INGRESS_MAP: {
+			utils.TC_INGRESS_MAP: {
 				MapFD: uint32(ingressMapFD),
 				MapID: uint32(ingressMapID),
 			},
@@ -153,7 +153,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	}
 	sampleEgressPgmInfo := goelf.BpfData{
 		Maps: map[string]goebpfmaps.BpfMap{
-			TC_EGRESS_MAP: {
+			utils.TC_EGRESS_MAP: {
 				MapFD: uint32(egressMapFD),
 				MapID: uint32(egressMapID),
 			},
@@ -204,7 +204,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 
 	sampleIngressPgmInfo := goelf.BpfData{
 		Maps: map[string]goebpfmaps.BpfMap{
-			TC_INGRESS_POD_STATE_MAP: {
+			utils.TC_INGRESS_POD_STATE_MAP: {
 				MapFD: uint32(ingressPodStateMapFD),
 				MapID: uint32(ingressPodStateMapID),
 			},
@@ -212,7 +212,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 	}
 	sampleEgressPgmInfo := goelf.BpfData{
 		Maps: map[string]goebpfmaps.BpfMap{
-			TC_EGRESS_POD_STATE_MAP: {
+			utils.TC_EGRESS_POD_STATE_MAP: {
 				MapFD: uint32(egressPodStateMapFD),
 				MapID: uint32(egressPodStateMapID),
 			},
@@ -250,7 +250,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 				egressPgmInfo:  sampleEgressPgmInfo,
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
-			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, tt.state, true, true)
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
 			assert.Equal(t, gotErr, tt.wantErr)
 		})
 	}

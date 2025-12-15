@@ -3,6 +3,7 @@ package clihelper
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -80,30 +81,95 @@ func MapShow() error {
 	return nil
 }
 
+// dumpClusterPolicyEntry prints a single Cluster NP entry from the map
+func dumpClusterPolicyEntry(key utils.BPFTrieKey, mapID int) error {
+	var values [24]utils.BPFL4PriorityVal
+	if err := goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&values)), mapID); err != nil {
+		return fmt.Errorf("unable to get map entry: %w", err)
+	}
+	fmt.Printf("Key: %s/%d\n", utils.ConvIntToIPv4(key.IP), key.PrefixLen)
+	printPolicyEntry(key, values)
+	return nil
+}
+
+// dumpNetworkPolicyEntry prints a single NP entry from the map
+func dumpNetworkPolicyEntry(key utils.BPFTrieKey, mapID int) error {
+	var values [24]utils.BPFTrieVal
+	if err := goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&values)), mapID); err != nil {
+		return fmt.Errorf("unable to get map entry: %w", err)
+	}
+	printPolicyEntry(key, values)
+	return nil
+}
+
+// printPolicyEntry handles shared printing logic for any []BPFTrieVal-like type
+func printPolicyEntry[T any](key utils.BPFTrieKey, entries [24]T) {
+
+	fmt.Printf("Key: %s/%d\n", utils.ConvIntToIPv4(key.IP), key.PrefixLen)
+	for i := 0; i < len(entries); i++ {
+		entry := any(entries[i])
+		switch v := entry.(type) {
+		case utils.BPFTrieVal:
+			if v.Protocol == 0 {
+				continue
+			}
+			fmt.Println("-------------------")
+			fmt.Printf("Entry %d:\n", i)
+			fmt.Println("Protocol  -", utils.GetProtocol(int(v.Protocol)))
+			fmt.Println("StartPort -", v.StartPort)
+			fmt.Println("EndPort   -", v.EndPort)
+			fmt.Println("-------------------")
+
+		case utils.BPFL4PriorityVal:
+			if v.Protocol == 0 {
+				continue
+			}
+			fmt.Println("-------------------")
+			fmt.Printf("Entry %d:\n", i)
+			fmt.Println("Protocol  -", utils.GetProtocol(int(v.Protocol)))
+			fmt.Println("Priority  -", v.Priority)
+			fmt.Println("StartPort -", v.StartPort)
+			fmt.Println("EndPort   -", v.EndPort)
+			fmt.Println("-------------------")
+		}
+	}
+	fmt.Println("*******************************")
+}
+
 // MapWalk - Displays content of individual maps (IPv4)
-func MapWalk(mapID int) error {
+func MapWalkCP(mapID int) error {
+	return MapWalk(mapID, "cp_")
+}
+
+// MapWalk - Displays content of individual maps (IPv4)
+func MapWalk(mapID int, mapNamePrefix string) error {
 	if mapID <= 0 {
 		return fmt.Errorf("Invalid mapID")
 	}
 
 	mapFD, err := goebpfutils.GetMapFDFromID(mapID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get map FD: %w", err)
 	}
 
 	mapInfo, err := goebpfmaps.GetBPFmapInfo(mapFD)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get map info: %w", err)
 	}
+
 	unix.Close(mapFD)
 
-	if mapInfo.Type != constdef.BPF_MAP_TYPE_LPM_TRIE.Index() && mapInfo.Type != constdef.BPF_MAP_TYPE_LRU_HASH.Index() && mapInfo.Type != constdef.BPF_MAP_TYPE_HASH.Index() {
-		return fmt.Errorf("Unsupported map type, should be - LPM trie (egress/ingress maps) or LRU hash (Conntrack table)")
+	switch mapInfo.Type {
+	case constdef.BPF_MAP_TYPE_LPM_TRIE.Index(),
+		constdef.BPF_MAP_TYPE_LRU_HASH.Index(),
+		constdef.BPF_MAP_TYPE_HASH.Index():
+		// Supported map types — continue
+	default:
+		return fmt.Errorf("unsupported map type: %d (expected LPM_TRIE, LRU_HASH, or HASH)", mapInfo.Type)
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
-		iterKey := utils.BPFTrieKey{}
-		iterNextKey := utils.BPFTrieKey{}
+		var iterKey, iterNextKey utils.BPFTrieKey
 
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
@@ -112,42 +178,31 @@ func MapWalk(mapID int) error {
 				return nil
 			}
 			return fmt.Errorf("Unable to get First key: %v", err)
-		} else {
-			for {
-
-				iterValue := [24]utils.BPFTrieVal{}
-				err = goebpfmaps.GetMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterValue)), mapID)
-				if err != nil {
-					return fmt.Errorf("Unable to get map entry: %v", err)
-				} else {
-					retrievedKey := fmt.Sprintf("Key : IP/Prefixlen - %s/%d ", utils.ConvIntToIPv4(iterKey.IP).String(), iterKey.PrefixLen)
-					fmt.Println(retrievedKey)
-					for i := 0; i < len(iterValue); i++ {
-						if iterValue[i].Protocol == 0 {
-							continue
-						}
-						fmt.Println("-------------------")
-						fmt.Println("Value Entry : ", i)
-						fmt.Println("Protocol - ", utils.GetProtocol(int(iterValue[i].Protocol)))
-						fmt.Println("StartPort - ", iterValue[i].StartPort)
-						fmt.Println("Endport - ", iterValue[i].EndPort)
-						fmt.Println("-------------------")
-					}
-					fmt.Println("*******************************")
-				}
-
-				err = goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterNextKey)), mapID)
-				if errors.Is(err, unix.ENOENT) {
-					fmt.Println("Done reading all entries")
-					break
-				}
-				if err != nil {
-					fmt.Println("Failed to get next entry Done searching")
-					break
-				}
-				iterKey = iterNextKey
-			}
 		}
+
+		for {
+			if strings.Contains(mapNamePrefix, "cp_") {
+				if err := dumpClusterPolicyEntry(iterKey, mapID); err != nil {
+					fmt.Printf("error reading ClusterNetworkPolicy entry: %v\n", err)
+				}
+			} else {
+				if err := dumpNetworkPolicyEntry(iterKey, mapID); err != nil {
+					fmt.Printf("error reading NetworkPolicy entry: %v\n", err)
+				}
+			}
+
+			err = goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterNextKey)), mapID)
+			if errors.Is(err, unix.ENOENT) {
+				fmt.Println("Done reading all entries")
+				break
+			}
+			if err != nil {
+				fmt.Println("Failed to get next entry Done searching")
+				break
+			}
+			iterKey = iterNextKey
+		}
+
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
@@ -244,17 +299,26 @@ func MapWalkv6(mapID int) error {
 
 	mapFD, err := goebpfutils.GetMapFDFromID(mapID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get map FD: %w", err)
 	}
 
 	mapInfo, err := goebpfmaps.GetBPFmapInfo(mapFD)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get map info: %w", err)
 	}
 	unix.Close(mapFD)
-	if mapInfo.Type != constdef.BPF_MAP_TYPE_LPM_TRIE.Index() && mapInfo.Type != constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
-		return fmt.Errorf("Unsupported map type, should be - LPM trie (egress/ingress maps) or LRU hash (Conntrack table)")
+
+	switch mapInfo.Type {
+	case constdef.BPF_MAP_TYPE_LPM_TRIE.Index(),
+		constdef.BPF_MAP_TYPE_LRU_HASH.Index(),
+		constdef.BPF_MAP_TYPE_HASH.Index():
+		// Supported map types — continue
+	default:
+		return fmt.Errorf("unsupported map type: %d (expected LPM_TRIE, LRU_HASH, or HASH)", mapInfo.Type)
 	}
+
+	mapName := strings.TrimRight(string(mapInfo.Name[:]), "\x00")
+	fmt.Printf("Walking map: %s (type=%d, id=%d)\n", mapName, mapInfo.Type, mapID)
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LPM_TRIE.Index() {
 		iterKey := utils.BPFTrieKeyV6{}

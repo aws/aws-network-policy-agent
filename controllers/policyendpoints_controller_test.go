@@ -9,6 +9,7 @@ import (
 	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/golang/mock/gomock"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -85,7 +86,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
 		assert.True(t, ok)
-		assert.Equal(t, 2, len(val.([]types.NamespacedName)))
+		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 	})
 
 	t.Run("Reconcile for Create and Delete PE", func(t *testing.T) {
@@ -131,7 +132,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
 		assert.True(t, ok)
-		assert.Equal(t, 2, len(val.([]types.NamespacedName)))
+		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 
 		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
 			Name:      policyEndpoint.GetName(),
@@ -530,8 +531,8 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 func TestDeriveTargetPods(t *testing.T) {
 	type want struct {
-		activePods        []types.NamespacedName
-		podsToBeCleanedUp []types.NamespacedName
+		activePods        []npatypes.Pod
+		podsToBeCleanedUp []npatypes.Pod
 	}
 
 	samplePolicyEndpoint := policyendpoint.PolicyEndpoint{
@@ -642,10 +643,13 @@ func TestDeriveTargetPods(t *testing.T) {
 			policyendpoint: samplePolicyEndpoint,
 			parentPEList:   []string{samplePolicyEndpoint.Name},
 			want: want{
-				activePods: []types.NamespacedName{
+				activePods: []npatypes.Pod{
 					{
-						Name:      "foo1",
-						Namespace: "bar",
+						NamespacedName: types.NamespacedName{
+							Name:      "foo1",
+							Namespace: "bar",
+						},
+						PodIP: "10.1.1.1",
 					},
 				},
 			},
@@ -661,10 +665,13 @@ func TestDeriveTargetPods(t *testing.T) {
 			parentPEList:   []string{policyEndpointUpdate.Name},
 			currentPods:    samplePods,
 			want: want{
-				activePods: []types.NamespacedName{
+				activePods: []npatypes.Pod{
 					{
-						Name:      "foo2",
-						Namespace: "bar",
+						NamespacedName: types.NamespacedName{
+							Name:      "foo2",
+							Namespace: "bar",
+						},
+						PodIP: "10.1.1.1",
 					},
 				},
 			},
@@ -675,10 +682,13 @@ func TestDeriveTargetPods(t *testing.T) {
 			parentPEList:   []string{ipv6NodePolicyEndpoint.Name},
 			nodeIP:         "2001:db8:0:0:0:0:0:1",
 			want: want{
-				activePods: []types.NamespacedName{
+				activePods: []npatypes.Pod{
 					{
-						Name:      "foo1",
-						Namespace: "bar",
+						NamespacedName: types.NamespacedName{
+							Name:      "foo1",
+							Namespace: "bar",
+						},
+						PodIP: "2001:db8::2",
 					},
 				},
 			},
@@ -872,7 +882,7 @@ func TestDeriveDefaultPodIsolation(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotIsIngressIsolated, gotIsEgressIsolated := policyEndpointReconciler.deriveDefaultPodIsolation(context.Background(),
+			gotIsIngressIsolated, gotIsEgressIsolated := policyEndpointReconciler.deriveDefaultPodIsolation(
 				&tt.policyendpoint, tt.ingressRuleCount, tt.egressRuleCount)
 			assert.Equal(t, tt.want.isIngressIsolated, gotIsIngressIsolated)
 			assert.Equal(t, tt.want.isEgressIsolated, gotIsEgressIsolated)

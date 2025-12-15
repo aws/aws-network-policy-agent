@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: test-conflicting-admin-policy
+spec:
+  priority: 90
+  tier: Admin
+  subject:
+    pods:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+      podSelector:
+        matchLabels:
+          app: nginx1
+          environment: qa
+          role: db
+  egress:
+    - name: test2-wrong
+      action: Deny
+      to:
+        - pods:
+            namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+      ports:
+        - portNumber:
+            protocol: UDP
+            port: 53
+        - portNumber:
+            protocol: TCP
+            port: 53

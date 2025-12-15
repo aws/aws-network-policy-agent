@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: default-admin-policy
+spec:
+  priority: 100
+  tier: Admin
+  subject:
+    pods:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+      podSelector:
+        matchLabels:
+          app: nginx1
+          environment: qa
+          role: db
+  ingress:
+    - name: test2
+      action: Accept
+      from:
+        - pods:
+            namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+      ports:
+        - portNumber:
+            protocol: UDP
+            port: 53
+        - portNumber:
+            protocol: TCP
+            port: 53
+  egress:
+    - name: test1
+      action: Accept
+      to:
+        - networks:
+          - "192.168.0.0/24"
+      ports:
+        - portNumber:
+            protocol: TCP
+            port: 443
+    - name: test3
+      action: Pass
+      to:
+        - networks:
+          - "0.0.0.0/0"
