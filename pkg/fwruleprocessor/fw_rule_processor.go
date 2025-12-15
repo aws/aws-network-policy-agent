@@ -18,14 +18,18 @@ func log() logger.Logger {
 }
 
 var (
-	CATCH_ALL_PROTOCOL corev1.Protocol = "ANY_IP_PROTOCOL"
-	DENY_ALL_PROTOCOL  corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
+	CATCH_ALL_PROTOCOL            corev1.Protocol = "ANY_IP_PROTOCOL"
+	DENY_ALL_PROTOCOL             corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
+	BASELINE_TIER_PRIORITY_OFFSET int             = 2000 // Baseline cluster policy rules will have priority offset of 2000
 )
 
 type EbpfFirewallRules struct {
-	IPCidr v1alpha1.NetworkAddress
-	Except []v1alpha1.NetworkAddress
-	L4Info []v1alpha1.Port
+	Priority   int
+	Action     v1alpha1.ClusterNetworkPolicyRuleAction
+	DomainName string
+	IPCidr     v1alpha1.NetworkAddress
+	Except     []v1alpha1.NetworkAddress
+	L4Info     []v1alpha1.Port
 }
 
 type FirewallRuleProcessor struct {
@@ -259,6 +263,163 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 
 	for _, port := range uniquePorts {
 		result = append(result, port)
+	}
+
+	return result
+}
+
+func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+	firewallMap := make(map[string][]byte)
+	cidrL4Rules := make(map[string][]utils.L4Rule)
+	processedCIDRs := make([]string, 0)
+
+	// Step 1: Sort by CIDR length
+	f.sortByCIDRLength(firewallRules)
+
+	// Step 2-3: Process each CIDR and handle overlaps
+	for _, rule := range firewallRules {
+
+		cidr := f.normalizeCIDR(string(rule.IPCidr))
+		if f.shouldSkipRule(cidr) {
+			continue
+		}
+
+		// Find the most specific overlapping CIDR
+		overlappingCIDR := f.findMostSpecificOverlap(cidr, processedCIDRs)
+
+		// Copy L4 rules from overlapping CIDR if found
+		if overlappingCIDR != "" {
+			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], cidrL4Rules[overlappingCIDR]...)
+		}
+
+		// If this current rule doesn't have any port/protocol, the rule is not specific to any port/protocol
+		if len(rule.L4Info) == 0 {
+			log().Info("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
+			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], utils.L4Rule{
+				Action:   rule.Action,
+				Priority: rule.Priority,
+			})
+		}
+
+		// Add current rule's L4 info
+		for _, port := range rule.L4Info {
+			l4Rule := utils.L4Rule{
+				L4PortProtocolInfo: port,
+				Action:             rule.Action,
+				Priority:           rule.Priority,
+			}
+			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], l4Rule)
+		}
+		processedCIDRs = append(processedCIDRs, cidr)
+	}
+
+	// Step 4: Resolve conflicts and create final map entries
+	for cidr, l4Rules := range cidrL4Rules {
+		log().Infof("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
+		resolvedL4Rules := f.removeDuplicateL4Rules(l4Rules)
+
+		_, firewallMapKey, _ := net.ParseCIDR(cidr)
+		firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
+
+		firewallValue := utils.ComputeTrieValueForCPE(resolvedL4Rules)
+		firewallMap[string(firewallKey)] = firewallValue
+	}
+
+	return firewallMap, nil
+}
+
+func (f *FirewallRuleProcessor) normalizeCIDR(cidr string) string {
+	if !strings.Contains(cidr, "/") {
+		return cidr + f.hostMask
+	}
+	return cidr
+}
+
+func (f *FirewallRuleProcessor) shouldSkipRule(cidr string) bool {
+	if utils.IsNodeIP(f.nodeIP, cidr) {
+		return true
+	}
+	if f.enableIPv6 && !strings.Contains(cidr, "::") {
+		return true
+	}
+	if !f.enableIPv6 && strings.Contains(cidr, "::") {
+		return true
+	}
+	return false
+}
+
+func (f *FirewallRuleProcessor) sortByCIDRLength(rules []EbpfFirewallRules) {
+	sort.Slice(rules, func(i, j int) bool {
+		cidrI := f.normalizeCIDR(string(rules[i].IPCidr))
+		cidrJ := f.normalizeCIDR(string(rules[j].IPCidr))
+
+		prefixI := f.getPrefixLength(cidrI)
+		prefixJ := f.getPrefixLength(cidrJ)
+
+		return prefixI < prefixJ // Bigger to smaller (/16 before /32)
+	})
+}
+
+func (f *FirewallRuleProcessor) getPrefixLength(cidr string) int {
+	parts := strings.Split(cidr, "/")
+	if len(parts) != 2 {
+		return 32 // Default for IPv4
+	}
+	prefixLen, _ := strconv.Atoi(parts[1])
+	return prefixLen
+}
+
+func (f *FirewallRuleProcessor) findMostSpecificOverlap(currentCIDR string, processedCIDRs []string) string {
+	_, currentNet, _ := net.ParseCIDR(currentCIDR)
+
+	// Loop from end to start since CIDRs are sorted in ascending order
+	for i := len(processedCIDRs) - 1; i >= 0; i-- {
+		processedCIDR := processedCIDRs[i]
+		_, processedNet, _ := net.ParseCIDR(processedCIDR)
+
+		// Check if current CIDR is contained within processed CIDR
+		if processedNet.Contains(currentNet.IP) {
+			return processedCIDR
+		}
+	}
+
+	return ""
+}
+
+func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) []utils.L4Rule {
+
+	uniquePorts := make(map[string]utils.L4Rule)
+	var result []utils.L4Rule
+	var key string
+
+	for _, p := range l4Rules {
+
+		portKey := 0
+		endPortKey := 0
+
+		if p.L4PortProtocolInfo.Port != nil {
+			portKey = int(*p.L4PortProtocolInfo.Port)
+		}
+
+		if p.L4PortProtocolInfo.EndPort != nil {
+			endPortKey = int(*p.L4PortProtocolInfo.EndPort)
+		}
+
+		if p.L4PortProtocolInfo.Protocol == nil {
+			key = fmt.Sprintf("%s-%d-%d-%d-%s", "TCP", portKey, endPortKey, p.Priority, p.Action)
+		} else {
+			key = fmt.Sprintf("%v-%d-%d-%d-%s", p.L4PortProtocolInfo.Protocol, portKey, endPortKey, p.Priority, p.Action)
+		}
+
+		if _, ok := uniquePorts[key]; ok {
+			continue
+		} else {
+			uniquePorts[key] = p
+		}
+	}
+
+	for _, rule := range uniquePorts {
+		result = append(result, rule)
 	}
 
 	return result

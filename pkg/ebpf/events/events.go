@@ -73,6 +73,7 @@ type ringBufferDataV4_t struct {
 	Verdict    uint32
 	PacketSz   uint32
 	IsEgress   uint8
+	Tier       uint8
 }
 
 type ringBufferDataV6_t struct {
@@ -84,6 +85,7 @@ type ringBufferDataV6_t struct {
 	Verdict    uint32
 	PacketSz   uint32
 	IsEgress   uint8
+	Tier       uint8
 }
 
 func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
@@ -155,6 +157,20 @@ func getVerdict(verdict int) string {
 	return verdictStr
 }
 
+func getTier(tier int) string {
+	tierStr := "ERROR"
+	if tier == utils.ADMIN_TIER.Index() {
+		tierStr = "ADMIN"
+	} else if tier == utils.NETWORK_POLICY_TIER.Index() {
+		tierStr = "NETWORK_POLICY"
+	} else if tier == utils.BASELINE_TIER.Index() {
+		tierStr = "BASELINE"
+	} else if tier == utils.DEFAULT_TIER.Index() {
+		tierStr = "DEFAULT"
+	}
+	return tierStr
+}
+
 func publishDataToCloudwatch(ctx context.Context, logQueue []types.InputLogEvent, message string) bool {
 	logQueue = append(logQueue, types.InputLogEvent{
 		Message:   aws.String(message),
@@ -215,17 +231,20 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					direction = "ingress"
 				}
 
+				tier := getTier(int(rb.Tier))
+
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
-						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Tier: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction), tier)
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
-						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto: %s Verdict: %s Direction: %s Tier: %s", utils.ConvByteToIPv6(rb.SourceIP).String(), rb.SourcePort,
+						utils.ConvByteToIPv6(rb.DestIP).String(), rb.DestPort, protocol, string(verdict), string(direction), tier)
 				}
 
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				// message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteToIPv6(rb.SourceIP).String() + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteToIPv6(rb.DestIP).String() + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
 			} else {
 				var rb ringBufferDataV4_t
 				buf := bytes.NewBuffer(record)
@@ -240,17 +259,18 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					direction = "ingress"
 				}
 
+				tier := getTier(int(rb.Tier))
+
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
 					dropBytesTotal.WithLabelValues(direction).Add(float64(rb.PacketSz))
-					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
-						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Infof("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s, Tier %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction), tier)
 				} else {
-					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
-						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction))
+					log().Debugf("Flow Info: Src IP: %s Src Port: %d Dest IP: %s Dest Port: %d Proto %s Verdict %s Direction %s, Tier %s", utils.ConvByteArrayToIP(rb.SourceIP), rb.SourcePort,
+						utils.ConvByteArrayToIP(rb.DestIP), rb.DestPort, protocol, string(verdict), string(direction), tier)
 				}
-
-				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict
+				message = "Node: " + nodeName + ";" + "SIP: " + utils.ConvByteArrayToIP(rb.SourceIP) + ";" + "SPORT: " + strconv.Itoa(int(rb.SourcePort)) + ";" + "DIP: " + utils.ConvByteArrayToIP(rb.DestIP) + ";" + "DPORT: " + strconv.Itoa(int(rb.DestPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
 			}
 
 			if enableCloudWatchLogs {
