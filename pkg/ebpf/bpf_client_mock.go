@@ -11,13 +11,15 @@ import (
 // This function is intended for use in tests in other packages.
 func NewMockBpfClient() *bpfClient {
 	return &bpfClient{
-		policyEndpointeBPFContext: new(sync.Map),
-		ingressPodToProgMap:       new(sync.Map),
-		egressPodToProgMap:        new(sync.Map),
-		ingressProgToPodsMap:      new(sync.Map),
-		egressProgToPodsMap:       new(sync.Map),
-		globalMaps:                new(sync.Map),
-		hostMask:                  "/32",
+		policyEndpointeBPFContext:       new(sync.Map),
+		ingressPodToProgMap:             new(sync.Map),
+		egressPodToProgMap:              new(sync.Map),
+		ingressProgToPodsMap:            new(sync.Map),
+		egressProgToPodsMap:             new(sync.Map),
+		globalMaps:                      new(sync.Map),
+		hostMask:                        "/32",
+		clusterPolicyIngressInMemoryMap: new(sync.Map),
+		clusterPolicyEgressInMemoryMap:  new(sync.Map),
 	}
 }
 
@@ -35,7 +37,11 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 	return nil
 }
 
-func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, state int, updateIngress bool, updateEgress bool) error {
+func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+	return nil
+}
+
+func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	return nil
 }
 
@@ -49,4 +55,8 @@ func (m *MockBpfClient) ReAttachEbpfProbes() error {
 
 func (m *MockBpfClient) GetNetworkPolicyMode() string {
 	return "standard"
+}
+
+func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
+	return nil
 }

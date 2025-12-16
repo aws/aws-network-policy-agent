@@ -13,6 +13,7 @@ type NetworkPolicyBuilder struct {
 	ingressRules []network.NetworkPolicyIngressRule
 	ingress      bool
 	egress       bool
+	policyTypes  []network.PolicyType
 }
 
 func (n *NetworkPolicyBuilder) Build() *network.NetworkPolicy {
@@ -39,12 +40,16 @@ func (n *NetworkPolicyBuilder) Build() *network.NetworkPolicy {
 		netpol.Spec.Egress = n.egressRules
 	}
 
-	if n.egress {
-		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeEgress)
-	}
+	if len(n.policyTypes) > 0 {
+		netpol.Spec.PolicyTypes = n.policyTypes
+	} else {
+		if n.egress {
+			netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeEgress)
+		}
 
-	if n.ingress {
-		netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeIngress)
+		if n.ingress {
+			netpol.Spec.PolicyTypes = append(netpol.Spec.PolicyTypes, network.PolicyTypeIngress)
+		}
 	}
 
 	return netpol
@@ -88,5 +93,10 @@ func (n *NetworkPolicyBuilder) AddIngressRule(ingressRule network.NetworkPolicyI
 func (n *NetworkPolicyBuilder) SetPolicyType(ingress bool, egress bool) *NetworkPolicyBuilder {
 	n.ingress = ingress
 	n.egress = egress
+	return n
+}
+
+func (n *NetworkPolicyBuilder) SetPolicyTypes(policyTypes []network.PolicyType) *NetworkPolicyBuilder {
+	n.policyTypes = policyTypes
 	return n
 }

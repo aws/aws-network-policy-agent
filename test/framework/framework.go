@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/clusternetworkpolicy"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/deployment"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/namespace"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/networkpolicy"
@@ -15,13 +16,14 @@ import (
 )
 
 type Framework struct {
-	Options              Options
-	K8sClient            client.Client
-	DeploymentManager    deployment.Manager
-	NamespaceManager     namespace.Manager
-	ServiceManager       service.Manager
-	PodManager           pod.Manager
-	NetworkPolicyManager networkpolicy.Manager
+	Options                     Options
+	K8sClient                   client.Client
+	DeploymentManager           deployment.Manager
+	NamespaceManager            namespace.Manager
+	ServiceManager              service.Manager
+	PodManager                  pod.Manager
+	NetworkPolicyManager        networkpolicy.Manager
+	ClusterNetworkPolicyManager clusternetworkpolicy.Manager
 }
 
 func New(options Options) *Framework {
@@ -41,12 +43,13 @@ func New(options Options) *Framework {
 	Expect(err).NotTo(HaveOccurred())
 
 	return &Framework{
-		K8sClient:            k8sClient,
-		DeploymentManager:    deployment.NewManager(k8sClient),
-		NamespaceManager:     namespace.NewManager(k8sClient),
-		PodManager:           pod.NewManager(k8sClient, clientset),
-		NetworkPolicyManager: networkpolicy.NewManager(k8sClient),
-		ServiceManager:       service.NewManager(k8sClient),
-		Options:              options,
+		K8sClient:                   k8sClient,
+		DeploymentManager:           deployment.NewManager(k8sClient),
+		NamespaceManager:            namespace.NewManager(k8sClient),
+		PodManager:                  pod.NewManager(k8sClient, clientset, config),
+		NetworkPolicyManager:        networkpolicy.NewManager(k8sClient),
+		ClusterNetworkPolicyManager: clusternetworkpolicy.NewManager(k8sClient),
+		ServiceManager:              service.NewManager(k8sClient),
+		Options:                     options,
 	}
 }

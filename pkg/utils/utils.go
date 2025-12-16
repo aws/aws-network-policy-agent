@@ -27,12 +27,16 @@ var (
 	TRIE_KEY_LENGTH                 = 8
 	TRIE_V6_KEY_LENGTH              = 20
 	TRIE_VALUE_LENGTH               = 288
+	ADMIN_TRIE_VALUE_LENGTH         = 384
+	PE_PRIORITY                     = 1500
 	BPF_PROGRAMS_PIN_PATH_DIRECTORY = "/sys/fs/bpf/globals/aws/programs/"
 	BPF_MAPS_PIN_PATH_DIRECTORY     = "/sys/fs/bpf/globals/aws/maps/"
 	TC_INGRESS_PROG                 = "handle_ingress"
 	TC_EGRESS_PROG                  = "handle_egress"
 	TC_INGRESS_MAP                  = "ingress_map"
 	TC_EGRESS_MAP                   = "egress_map"
+	TC_CLUSTER_POLICY_INGRESS_MAP   = "cp_ingress_map"
+	TC_CLUSTER_POLICY_EGRESS_MAP    = "cp_egress_map"
 	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
@@ -46,6 +50,12 @@ var (
 
 func log() logger.Logger {
 	return logger.Get()
+}
+
+type L4Rule struct {
+	L4PortProtocolInfo v1alpha1.Port
+	Action             v1alpha1.ClusterNetworkPolicyRuleAction
+	Priority           int
 }
 
 // NetworkPolicyEnforcingMode is the mode of network policy enforcement
@@ -100,14 +110,43 @@ var getLinkByNameFunc = netlink.LinkByName
 
 type VerdictType int
 
+// DENY = 0, ACCEPT = 1, EXPIRED_DELETED =2
 const (
 	DENY VerdictType = iota
 	ACCEPT
 	EXPIRED_DELETED
 )
 
+type CPActionType int
+
+// DENY = 0, ACCEPT = 1, PASS = 2
+const (
+	ActionDeny CPActionType = iota
+	ActionAccept
+	ActionPass
+)
+
 func (verdictType VerdictType) Index() int {
 	return int(verdictType)
+}
+
+func (actionType CPActionType) Index() int {
+	return int(actionType)
+}
+
+type Tier int
+
+// ERROR_TIER = 0, ADMIN_TIER = 1, NETWORK_POLICY_TIER =2 , BASELINE_TIER=3, DEFAULT_TIER=4
+const (
+	ERROR_TIER Tier = iota
+	ADMIN_TIER
+	NETWORK_POLICY_TIER
+	BASELINE_TIER
+	DEFAULT_TIER
+)
+
+func (t Tier) Index() int {
+	return int(t)
 }
 
 func GetPodNamespacedName(podName, podNamespace string) string {
@@ -142,13 +181,15 @@ func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) stri
 	return pinPath
 }
 
-func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
+func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) (string, string) {
 	mapName := TC_INGRESS_MAP
+	clusterPolicyMapName := TC_CLUSTER_POLICY_INGRESS_MAP
 	if direction == "egress" {
 		mapName = TC_EGRESS_MAP
+		clusterPolicyMapName = TC_CLUSTER_POLICY_EGRESS_MAP
 	}
-	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
-	return pinPath
+	return fmt.Sprintf("%s%s_%s", BPF_MAPS_PIN_PATH_DIRECTORY, podIdentifier, mapName),
+		fmt.Sprintf("%s%s_%s", BPF_MAPS_PIN_PATH_DIRECTORY, podIdentifier, clusterPolicyMapName)
 }
 
 func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
@@ -160,8 +201,8 @@ func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction s
 	return pinPath
 }
 
-func GetPolicyEndpointIdentifier(policyName, policyNamespace string) string {
-	return policyName + policyNamespace
+func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) string {
+	return policyEndpointName + policyNamespace
 }
 
 func GetParentNPNameFromPEName(policyEndpointName string) string {
@@ -213,6 +254,89 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	copy(key[4:], n.IP)
 
 	return key
+}
+
+func ComputeTrieValueForCPE(l4Info []L4Rule) []byte {
+	var startPort, endPort, protocol int
+	value := make([]byte, ADMIN_TRIE_VALUE_LENGTH)
+	startOffset := 0
+
+	for _, l4Entry := range l4Info {
+		if startOffset >= ADMIN_TRIE_VALUE_LENGTH {
+			log().Error("No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of 24")
+			return value
+		}
+		startPort, endPort = 0, 0
+
+		// If Port/Protocol is empty, we do not match on port/protocol of the traffic
+		// and allow/deny/pass decision is entirely made on priority/action
+		// We could set port from from 0 to 65535 and protocol to ANY_IP_PROTOCOL to make it explicit, but this isn't necessary right now
+		if IsL4RuleEmpty(l4Entry) {
+			protocol = ANY_IP_PROTOCOL
+		} else {
+			protocol = deriveProtocolValueForCPE(l4Entry.L4PortProtocolInfo)
+			if l4Entry.L4PortProtocolInfo.Port != nil {
+				startPort = int(*l4Entry.L4PortProtocolInfo.Port)
+			}
+			if l4Entry.L4PortProtocolInfo.EndPort != nil {
+				endPort = int(*l4Entry.L4PortProtocolInfo.EndPort)
+			}
+		}
+
+		// Priority of any CPE rule is between 0-1000. An offset of (+2000) is added to baseline tier rules
+		// Computed priority when storing in ebpf map is given by -> (priority *10 + actionValue)
+		// This ensures action is also part of the evaluation logic when multiple rules have same priority and we save space in ebpf map
+
+		action := deriveActionValueForCPE(l4Entry.Action)
+		priority := l4Entry.Priority*10 + action
+
+		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v action: %v, priority: %v", protocol, startPort, endPort, l4Entry.Action, priority)
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(priority))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
+		startOffset += 4
+	}
+
+	return value
+}
+
+func IsL4RuleEmpty(p L4Rule) bool {
+	return p.L4PortProtocolInfo.Protocol == nil && p.L4PortProtocolInfo.Port == nil && p.L4PortProtocolInfo.EndPort == nil
+}
+
+func deriveActionValueForCPE(action v1alpha1.ClusterNetworkPolicyRuleAction) int {
+	switch action {
+	case v1alpha1.ClusterNetworkPolicyRuleActionDeny:
+		return CPActionType(ActionDeny).Index()
+	case v1alpha1.ClusterNetworkPolicyRuleActionAccept:
+		return CPActionType(ActionAccept).Index()
+	case v1alpha1.ClusterNetworkPolicyRuleActionPass:
+		return CPActionType(ActionPass).Index()
+	}
+	return CPActionType(ActionPass).Index()
+}
+
+func deriveProtocolValueForCPE(l4Info v1alpha1.Port) int {
+	protocol := TCP_PROTOCOL_NUMBER
+
+	if l4Info.Protocol == nil {
+		return protocol
+	}
+	switch *l4Info.Protocol {
+	case corev1.ProtocolUDP:
+		protocol = UDP_PROTOCOL_NUMBER
+	case corev1.ProtocolSCTP:
+		protocol = SCTP_PROTOCOL_NUMBER
+	case CATCH_ALL_PROTOCOL:
+		protocol = ANY_IP_PROTOCOL
+	case DENY_ALL_PROTOCOL:
+		protocol = RESERVED_IP_PROTOCOL_NUMBER
+	}
+	return protocol
 }
 
 func ComputeTrieValue(l4Info []v1alpha1.Port, allowAll, denyAll bool) []byte {
@@ -438,6 +562,13 @@ type BPFTrieKeyV6 struct {
 
 type BPFTrieVal struct {
 	Protocol  uint32
+	StartPort uint32
+	EndPort   uint32
+}
+
+type BPFL4PriorityVal struct {
+	Protocol  uint32
+	Priority  uint32
 	StartPort uint32
 	EndPort   uint32
 }
