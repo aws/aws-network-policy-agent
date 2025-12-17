@@ -125,6 +125,10 @@ struct pod_state {
     __u8 state; // 0 => POLICIES_APPLIED, 1 => DEFAULT_ALLOW, 2 => DEFAULT_DENY
 };
 
+struct policy_scope {
+   __u8 scope;
+};
+
 struct bpf_map_def_pvt SEC("maps") egress_pod_state_map = {
     .type        = BPF_MAP_TYPE_HASH,
     .key_size    = sizeof(__u32), // network policy key 0, cluster policy key 1

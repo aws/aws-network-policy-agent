@@ -38,6 +38,7 @@ var (
 	EVENTS_V6_BINARY                                 = "v6events.bpf.o"
 	AWS_CONNTRACK_MAP                                = "aws_conntrack_map"
 	AWS_EVENTS_MAP                                   = "policy_events"
+	AWS_EVENTS_SCOPE_MAP                             = "policy_events_scope"
 	EKS_CLI_BINARY                                   = "aws-eks-na-cli"
 	EKS_V6_CLI_BINARY                                = "aws-eks-na-cli-v6"
 	hostBinaryPath                                   = "/host/opt/cni/bin/"
@@ -477,13 +478,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 			}
 			if direction == "ingress" && !updateIngressProbe {
 				peBPFContext.ingressPgmInfo = bpfEntry
-				val, found := bpfEntry.Maps[utils.TC_INGRESS_MAP]
+				ingressVal, found := bpfEntry.Maps[utils.TC_INGRESS_MAP]
 				if found {
-					log().Infof("found ingress ebpf map for %v, map %+v", podIdentifier, val)
+					log().Infof("found ingress ebpf map for %v, map %+v", podIdentifier, ingressVal)
 
 					_, ok := l.ingressInMemoryMap.Load(podIdentifier)
 					if !ok {
-						inMemMap, err := NewInMemoryBpfMap(&val)
+						inMemMap, err := NewInMemoryBpfMap(&ingressVal)
 						if err != nil {
 							log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
 						} else {
@@ -492,13 +493,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						}
 					}
 				}
-				val, found = bpfEntry.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
+				cpIngressVal, found := bpfEntry.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
 				if found {
-					log().Infof("found cluster policy ingress ebpf map for %v, map %+v", podIdentifier, val)
+					log().Infof("found cluster policy ingress ebpf map for %v, map %+v", podIdentifier, cpIngressVal)
 
 					_, ok := l.clusterPolicyIngressInMemoryMap.Load(podIdentifier)
 					if !ok {
-						inMemMap, err := NewInMemoryBpfMap(&val)
+						inMemMap, err := NewInMemoryBpfMap(&cpIngressVal)
 						if err != nil {
 							log().Errorf("got err for cluster policy ingress in-mem map for %v, err %v", podIdentifier, err)
 						} else {
@@ -509,13 +510,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				}
 			} else if direction == "egress" && !updateEgressProbe {
 				peBPFContext.egressPgmInfo = bpfEntry
-				val, found := bpfEntry.Maps[utils.TC_EGRESS_MAP]
+				egressVal, found := bpfEntry.Maps[utils.TC_EGRESS_MAP]
 				if found {
-					log().Infof("found egress ebpf map for %v, map %+v", podIdentifier, val)
+					log().Infof("found egress ebpf map for %v, map %+v", podIdentifier, egressVal)
 
 					_, ok := l.egressInMemoryMap.Load(podIdentifier)
 					if !ok {
-						inMemMap, err := NewInMemoryBpfMap(&val)
+						inMemMap, err := NewInMemoryBpfMap(&egressVal)
 						if err != nil {
 							log().Errorf("got err for egress in-mem map for %v, err %v", podIdentifier, err)
 						} else {
@@ -524,13 +525,13 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						}
 					}
 				}
-				val, found = bpfEntry.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
+				cpEgressVal, found := bpfEntry.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
 				if found {
-					log().Infof("found cluster policy egress ebpf map for %v, map %+v", podIdentifier, val)
+					log().Infof("found cluster policy egress ebpf map for %v, map %+v", podIdentifier, cpEgressVal)
 
 					_, ok := l.clusterPolicyEgressInMemoryMap.Load(podIdentifier)
 					if !ok {
-						inMemMap, err := NewInMemoryBpfMap(&val)
+						inMemMap, err := NewInMemoryBpfMap(&cpEgressVal)
 						if err != nil {
 							log().Errorf("got err for cluster policy egress in-mem map for %v, err %v", podIdentifier, err)
 						} else {
