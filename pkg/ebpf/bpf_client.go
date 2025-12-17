@@ -448,7 +448,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				}
 				cpIngressVal, found := bpfEntry.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
 				if found {
-					log().Infof("found cluster policy ingress ebpf map for %v, map %+v", podIdentifier, ingressVal)
+					log().Infof("found cluster policy ingress ebpf map for %v, map %+v", podIdentifier, cpIngressVal)
 
 					_, ok := l.clusterPolicyIngressInMemoryMap.Load(podIdentifier)
 					if !ok {
@@ -480,7 +480,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				}
 				cpEgressVal, found := bpfEntry.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
 				if found {
-					log().Infof("found cluster policy egress ebpf map for %v, map %+v", podIdentifier, egressVal)
+					log().Infof("found cluster policy egress ebpf map for %v, map %+v", podIdentifier, cpEgressVal)
 
 					_, ok := l.clusterPolicyEgressInMemoryMap.Load(podIdentifier)
 					if !ok {
