@@ -61,7 +61,8 @@ func getEncoder() zapcore.Encoder {
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 
-func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
+// buildZapCore creates the common zapcore.Core used by all loggers
+func (logConfig *Configuration) buildZapCore() zapcore.Core {
 	var cores []zapcore.Core
 
 	logLevel := getZapLevel(logConfig.LogLevel)
@@ -70,18 +71,25 @@ func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
 
 	cores = append(cores, zapcore.NewCore(getEncoder(), writer, logLevel))
 
-	combinedCore := zapcore.NewTee(cores...)
+	return zapcore.NewTee(cores...)
+}
 
-	logger := zap.New(combinedCore,
+func (logConfig *Configuration) newZapLogger() *structuredLogger { //Logger {
+	logger := zap.New(logConfig.buildZapCore(),
 		zap.AddCaller(),
 		zap.AddCallerSkip(2),
 	)
-	defer logger.Sync()
 
 	sugar := logger.Sugar()
 	return &structuredLogger{
 		zapLogger: sugar,
 	}
+}
+
+// newZapLoggerForControllerRuntime creates a zap logger for controller-runtime
+// without AddCallerSkip since zapr handles caller skip internally
+func (logConfig *Configuration) newZapLoggerForControllerRuntime() *zap.Logger {
+	return zap.New(logConfig.buildZapCore(), zap.AddCaller())
 }
 
 // getLogFilePath returns the writer

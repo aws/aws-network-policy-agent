@@ -51,6 +51,11 @@ func Get() Logger {
 }
 
 func GetControllerRuntimeLogger() logr.Logger {
-	zapSugared := Get().(*structuredLogger).zapLogger
-	return zapr.NewLogger(zapSugared.Desugar())
+	inputLogConfig := &Configuration{
+		LogLevel:          DEFAULT_LOG_LEVEL,
+		LogLocation:       DEFAULT_LOG_LOCATION,
+		LogFileMaxSize:    DEFAULT_LOG_FILE_MAX_SIZE,
+		LogFileMaxBackups: DEFAULT_LOG_FILE_MAX_BACKUPS,
+	}
+	return zapr.NewLogger(inputLogConfig.newZapLoggerForControllerRuntime())
 }
