@@ -29,7 +29,6 @@ source ${DIR}/lib/tests.sh
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${SKIP_MAKE_TEST_BINARIES:="false"}"
-: "${ENABLE_STRICT_MODE:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
@@ -88,8 +87,6 @@ fi
 
 run_cyclonus_tests
 
-check_path_cleanup
-
 if [[ $SKIP_MAKE_TEST_BINARIES == "false" ]]; then
     echo "Making ginkgo test binaries"
     (cd $DIR/../ && make build-test-binaries)
@@ -98,18 +95,17 @@ else
 fi
 
 CGO_ENABLED=0 ginkgo -v -timeout 15m $GINKGO_TEST_BUILD_DIR/policy.test --no-color --fail-on-pending -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
+CGO_ENABLED=0 ginkgo -v -timeout 15m $GINKGO_TEST_BUILD_DIR/clusternetworkpolicy.test --no-color --fail-on-pending -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
 
-if [[ $ENABLE_STRICT_MODE == "true" ]]; then
+echo "Enable network policy strict mode"
+kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
 
-    echo "Enable network policy strict mode"
-    kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
+echo "Check aws-node daemonset status"
+kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 
-    echo "Check aws-node daemonset status"
-    kubectl rollout status ds/aws-node -n kube-system --timeout=300s
+CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending $GINKGO_TEST_BUILD_DIR/strict.test -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
 
-    CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending $GINKGO_TEST_BUILD_DIR/strict.test -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
-
-fi
+check_path_cleanup
 
 if [[ $TEST_FAILED == "true" ]]; then
     echo "Test run failed"
