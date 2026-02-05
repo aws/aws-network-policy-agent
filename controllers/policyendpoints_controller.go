@@ -551,6 +551,11 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 	// by the Host IP value.
 	nodeIP := net.ParseIP(r.nodeIP)
 	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
+		if string(pod.PodIP) == string(pod.HostIP) {
+			log().Infof("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
+				pod.Name, pod.Namespace, pod.PodIP)
+			continue
+		}
 		podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			targetPods = append(targetPods, npatypes.Pod{NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
