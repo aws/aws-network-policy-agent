@@ -116,10 +116,10 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 		if clusterPolicyAvailableInLocalCache && s.clusterPolicyReconciler != nil {
 
-			ingressRules, egressRules, _ :=
+			clusterIngressRules, clusterEgressRules, _ :=
 				s.clusterPolicyReconciler.DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx, podIdentifier)
 
-			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
+			err = s.clusterPolicyReconciler.GeteBPFClient().UpdateClusterPolicyEbpfMaps(podIdentifier, clusterIngressRules, clusterEgressRules)
 			if err != nil {
 				log().Errorf("Map update(s) failed for podIdentifier: %s, error: %v", podIdentifier, err)
 				return nil, err
@@ -133,7 +133,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 			return nil, err
 		}
 
-		err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, clusterPolicyState, true, true)
+		err = s.clusterPolicyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, clusterPolicyState, true, true)
 		if err != nil {
 			log().Errorf("Map update failed for podIdentifier: %s, error: %v", podIdentifier, err)
 			return nil, err
@@ -153,7 +153,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 			}
 
 			// No concept of default deny for cluster policies. Either we have a rule that allows or denies traffic
-			err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, ebpf.DEFAULT_ALLOW, true, true)
+			err = s.clusterPolicyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, ebpf.DEFAULT_ALLOW, true, true)
 			if err != nil {
 				log().Errorf("Map update(s) failed for podIdentifier: %s, error: %v", podIdentifier, err)
 				return nil, err
