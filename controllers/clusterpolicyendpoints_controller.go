@@ -494,6 +494,10 @@ func (r *ClusterPolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podI
 	return false
 }
 
+func (r *ClusterPolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
+	return r.ebpfClient
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ClusterPolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
