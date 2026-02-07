@@ -26,10 +26,11 @@ WORKDIR /vmlinuxbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
     yum install -y llvm clang make gcc && \
-    yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
-    yum clean all
+    yum install -y kernel kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
+    yum clean all && \
+    /usr/src/kernels/*/scripts/extract-vmlinux /usr/lib/modules/*/vmlinuz > vmlinux
 COPY . ./
-RUN make vmlinuxh
+RUN make vmlinuxh VMLINUX=vmlinux
 
 # Build BPF
 FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
