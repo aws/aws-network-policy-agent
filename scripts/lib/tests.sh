@@ -22,11 +22,13 @@ spec:
       containers:
         - name: cyclonus
           imagePullPolicy: Always
-          image: ${CYCLONUS_IMAGE_REPOSITORY}/cyclonus:v0.5.4
+          image: ${CYCLONUS_IMAGE_REPOSITORY}/cyclonus:v0.5.6
           command:
             - ./cyclonus
             - generate
             - --retries=2
+            - --noisy=true
+            - --ignore-loopback=true
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
