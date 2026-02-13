@@ -630,6 +630,56 @@ func TestDeriveTargetPods(t *testing.T) {
 		},
 	}
 
+	hostNetworkPolicyEndpoint := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			PodSelectorEndpoints: []policyendpoint.PodEndpoint{
+				{
+					HostIP:    "1.1.1.1",
+					PodIP:     "1.1.1.1", // PodIP == HostIP indicates hostNetwork pod
+					Name:      "hostnetwork-pod",
+					Namespace: "bar",
+				},
+			},
+		},
+	}
+
+	mixedPolicyEndpoint := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+		},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef: policyendpoint.PolicyReference{
+				Name:      "foo",
+				Namespace: "bar",
+			},
+			PodSelectorEndpoints: []policyendpoint.PodEndpoint{
+				{
+					HostIP:    "1.1.1.1",
+					PodIP:     "10.1.1.1",
+					Name:      "regular-pod",
+					Namespace: "bar",
+				},
+				{
+					HostIP:    "1.1.1.1",
+					PodIP:     "1.1.1.1", // hostNetwork pod
+					Name:      "hostnetwork-pod",
+					Namespace: "bar",
+				},
+			},
+		},
+	}
+
 	tests := []struct {
 		name           string
 		policyendpoint policyendpoint.PolicyEndpoint
@@ -689,6 +739,30 @@ func TestDeriveTargetPods(t *testing.T) {
 							Namespace: "bar",
 						},
 						PodIP: "2001:db8::2",
+					},
+				},
+			},
+		},
+		{
+			name:           "Exclude hostNetwork pod (PodIP == HostIP)",
+			policyendpoint: hostNetworkPolicyEndpoint,
+			parentPEList:   []string{hostNetworkPolicyEndpoint.Name},
+			want: want{
+				activePods: nil,
+			},
+		},
+		{
+			name:           "Mixed regular and hostNetwork pods",
+			policyendpoint: mixedPolicyEndpoint,
+			parentPEList:   []string{mixedPolicyEndpoint.Name},
+			want: want{
+				activePods: []npatypes.Pod{
+					{
+						NamespacedName: types.NamespacedName{
+							Name:      "regular-pod",
+							Namespace: "bar",
+						},
+						PodIP: "10.1.1.1",
 					},
 				},
 			},
