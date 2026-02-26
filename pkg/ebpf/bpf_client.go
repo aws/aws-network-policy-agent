@@ -498,50 +498,50 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		}
 	}
 
-	//If update required, cleanup probes and gather data to re attach probes with new programs
-	if updateIngressProbe || updateEgressProbe {
-		// Get all loaded programs and maps
-		bpfState, err := eBPFSDKClient.GetAllBpfProgramsAndMaps()
-		if err != nil {
-			log().Errorf("GetAllBpfProgramsAndMaps failed %v", err)
-			sdkAPIErr.WithLabelValues("GetAllBpfProgramsAndMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
-		}
-		log().Infof("GetAllBpfProgramsAndMaps returned %d", len(bpfState))
-		progIdToPinPath := make(map[int]string)
-		for pinPath, bpfData := range bpfState {
-			progId := bpfData.Program.ProgID
-			if progId > 0 {
-				progIdToPinPath[progId] = pinPath
-			}
-		}
+	// Always cleanup and reattach TC filters to ensure they point to the correct programs.
+	// Otherwise we could have TC filters pointing to orphaned eBPF programs when this program is run without binary updates.
 
-		// Get attached progIds
-		interfaceToIngressProgIds, interfaceToEgressProgIds, err := bpfTCClient.GetAllAttachedProgIds()
-		log().Infof("Got attached ingressprogIds: %d, egressprogIds: %d", len(interfaceToIngressProgIds), len(interfaceToEgressProgIds))
-
-		//cleanup all existing filters
-		cleanupErr := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
-		if cleanupErr != nil {
-			// log the error and continue. Attaching new probes will cleanup the old ones
-			log().Errorf("Probe cleanup failed error: %v", cleanupErr)
-			sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
-		}
-
-		for interfaceName, existingIngressProgId := range interfaceToIngressProgIds {
-			pinPath, ok := progIdToPinPath[existingIngressProgId]
-			if ok && updateIngressProbe {
-				interfaceNametoIngressPinPath[interfaceName] = pinPath
-			}
-		}
-		for interfaceName, existingEgressProgId := range interfaceToEgressProgIds {
-			pinPath, ok := progIdToPinPath[existingEgressProgId]
-			if ok && updateEgressProbe {
-				interfaceNametoEgressPinPath[interfaceName] = pinPath
-			}
-		}
-		log().Info("Collected all data for reattaching probes")
+	// Get all loaded programs and maps
+	bpfState, err := eBPFSDKClient.GetAllBpfProgramsAndMaps()
+	if err != nil {
+		log().Errorf("GetAllBpfProgramsAndMaps failed %v", err)
+		sdkAPIErr.WithLabelValues("GetAllBpfProgramsAndMaps").Inc()
+		return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
 	}
+	log().Infof("GetAllBpfProgramsAndMaps returned %d", len(bpfState))
+	progIdToPinPath := make(map[int]string)
+	for pinPath, bpfData := range bpfState {
+		progId := bpfData.Program.ProgID
+		if progId > 0 {
+			progIdToPinPath[progId] = pinPath
+		}
+	}
+
+	// Get attached progIds
+	interfaceToIngressProgIds, interfaceToEgressProgIds, err := bpfTCClient.GetAllAttachedProgIds()
+	log().Infof("Got attached ingressprogIds: %d, egressprogIds: %d", len(interfaceToIngressProgIds), len(interfaceToEgressProgIds))
+
+	//cleanup all existing filters
+	cleanupErr := bpfTCClient.CleanupQdiscs(updateIngressProbe, updateEgressProbe)
+	if cleanupErr != nil {
+		// log the error and continue. Attaching new probes will cleanup the old ones
+		log().Errorf("Probe cleanup failed error: %v", cleanupErr)
+		sdkAPIErr.WithLabelValues("CleanupQdiscs").Inc()
+	}
+
+	for interfaceName, existingIngressProgId := range interfaceToIngressProgIds {
+		pinPath, ok := progIdToPinPath[existingIngressProgId]
+		if ok {
+			interfaceNametoIngressPinPath[interfaceName] = pinPath
+		}
+	}
+	for interfaceName, existingEgressProgId := range interfaceToEgressProgIds {
+		pinPath, ok := progIdToPinPath[existingEgressProgId]
+		if ok {
+			interfaceNametoEgressPinPath[interfaceName] = pinPath
+		}
+	}
+	log().Info("Collected all data for reattaching probes")
 
 	return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
 }
