@@ -44,6 +44,17 @@ func log() logger.Logger {
 	return logger.Get()
 }
 
+const (
+	// LastChangeTriggerTimeAnnotation is set by NPC on PolicyEndpoint to track
+	// when the resource was last created/updated. NPA reads this to compute
+	// E2E policy programming latency.
+	LastChangeTriggerTimeAnnotation = "networking.k8s.aws/last-change-trigger-time"
+
+	POLICIES_APPLIED = 0
+	DEFAULT_ALLOW    = 1
+	DEFAULT_DENY     = 2
+)
+
 var (
 	policySetupLatency = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -59,13 +70,23 @@ var (
 		},
 		[]string{"name", "namespace"},
 	)
+	// Buckets for latency:
+	//   0.25, 0.50s                    (sub-second, 250ms steps)
+	//   1s, 2s, 3s, ..., 59s           (1s steps for normal operations)
+	//   60s, 65s, 70s, ..., 115s       (5s steps)
+	//   120s, 150s, 180s, ..., 300s    (30s steps)
+	policyProgrammingLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "awsnodeagent_policy_programming_latency_seconds",
+			Help: "E2E latency from NPC PolicyEndpoint change to NPA eBPF map programming, in seconds",
+			Buckets: append(append(append(
+				prometheus.LinearBuckets(0.25, 0.25, 2), // 0.25, 0.50
+				prometheus.LinearBuckets(1, 1, 59)...),  // 1, 2, 3, ..., 59
+				prometheus.LinearBuckets(60, 5, 12)...), // 60, 65, 70, ..., 115
+				prometheus.LinearBuckets(120, 30, 7)...), // 120, 150, 180, ..., 300
+		},
+	)
 	prometheusRegistered = false
-)
-
-const (
-	POLICIES_APPLIED = 0
-	DEFAULT_ALLOW    = 1
-	DEFAULT_DENY     = 2
 )
 
 func msSince(start time.Time) float64 {
@@ -76,6 +97,7 @@ func prometheusRegister() {
 	if !prometheusRegistered {
 		metrics.Registry.MustRegister(policySetupLatency)
 		metrics.Registry.MustRegister(policyTearDownLatency)
+		metrics.Registry.MustRegister(policyProgrammingLatency)
 		prometheusRegistered = true
 	}
 }
@@ -83,10 +105,11 @@ func prometheusRegister() {
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
-		k8sClient:  k8sClient,
-		nodeIP:     nodeIP,
-		ebpfClient: ebpfClient,
-		enableIPv6: enableIPv6,
+		k8sClient:        k8sClient,
+		nodeIP:           nodeIP,
+		ebpfClient:       ebpfClient,
+		enableIPv6:       enableIPv6,
+		trackerStartTime: time.Now(),
 	}
 
 	prometheusRegister()
@@ -99,6 +122,10 @@ type PolicyEndpointsReconciler struct {
 	scheme    *runtime.Scheme
 	//Primary IP of EC2 instance
 	nodeIP string
+	// trackerStartTime records when this reconciler started. Used to filter
+	// stale PolicyEndpoint annotations and avoid emitting artificially high
+	// E2E latency on restart
+	trackerStartTime time.Time
 	// Maps pod Identifier to list of PolicyEndpoint resources
 	podIdentifierToPolicyEndpointMap sync.Map
 	// Mutex for operations on PodIdentifierToPolicyEndpointMap
@@ -261,7 +288,37 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
 	}
+
+	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed).
+	// Only emit if the annotation timestamp is after this agent's start time to
+	// avoid stale latency on restart/new node (same pattern as kube-proxy).
+	r.observePolicyProgrammingLatency(policyEndpoint)
+
 	return nil
+}
+
+// observePolicyProgrammingLatency reads the last-change-trigger-time annotation
+// from the PolicyEndpoint and emits the E2E latency histogram if the timestamp
+// is newer than this agent's start time.
+func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint) {
+	if pe.Annotations == nil {
+		return
+	}
+	triggerTimeStr, ok := pe.Annotations[LastChangeTriggerTimeAnnotation]
+	if !ok || triggerTimeStr == "" {
+		return
+	}
+	triggerTime, err := time.Parse(time.RFC3339Nano, triggerTimeStr)
+	if err != nil {
+		log().Debugf("Failed to parse %s annotation: %v", LastChangeTriggerTimeAnnotation, err)
+		return
+	}
+	if !triggerTime.After(r.trackerStartTime) {
+		return
+	}
+	latency := time.Since(triggerTime).Seconds()
+	policyProgrammingLatency.Observe(latency)
+	log().Debugf("E2E policy programming latency: %.3fs for PE %s/%s", latency, pe.Namespace, pe.Name)
 }
 
 func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, podIdentifier string,
