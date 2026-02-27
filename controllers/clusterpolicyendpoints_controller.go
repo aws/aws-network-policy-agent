@@ -21,27 +21,56 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+var (
+	// Buckets for latency
+	clusterPolicyProgrammingLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "awsnodeagent_cluster_policy_programming_latency_seconds",
+			Help: "E2E latency from NPC ClusterPolicyEndpoint change to NPA eBPF map programming, in seconds",
+			Buckets: append(append(append(
+				prometheus.LinearBuckets(0.25, 0.25, 2), // 0.25, 0.50
+				prometheus.LinearBuckets(1, 1, 59)...),  // 1, 2, 3, ..., 59
+				prometheus.LinearBuckets(60, 5, 12)...), // 60, 65, 70, ..., 115
+				prometheus.LinearBuckets(120, 30, 7)...), // 120, 150, 180, ..., 300
+		},
+	)
+	clusterPolicyPrometheusRegistered = false
+)
+
+func clusterPolicyPrometheusRegister() {
+	if !clusterPolicyPrometheusRegistered {
+		metrics.Registry.MustRegister(clusterPolicyProgrammingLatency)
+		clusterPolicyPrometheusRegistered = true
+	}
+}
 
 // NewClusterPolicyEndpointsReconciler constructs new ClusterPolicyEndpointReconciler
 func NewClusterPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient) *ClusterPolicyEndpointsReconciler {
-	return &ClusterPolicyEndpointsReconciler{
-		k8sClient:  k8sClient,
-		nodeIP:     nodeIP,
-		ebpfClient: ebpfClient,
+	r := &ClusterPolicyEndpointsReconciler{
+		k8sClient:        k8sClient,
+		nodeIP:           nodeIP,
+		ebpfClient:       ebpfClient,
+		trackerStartTime: time.Now(),
 	}
+	clusterPolicyPrometheusRegister()
+	return r
 }
 
 // ClusterPolicyEndpointsReconciler reconciles an ClusterPolicyEndpoint object
@@ -49,6 +78,10 @@ type ClusterPolicyEndpointsReconciler struct {
 	k8sClient client.Client
 	scheme    *runtime.Scheme
 	nodeIP    string
+	// trackerStartTime records when this reconciler started. Used to filter
+	// stale ClusterPolicyEndpoint annotations and avoid emitting artificially high
+	// E2E latency on restart
+	trackerStartTime time.Time
 
 	// Maps pod Identifier to list of ClusterPolicyEndpoint resources
 	podIdentifierToClusterPolicyEndpointMap      sync.Map
@@ -152,7 +185,34 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
 		}
 	}
+
+	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint)
+
 	return nil
+}
+
+// observeClusterPolicyProgrammingLatency reads the last-change-trigger-time annotation
+// from the ClusterPolicyEndpoint and emits the E2E latency histogram if the timestamp
+// is newer than this agent's start time.
+func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint) {
+	if cpe.Annotations == nil {
+		return
+	}
+	triggerTimeStr, ok := cpe.Annotations[LastChangeTriggerTimeAnnotation]
+	if !ok || triggerTimeStr == "" {
+		return
+	}
+	triggerTime, err := time.Parse(time.RFC3339Nano, triggerTimeStr)
+	if err != nil {
+		log().Debugf("Failed to parse %s annotation: %v", LastChangeTriggerTimeAnnotation, err)
+		return
+	}
+	if !triggerTime.After(r.trackerStartTime) {
+		return
+	}
+	latency := time.Since(triggerTime).Seconds()
+	clusterPolicyProgrammingLatency.Observe(latency)
+	log().Debugf("E2E cluster policy programming latency: %.3fs for CPE %s", latency, cpe.Name)
 }
 
 func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
@@ -432,6 +492,10 @@ func (r *ClusterPolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podI
 		}
 	}
 	return false
+}
+
+func (r *ClusterPolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
+	return r.ebpfClient
 }
 
 // SetupWithManager sets up the controller with the Manager.
