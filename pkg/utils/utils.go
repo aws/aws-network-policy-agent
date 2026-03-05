@@ -168,8 +168,14 @@ func GetPodIdentifier(podName, podNamespace string) string {
 
 func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
 	pinPathName := strings.Split(pinPath, "/")
-	podIdentifier := strings.Split(pinPathName[7], "_")
-	return podIdentifier[0], podIdentifier[2]
+	parts := strings.Split(pinPathName[7], "_")
+
+	// Format: podIdentifier_handle_direction
+	// parts[len(parts)-2] = "handle", parts[len(parts)-1] = direction
+	podIdentifier := strings.Join(parts[:len(parts)-2], "_")
+	direction := parts[len(parts)-1]
+
+	return podIdentifier, direction
 }
 
 func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) string {

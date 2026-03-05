@@ -520,3 +520,55 @@ func TestFWRuleProcessor_SortFirewallRulesByPrefixLengthWithL4Info(t *testing.T)
 		})
 	}
 }
+
+func TestIsIPv6(t *testing.T) {
+	tests := []struct {
+		name     string
+		cidr     string
+		expected bool
+	}{
+		{"IPv6 compressed", "2001:db8::1/128", true},
+		{"IPv6 fully qualified", "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", true},
+		{"IPv6 catch-all", "::/0", true},
+		{"IPv6 no mask", "2001:db8::1", true},
+		{"IPv4 standard", "10.0.0.1/32", false},
+		{"IPv4 catch-all", "0.0.0.0/0", false},
+		{"IPv4 no mask", "192.168.1.1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isIPv6(tt.cidr))
+		})
+	}
+}
+
+func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
+	tests := []struct {
+		name       string
+		nodeIP     string
+		hostMask   string
+		enableIPv6 bool
+		cidr       string
+		expected   bool
+	}{
+		// IPv4 mode
+		{"IPv4 mode: skip IPv6 compressed", "10.0.0.1", "/32", false, "2001:db8::1/128", true},
+		{"IPv4 mode: skip IPv6 fully qualified", "10.0.0.1", "/32", false, "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", true},
+		{"IPv4 mode: allow IPv4", "10.0.0.1", "/32", false, "192.168.1.0/24", false},
+		{"IPv4 mode: skip node IP", "10.0.0.1", "/32", false, "10.0.0.1/32", true},
+
+		// IPv6 mode
+		{"IPv6 mode: skip IPv4", "2001:db8::1", "/128", true, "10.0.0.1/32", true},
+		{"IPv6 mode: allow IPv6 compressed", "2001:db8::1", "/128", true, "2001:db8::10/128", false},
+		{"IPv6 mode: allow IPv6 fully qualified", "2001:db8::1", "/128", true, "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", false},
+		{"IPv6 mode: skip node IP", "2001:db8::1", "/128", true, "2001:db8::1/128", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6)
+			assert.Equal(t, tt.expected, f.shouldSkipRule(tt.cidr))
+		})
+	}
+}

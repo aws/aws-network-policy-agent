@@ -98,17 +98,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(f.hostMask)
 		}
 
-		if utils.IsNodeIP(f.nodeIP, string(firewallRule.IPCidr)) {
-			continue
-		}
-
-		if f.enableIPv6 && !strings.Contains(string(firewallRule.IPCidr), "::") {
-			log().Debugf("Skipping ipv4 rule in ipv6 cluster CIDR: %s", string(firewallRule.IPCidr))
-			continue
-		}
-
-		if !f.enableIPv6 && strings.Contains(string(firewallRule.IPCidr), "::") {
-			log().Debugf("Skipping ipv6 rule in ipv4 cluster CIDR: %s", string(firewallRule.IPCidr))
+		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
 		}
 
@@ -339,10 +329,13 @@ func (f *FirewallRuleProcessor) shouldSkipRule(cidr string) bool {
 	if utils.IsNodeIP(f.nodeIP, cidr) {
 		return true
 	}
-	if f.enableIPv6 && !strings.Contains(cidr, "::") {
+	isIPv6CIDR := isIPv6(cidr)
+	if f.enableIPv6 && !isIPv6CIDR {
+		log().Debugf("Skipping ipv4 rule in ipv6 cluster CIDR: %s", cidr)
 		return true
 	}
-	if !f.enableIPv6 && strings.Contains(cidr, "::") {
+	if !f.enableIPv6 && isIPv6CIDR {
+		log().Debugf("Skipping ipv6 rule in ipv4 cluster CIDR: %s", cidr)
 		return true
 	}
 	return false
@@ -423,4 +416,13 @@ func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) [
 	}
 
 	return result
+}
+
+// isIPv6 returns true if the given CIDR or IP address is IPv6.
+func isIPv6(cidr string) bool {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		ip = net.ParseIP(cidr)
+	}
+	return ip != nil && ip.To4() == nil
 }
