@@ -2,11 +2,13 @@ package ebpf
 
 import (
 	"bytes"
+	"context"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 )
 
 // InMemoryBpfMap provides an in-memory representation of an eBPF map
@@ -22,32 +24,34 @@ type InMemoryBpfMap struct {
 
 // NewInMemoryBpfMap creates a new in-memory representation of an eBPF map
 // and optionally loads the initial state from the kernel
-func NewInMemoryBpfMap(bpfMap *maps.BpfMap) (*InMemoryBpfMap, error) {
+func NewInMemoryBpfMap(ctx context.Context, bpfMap *maps.BpfMap) (*InMemoryBpfMap, error) {
+	clog := logger.FromContext(ctx)
 	m := &InMemoryBpfMap{
 		bpfMap:   bpfMap,
 		contents: make(map[string][]byte),
 	}
 
-	log().Infof("creating new In memory map via loading bpfmap: %+v", bpfMap)
-	if err := m.loadFromKernel(); err != nil {
+	clog.Infof("creating new In memory map via loading bpfmap: %+v", bpfMap)
+	if err := m.loadFromKernel(ctx); err != nil {
 		return nil, err
 	}
-	log().Infof("created in mem map for bpfmap: %+v", bpfMap)
+	clog.Infof("created in mem map for bpfmap: %+v", bpfMap)
 
 	return m, nil
 }
 
 // loadFromKernel loads the current state of the eBPF map from the kernel
-func (m *InMemoryBpfMap) loadFromKernel() error {
+func (m *InMemoryBpfMap) loadFromKernel(ctx context.Context) error {
+	clog := logger.FromContext(ctx)
 	startTime := time.Now()
 
 	defer func() {
 		totalTime := time.Since(startTime)
-		log().Infof("loadFromKernel completed in %v ms, loaded %d entries from kernel map",
+		clog.Infof("loadFromKernel completed in %v ms, loaded %d entries from kernel map",
 			totalTime.Milliseconds(), len(m.contents))
 	}()
 
-	log().Infof("Starting loadFromKernel operation")
+	clog.Infof("Starting loadFromKernel operation")
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -58,7 +62,7 @@ func (m *InMemoryBpfMap) loadFromKernel() error {
 	// Get all keys from the kernel map
 	keys, err := m.bpfMap.GetAllMapKeys()
 	if err != nil {
-		log().Errorf("Failed to get keys from kernel map: %v", err)
+		clog.Errorf("Failed to get keys from kernel map: %v", err)
 		return err
 	}
 
@@ -72,19 +76,20 @@ func (m *InMemoryBpfMap) loadFromKernel() error {
 		valuePtr := uintptr(unsafe.Pointer(&value[0]))
 
 		if err := m.bpfMap.GetMapEntry(keyPtr, valuePtr); err != nil {
-			log().Errorf("Failed to get value for key %s: %v", key, err)
+			clog.Errorf("Failed to get value for key %s: %v", key, err)
 			return err
 		}
 
 		m.contents[key] = value
 	}
 
-	log().Infof("Loaded %d entries from kernel map", len(m.contents))
+	clog.Infof("Loaded %d entries from kernel map", len(m.contents))
 	return nil
 }
 
 // BulkRefresh efficiently handles both additions and deletions in a single operation
-func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
+func (m *InMemoryBpfMap) BulkRefresh(ctx context.Context, newMapContents map[string][]byte) error {
+	clog := logger.FromContext(ctx)
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -112,7 +117,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		valuePtr := uintptr(unsafe.Pointer(&v[0]))
 
 		if err := m.bpfMap.UpdateMapEntry(keyPtr, valuePtr); err != nil {
-			log().Errorf("Failed to update kernel map during bulk refresh for key %s: %v", k, err)
+			clog.Errorf("Failed to update kernel map during bulk refresh for key %s: %v", k, err)
 			return err
 		}
 
@@ -126,7 +131,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		keyPtr := uintptr(unsafe.Pointer(&keyByte[0]))
 
 		if err := m.bpfMap.DeleteMapEntry(keyPtr); err != nil {
-			log().Errorf("Failed to delete from kernel map for key %s: %v", k, err)
+			clog.Errorf("Failed to delete from kernel map for key %s: %v", k, err)
 			// Continue with other deletions
 		} else {
 			// Remove from in-memory if kernel delete operation is successful
@@ -134,7 +139,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		}
 	}
 
-	log().Infof("Bulk refresh: added/updated %d entries, deleted %d entries", len(toAdd), len(toDelete))
+	clog.Infof("Bulk refresh: added/updated %d entries, deleted %d entries", len(toAdd), len(toDelete))
 	return nil
 }
 

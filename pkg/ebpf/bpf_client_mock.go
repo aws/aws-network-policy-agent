@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"sync"
 
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
@@ -25,27 +26,27 @@ func NewMockBpfClient() *bpfClient {
 
 type MockBpfClient struct{}
 
-func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+func (m *MockBpfClient) AttacheBPFProbes(ctx context.Context, pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	return nil
 }
 
-func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+func (m *MockBpfClient) DeleteBPFProbes(ctx context.Context, pod types.NamespacedName, podIdentifier string) error {
 	return nil
 }
 
-func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+func (m *MockBpfClient) UpdateEbpfMaps(ctx context.Context, podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	return nil
 }
 
-func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(ctx context.Context, podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	return nil
 }
 
-func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
+func (m *MockBpfClient) UpdatePodStateEbpfMaps(ctx context.Context, podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	return nil
 }
 
-func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
+func (m *MockBpfClient) IsFirstPodInPodIdentifier(ctx context.Context, podIdentifier string) bool {
 	return false
 }
 
@@ -57,6 +58,6 @@ func (m *MockBpfClient) GetNetworkPolicyMode() string {
 	return "standard"
 }
 
-func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
+func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(ctx context.Context, podIdentifier string, key int, state int) error {
 	return nil
 }

@@ -16,3 +16,4 @@ test/build/
 
 results.log
 eks-cluster.yaml
+.kiro/specs
