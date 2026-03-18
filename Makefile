@@ -84,7 +84,7 @@ vet: setup-ebpf-sdk-override # Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./controllers ./pkg/ebpf ./pkg/fwruleprocessor ./pkg/rpc ./pkg/types ./pkg/utils -v -coverprofile=coverage.txt -covermode=atomic
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./pkg/... ./controllers/... -v -coverprofile=coverage.txt -covermode=atomic
 
 ##@ Build
 
