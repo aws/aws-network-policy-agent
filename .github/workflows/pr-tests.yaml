@@ -1,6 +1,9 @@
 name: Automatic Pull Request test
 
 on:
+  push:
+    branches:
+      - "main"
   pull_request:
     branches:
       - "main"
@@ -50,6 +53,7 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
   docker-build:
+    if: github.event_name == 'pull_request'
     name: Build Docker images
     runs-on: ubuntu-latest
     steps:
@@ -62,6 +66,7 @@ jobs:
       - name: Build Network Policy Agent images
         run: make docker-buildx
   deprecated-apigroups:
+    if: github.event_name == 'pull_request'
     name: Detect deprecated apiGroups
     runs-on: ubuntu-latest
     steps:
@@ -74,6 +79,7 @@ jobs:
       - run: |
           /usr/local/pluto detect-files -d .
   vuln_check:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
