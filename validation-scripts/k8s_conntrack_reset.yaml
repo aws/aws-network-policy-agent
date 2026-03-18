@@ -1,0 +1,83 @@
+---
+# Reset DaemonSet - Restores default conntrack timeouts (180s)
+# 
+# USAGE:
+#   1. First delete the tuner: kubectl delete ds conntrack-tuner -n kube-system
+#   2. Apply this reset: kubectl apply -f k8s_conntrack_reset.yaml
+#   3. Wait for completion: kubectl wait --for=condition=ready pod -l app=conntrack-reset -n kube-system --timeout=60s
+#   4. Clean up: kubectl delete -f k8s_conntrack_reset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: conntrack-reset
+  namespace: kube-system
+  labels:
+    app: conntrack-reset
+    purpose: cleanup
+spec:
+  selector:
+    matchLabels:
+      app: conntrack-reset
+  template:
+    metadata:
+      labels:
+        app: conntrack-reset
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: reset
+        image: busybox:latest
+        securityContext:
+          privileged: true
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          echo "========================================" 
+          echo "Conntrack Timeout Reset Starting"
+          echo "Node: $(hostname)"
+          echo "========================================"
+          echo ""
+          
+          if [ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]; then
+            # Show current timeout
+            CURRENT=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established)
+            echo "Current timeout: ${CURRENT} seconds"
+            
+            # Reset to default (180s)
+            echo "Resetting to 180 seconds..."
+            echo 180 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established
+            
+            # Verify
+            NEW_TIMEOUT=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established)
+            echo "New timeout: ${NEW_TIMEOUT} seconds"
+            echo ""
+            
+            if [ "$NEW_TIMEOUT" = "180" ]; then
+              echo "✓ Successfully reset conntrack timeout to 180 seconds"
+            else
+              echo "✗ Failed to reset conntrack timeout"
+              exit 1
+            fi
+          else
+            echo "ℹ Conntrack module not loaded, nothing to reset"
+          fi
+          
+          echo ""
+          echo "========================================"
+          echo "Reset complete on $(hostname)"
+          echo "========================================"
+          
+          # Exit after one-time execution
+          exit 0
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      restartPolicy: OnFailure

@@ -1,0 +1,146 @@
+---
+# Namespace for test resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: conntrack-test
+  labels:
+    purpose: conntrack-race-testing
+
+---
+# Server Pod - Runs a simple TCP server
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-server
+  namespace: conntrack-test
+  labels:
+    app: test-server
+    role: server
+spec:
+  containers:
+  - name: server
+    image: nicolaka/netshoot:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      # Start a simple TCP echo server on port 8080
+      echo "Starting TCP server on port 8080..."
+      while true; do
+        echo "Connection accepted at $(date)" | nc -l -p 8080
+      done
+    ports:
+    - containerPort: 8080
+      name: tcp-server
+      protocol: TCP
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "100m"
+      limits:
+        memory: "128Mi"
+        cpu: "200m"
+  restartPolicy: Always
+
+---
+# Server Service - Exposes the server pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-server-svc
+  namespace: conntrack-test
+spec:
+  selector:
+    app: test-server
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: tcp
+  type: ClusterIP
+
+---
+# Client Pod - Used to generate connections
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: conntrack-test
+  labels:
+    app: test-client
+    role: client
+spec:
+  containers:
+  - name: client
+    image: nicolaka/netshoot:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      # Keep the pod running
+      while true; do
+        sleep 3600
+      done
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "100m"
+      limits:
+        memory: "128Mi"
+        cpu: "200m"
+  restartPolicy: Always
+
+---
+# Optional: NetworkPolicy for testing
+# Uncomment if you want to test with actual network policies
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: test-netpol
+#   namespace: conntrack-test
+# spec:
+#   podSelector:
+#     matchLabels:
+#       app: test-server
+#   policyTypes:
+#   - Ingress
+#   - Egress
+#   ingress:
+#   - from:
+#     - podSelector:
+#         matchLabels:
+#           app: test-client
+#     ports:
+#     - protocol: TCP
+#       port: 8080
+#   egress:
+#   - to:
+#     - podSelector:
+#         matchLabels:
+#           app: test-client
+
+---
+# ConfigMap with test utilities (optional)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-scripts
+  namespace: conntrack-test
+data:
+  simple-server.sh: |
+    #!/bin/sh
+    # Simple TCP server that logs connections
+    echo "Starting TCP server on port 8080..."
+    while true; do
+      echo "$(date): Accepting connection" | nc -l -p 8080
+    done
+  
+  connection-test.sh: |
+    #!/bin/sh
+    # Test script to verify connectivity
+    TARGET=${1:-test-server-svc}
+    PORT=${2:-8080}
+    echo "Testing connection to $TARGET:$PORT"
+    echo "TEST" | nc -v -w 2 $TARGET $PORT
+    echo "Connection test complete"
