@@ -22,13 +22,16 @@ coverage:
         only_pulls: true
         flags:
           - "unittest"
-    # Disable patch since it is noisy and not correct
     patch:
       default:
-        enabled: no
+        target: auto
+        threshold: 5
         if_not_found: success
 
-comment: false
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+  require_changes: true
 
 ignore:
   - "api/v1alpha1/**/*"
