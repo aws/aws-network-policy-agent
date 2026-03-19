@@ -79,7 +79,6 @@ func TestFromContext_EmptyContext(t *testing.T) {
 	}
 }
 
-
 // zapBufferWriteSyncer is a minimal WriteSyncer backed by a strings.Builder.
 type zapBufferWriteSyncer struct {
 	buf strings.Builder
