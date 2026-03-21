@@ -36,3 +36,5 @@ comment:
 ignore:
   - "api/v1alpha1/**/*"
   - "hack/**/*"
+  - "**/*mock*.go"
+  - "mocks/**/*"
