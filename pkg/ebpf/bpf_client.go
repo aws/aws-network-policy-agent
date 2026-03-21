@@ -56,6 +56,8 @@ var (
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
+	deletedPodsMaxSize                               = 10000
+	deletedPodsMinAge                                = 5 * time.Minute
 )
 
 func log() logger.Logger {
@@ -107,6 +109,7 @@ type BpfClient interface {
 	ReAttachEbpfProbes() error
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
+	ClearDeletedPod(podNamespacedName string)
 }
 
 type BPFContext struct {
@@ -135,6 +138,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		egressInMemoryMap:               new(sync.Map),
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		deletedPods:                     new(sync.Map),
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -276,6 +280,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	// Initializes prometheus metrics
 	prometheusRegister()
+	ebpfClient.startDeletedPodsCleanupRoutine()
 
 	log().Info("BPF Client initialization done")
 	return ebpfClient, nil
@@ -331,6 +336,7 @@ type bpfClient struct {
 	clusterPolicyIngressInMemoryMap *sync.Map
 	// This is in-memory map backed by clusterPolicyEgressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	clusterPolicyEgressInMemoryMap *sync.Map
+	deletedPods                    *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -677,6 +683,10 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	log().Debugf("Got the podIdentifierLock for Pod: %s, Namespace: %s, PodIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
 	defer podIdentifierLock.Unlock()
 
+	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
+		log().Infof("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
+		return nil
+	}
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
 	// If yes, then skip probe attach flow for this pod.
 	isIngressProbeAttached, isEgressProbeAttached := l.isEBPFProbeAttached(pod.Name, pod.Namespace)
@@ -818,6 +828,10 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
+func (l *bpfClient) ClearDeletedPod(podNamespacedName string) {
+	l.deletedPods.Delete(podNamespacedName)
+}
+
 func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
 	podIdentifierLock := value.(*sync.Mutex)
@@ -828,6 +842,7 @@ func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier stri
 	isProgFdShared, err := l.isProgFdShared(pod.Name, pod.Namespace)
 	l.deletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
 	l.deletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
+	l.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 
 	if err == nil && !isProgFdShared {
 		err := l.deleteBPFProbes(podIdentifier)
@@ -1268,4 +1283,37 @@ func (l *bpfClient) deletePodFromEgressProgPodCaches(podName string, podNamespac
 			}
 		}
 	}
+}
+
+// startDeletedPodsCleanupRoutine will cleanup entries from deletedPods map that are older than deletedPodsMinAge and when size is larger that deletedPodsMaxSize.
+func (l *bpfClient) startDeletedPodsCleanupRoutine() {
+	go func() {
+		ticker := time.NewTicker(deletedPodsMinAge)
+		defer ticker.Stop()
+		for range ticker.C {
+			l.cleanupDeletedPodsIfNeeded()
+		}
+	}()
+}
+
+func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
+	count := 0
+	l.deletedPods.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	if count < deletedPodsMaxSize {
+		return
+	}
+	log().Infof("deletedPods map reached %d entries, cleaning up entries older than %v", count, deletedPodsMinAge)
+	now := time.Now()
+	cleaned := 0
+	l.deletedPods.Range(func(key, value any) bool {
+		if now.Sub(value.(time.Time)) > deletedPodsMinAge {
+			l.deletedPods.Delete(key)
+			cleaned++
+		}
+		return true
+	})
+	log().Infof("deletedPods cleanup complete, removed %d entries", cleaned)
 }

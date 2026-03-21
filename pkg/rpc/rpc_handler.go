@@ -69,6 +69,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	isFirstPodInPodIdentifier := s.policyReconciler.GeteBPFClient().IsFirstPodInPodIdentifier(podIdentifier)
+	s.policyReconciler.GeteBPFClient().ClearDeletedPod(utils.GetPodNamespacedName(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE))
 	err = s.policyReconciler.GeteBPFClient().AttacheBPFProbes(types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE},
 		podIdentifier, int(in.InterfaceCount))
 	if err != nil {
