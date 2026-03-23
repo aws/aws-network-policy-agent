@@ -128,24 +128,14 @@ jobs:
 
       - name: Install addon and update node agent image
         run: |
-          # Get latest addon version for this k8s version
-          ADDON_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni \
-            --kubernetes-version $K8S_VERSION --region $REGION \
-            | jq -r '.addons[0].addonVersions[0].addonVersion')
-
           # Update VPC CNI addon with network policy enabled
-          aws eks update-addon \
-            --cluster-name $CLUSTER_NAME \
-            --addon-name vpc-cni \
-            --addon-version $ADDON_VERSION \
+          eksctl update addon \
+            --cluster $CLUSTER_NAME \
+            --name vpc-cni \
+            --version latest \
             --configuration-values '{"enableNetworkPolicy": "true"}' \
-            --resolve-conflicts OVERWRITE \
-            --region $REGION
-
-          aws eks wait addon-active \
-            --cluster-name $CLUSTER_NAME \
-            --addon-name vpc-cni \
-            --region $REGION
+            --region $REGION \
+            --force
 
           # Patch node agent image to PR build
           kubectl set image daemonset/aws-node \
