@@ -128,14 +128,19 @@ jobs:
 
       - name: Install addon and update node agent image
         run: |
-          # Update VPC CNI addon with network policy enabled
-          eksctl update addon \
-            --cluster $CLUSTER_NAME \
-            --name vpc-cni \
-            --version latest \
-            --configuration-values '{"enableNetworkPolicy": "true"}' \
-            --region $REGION \
-            --force
+          cat > /tmp/addon-config.yaml <<EOF
+          apiVersion: eksctl.io/v1alpha5
+          kind: ClusterConfig
+          metadata:
+            name: $CLUSTER_NAME
+            region: $REGION
+          addons:
+          - name: vpc-cni
+            version: latest
+            configurationValues: '{"enableNetworkPolicy": "true"}'
+            resolveConflicts: overwrite
+          EOF
+          eksctl update addon -f /tmp/addon-config.yaml --force
 
           # Patch node agent image to PR build
           kubectl set image daemonset/aws-node \
