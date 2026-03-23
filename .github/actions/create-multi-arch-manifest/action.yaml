@@ -1,0 +1,41 @@
+name: Create Multi-Arch Manifest
+description: 'Creates and pushes a Docker multi-arch manifest from per-arch images'
+inputs:
+  aws-region:
+    description: AWS region
+    required: true
+  image-uri-amd64:
+    description: 'AMD64 image URI'
+    required: true
+  image-uri-arm64:
+    description: 'ARM64 image URI'
+    required: true
+outputs:
+  manifest_uri:
+    description: "Multi-arch manifest URI"
+    value: ${{ steps.manifest.outputs.manifest_uri }}
+runs:
+  using: "composite"
+  steps:
+    - name: Create and Push Manifest
+      id: manifest
+      shell: bash
+      env:
+        REGION: ${{ inputs.aws-region }}
+        IMAGE_AMD64: ${{ inputs.image-uri-amd64 }}
+        IMAGE_ARM64: ${{ inputs.image-uri-arm64 }}
+        AWS_ECR_REPO_NAME: amazon/aws-network-policy-agent
+      run: |
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        AWS_ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+        IMAGE_VERSION=$(git rev-parse HEAD)
+        MANIFEST_URI="$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME:$IMAGE_VERSION"
+
+        aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin ${AWS_ECR_REGISTRY}
+
+        docker manifest create "$MANIFEST_URI" "$IMAGE_AMD64" "$IMAGE_ARM64"
+        docker manifest annotate "$MANIFEST_URI" "$IMAGE_AMD64" --arch amd64
+        docker manifest annotate "$MANIFEST_URI" "$IMAGE_ARM64" --arch arm64
+        docker manifest push "$MANIFEST_URI"
+
+        echo "manifest_uri=$MANIFEST_URI" >> $GITHUB_OUTPUT
