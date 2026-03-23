@@ -74,7 +74,6 @@ jobs:
             --name $CLUSTER_NAME \
             --region $REGION \
             --version $K8S_VERSION \
-            --ip-family $IP_FAMILY \
             --instance-types $INSTANCE_TYPE \
             --nodes 3 \
             --with-oidc
