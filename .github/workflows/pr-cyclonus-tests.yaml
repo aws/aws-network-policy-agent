@@ -1,0 +1,202 @@
+name: PR Cyclonus Tests
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  REGION: us-west-2
+  IP_FAMILY: IPv4
+  INSTANCE_TYPE: t3.large
+
+jobs:
+  check-trigger:
+    if: |
+      github.repository == 'aws/aws-network-policy-agent' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/test cyclonus') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    outputs:
+      pr-sha: ${{ steps.pr-info.outputs.sha }}
+      pr-ref: refs/pull/${{ github.event.issue.number }}/head
+    steps:
+      - name: Get PR SHA and post acknowledgement
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = (await github.rest.pulls.get({
+              ...context.repo, pull_number: context.issue.number
+            })).data;
+
+            core.setOutput('sha', pr.head.sha);
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: context.issue.number,
+              body: `Cyclonus tests triggered by @${context.actor} for \`${pr.head.sha}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+            });
+
+  create-cluster:
+    needs: check-trigger
+    runs-on: ubuntu-latest
+    outputs:
+      cluster-name: ${{ steps.setup.outputs.cluster-name }}
+      k8s-version: ${{ steps.setup.outputs.k8s-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+
+      - uses: ./.github/actions/install-dependencies
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 21600
+
+      - name: Create EKS cluster
+        id: setup
+        run: |
+          K8S_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni --region $REGION \
+            | jq -r '[.addons[0].addonVersions[0].compatibilities[].clusterVersion] | sort_by(split(".")[1] | tonumber) | .[-2]')
+          CLUSTER_NAME="cyclonus-pr-${{ github.event.issue.number }}"
+          echo "k8s-version=$K8S_VERSION" >> $GITHUB_OUTPUT
+          echo "cluster-name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+
+          eksctl create cluster \
+            --name $CLUSTER_NAME \
+            --region $REGION \
+            --version $K8S_VERSION \
+            --ip-family $IP_FAMILY \
+            --instance-types $INSTANCE_TYPE \
+            --nodes 3 \
+            --with-oidc
+
+  build-image:
+    needs: check-trigger
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 21600
+
+      - name: Build and push image
+        id: build
+        uses: ./.github/actions/build-and-push-image
+        with:
+          aws-region: ${{ env.REGION }}
+
+  run-cyclonus:
+    needs: [check-trigger, create-cluster, build-image]
+    if: always() && needs.create-cluster.result == 'success' && needs.build-image.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster-name }}
+      K8S_VERSION: ${{ needs.create-cluster.outputs.k8s-version }}
+      KUBECONFIG: ${{ github.workspace }}/.kube/config
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+
+      - uses: ./.github/actions/install-dependencies
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 21600
+
+      - name: Update kubeconfig
+        run: |
+          mkdir -p $(dirname $KUBECONFIG)
+          aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION --kubeconfig $KUBECONFIG
+
+      - name: Install addon and update node agent image
+        run: |
+          # Get latest addon version for this k8s version
+          ADDON_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni \
+            --kubernetes-version $K8S_VERSION --region $REGION \
+            | jq -r '.addons[0].addonVersions[0].addonVersion')
+
+          # Update VPC CNI addon with network policy enabled
+          aws eks update-addon \
+            --cluster-name $CLUSTER_NAME \
+            --addon-name vpc-cni \
+            --addon-version $ADDON_VERSION \
+            --configuration-values '{"enableNetworkPolicy": "true"}' \
+            --resolve-conflicts OVERWRITE \
+            --region $REGION
+
+          aws eks wait addon-active \
+            --cluster-name $CLUSTER_NAME \
+            --addon-name vpc-cni \
+            --region $REGION
+
+          # Patch node agent image to PR build
+          kubectl set image daemonset/aws-node \
+            -n kube-system \
+            aws-eks-nodeagent=${{ needs.build-image.outputs.image }}
+
+          kubectl rollout status daemonset/aws-node -n kube-system --timeout=300s
+
+      - name: Run cyclonus tests
+        id: cyclonus
+        continue-on-error: true
+        run: SKIP_ADDON_INSTALLATION=true ./scripts/run-cyclonus-tests.sh
+
+      - name: Post results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failed = '${{ steps.cyclonus.outcome }}' !== 'success';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              body: [
+                `## Cyclonus Test Results: ${failed ? '❌ Failed' : '✅ Passed'}`,
+                `- **Commit:** \`${{ needs.check-trigger.outputs.pr-sha }}\``,
+                `- **K8s Version:** ${{ needs.create-cluster.outputs.k8s-version }}`,
+                `- **Image:** \`${{ needs.build-image.outputs.image }}\``,
+                `- **[Full logs](${runUrl})**`
+              ].join('\n')
+            });
+            if (failed) core.setFailed('Cyclonus tests failed');
+
+  cleanup:
+    needs: [check-trigger, create-cluster, run-cyclonus]
+    if: always() && needs.create-cluster.outputs.cluster-name != ''
+    runs-on: ubuntu-latest
+    env:
+      CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/install-dependencies
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 3600
+
+      - name: Delete EKS cluster
+        run: eksctl delete cluster --name $CLUSTER_NAME --region $REGION
