@@ -56,7 +56,7 @@ var (
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
-	deletedPodsMaxSize                               = 10000
+	deletedPodsMaxSize                               = 1000
 	deletedPodsMinAge                                = 5 * time.Minute
 )
 

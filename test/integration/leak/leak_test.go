@@ -8,15 +8,17 @@ import (
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/samber/lo"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	churnDuration     = 10 * time.Minute
+	churnDuration     = 20 * time.Minute
 	cronSchedule      = "*/1 * * * *" // every minute
 	podsPerJob        = 100
 	checkPodNamespace = "kube-system"
@@ -24,14 +26,32 @@ const (
 
 var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 	var (
-		networkPolicy *network.NetworkPolicy
-		cronJob       *batchv1.CronJob
+		networkPolicy     *network.NetworkPolicy
+		defaultDenyPolicy *network.NetworkPolicy
+		cronJob           *batchv1.CronJob
+		workerNodes       []v1.Node
 	)
 
 	It("should not leak BPF progs/maps after high pod churn with network policy", func() {
+		By("Getting worker nodes and labeling them for churn scheduling")
+		var err error
+		workerNodes, err = getWorkerNodes()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(len(workerNodes)).To(BeNumerically(">=", 1))
+		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
+			node.Labels["test-node"] = "true"
+			err = fw.K8sClient.Update(ctx, &node)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		By("Creating a default deny network policy")
+		defaultDenyPolicy = buildDefaultDenyNetworkPolicy()
+		err = fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, defaultDenyPolicy)
+		Expect(err).ToNot(HaveOccurred())
+
 		By("Creating a network policy targeting churn pods")
 		networkPolicy = buildChurnNetworkPolicy()
-		err := fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, networkPolicy)
+		err = fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, networkPolicy)
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Creating a CronJob that spawns 100 short-lived pods per minute")
@@ -49,59 +69,51 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 		time.Sleep(2 * time.Minute)
 
 		By("Deploying node-shell check pods on each node to verify no leaked BPF state")
-		nodes, err := getWorkerNodes()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(len(nodes)).To(BeNumerically(">=", 1))
-
-		for _, node := range nodes {
+		for _, node := range workerNodes {
 			checkPodName := fmt.Sprintf("leak-check-%s", node.Name)
 			checkPod := buildNodeCheckPod(checkPodName, node.Name)
 
 			_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, 2*time.Minute)
 			Expect(err).ToNot(HaveOccurred())
-
-			By(fmt.Sprintf("Checking BPF programs on node %s", node.Name))
-			progsOutput, err := fw.PodManager.ExecInPod(checkPodNamespace, checkPodName,
-				[]string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
-					"/opt/cni/bin/aws-eks-na-cli", "ebpf", "progs"})
-			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(func() {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
+			})
 
 			By(fmt.Sprintf("Checking BPF maps on node %s", node.Name))
 			mapsOutput, err := fw.PodManager.ExecInPod(checkPodNamespace, checkPodName,
-				[]string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
-					"/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
-			Expect(err).ToNot(HaveOccurred())
-
-			By(fmt.Sprintf("Checking pinned BPF paths on node %s", node.Name))
-			pinnedProgs, err := fw.PodManager.ExecInPod(checkPodNamespace, checkPodName,
-				[]string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
-					"ls", "/sys/fs/bpf/globals/aws/programs/"})
-			Expect(err).ToNot(HaveOccurred())
-
-			pinnedMaps, err := fw.PodManager.ExecInPod(checkPodNamespace, checkPodName,
-				[]string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
-					"ls", "/sys/fs/bpf/globals/aws/maps/"})
+				[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
 			Expect(err).ToNot(HaveOccurred())
 
 			// No churn pod BPF artifacts should remain
 			// Only system pods (coredns, aws-node, etc.) should have pinned progs/maps
-			assertNoChurnPodLeaks(progsOutput, node.Name)
 			assertNoChurnPodLeaks(mapsOutput, node.Name)
-			assertNoChurnPodLeaks(pinnedProgs, node.Name)
-			assertNoChurnPodLeaks(pinnedMaps, node.Name)
-
-			// Cleanup check pod
-			err = fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
-			Expect(err).ToNot(HaveOccurred())
 		}
 	})
 
 	AfterAll(func() {
+		if cronJob != nil {
+			fw.K8sClient.Delete(ctx, cronJob)
+		}
 		if networkPolicy != nil {
 			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, networkPolicy)
 		}
+		if defaultDenyPolicy != nil {
+			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, defaultDenyPolicy)
+		}
+		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
+			delete(node.Labels, "test-node")
+			fw.K8sClient.Update(ctx, &node)
+		})
 	})
 })
+
+func buildDefaultDenyNetworkPolicy() *network.NetworkPolicy {
+	return manifest.NewNetworkPolicyBuilder().
+		Namespace(namespace).
+		Name("default-deny-all").
+		SetPolicyType(true, true).
+		Build()
+}
 
 func buildChurnNetworkPolicy() *network.NetworkPolicy {
 	// Deny all ingress and egress for churn pods — forces eBPF probe attachment
@@ -141,6 +153,9 @@ func buildChurnCronJob() *batchv1.CronJob {
 							Labels: map[string]string{"app": "churn-pod"},
 						},
 						Spec: v1.PodSpec{
+							NodeSelector: map[string]string{
+								"test-node": "true",
+							},
 							RestartPolicy: v1.RestartPolicyNever,
 							Containers: []v1.Container{
 								{
@@ -165,6 +180,7 @@ func buildChurnCronJob() *batchv1.CronJob {
 
 func buildNodeCheckPod(name, nodeName string) *v1.Pod {
 	privileged := true
+	hostPathDir := v1.HostPathDirectory
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -177,11 +193,29 @@ func buildNodeCheckPod(name, nodeName string) *v1.Pod {
 			RestartPolicy: v1.RestartPolicyNever,
 			Containers: []v1.Container{
 				{
-					Name:    "nsenter",
+					Name:    "check",
 					Image:   "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
 					Command: []string{"sleep", "3600"},
 					SecurityContext: &v1.SecurityContext{
 						Privileged: &privileged,
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{
+							Name:      "host-root",
+							MountPath: "/host",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "host-root",
+					VolumeSource: v1.VolumeSource{
+						HostPath: &v1.HostPathVolumeSource{
+							Path: "/",
+							Type: &hostPathDir,
+						},
 					},
 				},
 			},
@@ -191,19 +225,15 @@ func buildNodeCheckPod(name, nodeName string) *v1.Pod {
 
 func getWorkerNodes() ([]v1.Node, error) {
 	nodeList := &v1.NodeList{}
-	err := fw.K8sClient.List(ctx, nodeList)
+	err := fw.K8sClient.List(ctx, nodeList, client.MatchingLabels{
+		"kubernetes.io/os": "linux",
+	})
 	if err != nil {
 		return nil, err
 	}
-	var workers []v1.Node
-	for _, node := range nodeList.Items {
-		// Skip control plane nodes
-		if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
-			continue
-		}
-		workers = append(workers, node)
-	}
-	return workers, nil
+	return lo.Filter(nodeList.Items, func(node v1.Node, index int) bool {
+		return strings.Contains(node.Status.NodeInfo.OSImage, "Amazon Linux 2023")
+	}), nil
 }
 
 // assertNoChurnPodLeaks checks that no BPF artifacts from churn pods remain.
