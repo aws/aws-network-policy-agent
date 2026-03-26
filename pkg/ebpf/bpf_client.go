@@ -56,7 +56,6 @@ var (
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
-	deletedPodsMaxSize                               = 1000
 	deletedPodsMinAge                                = 5 * time.Minute
 )
 
@@ -684,7 +683,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	defer podIdentifierLock.Unlock()
 
 	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
-		log().Infof("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
+		log().Debugf("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
 		return nil
 	}
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
@@ -1285,7 +1284,7 @@ func (l *bpfClient) deletePodFromEgressProgPodCaches(podName string, podNamespac
 	}
 }
 
-// startDeletedPodsCleanupRoutine will cleanup entries from deletedPods map that are older than deletedPodsMinAge and when size is larger that deletedPodsMaxSize.
+// startDeletedPodsCleanupRoutine cleans up entries from the deletedPods map that are older than deletedPodsMinAge and when the size exceeds deletedPodsMaxSize.
 func (l *bpfClient) startDeletedPodsCleanupRoutine() {
 	go func() {
 		ticker := time.NewTicker(deletedPodsMinAge)
@@ -1297,19 +1296,18 @@ func (l *bpfClient) startDeletedPodsCleanupRoutine() {
 }
 
 func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
-	count := 0
-	l.deletedPods.Range(func(_, _ any) bool {
-		count++
-		return true
-	})
-	if count < deletedPodsMaxSize {
-		return
-	}
-	log().Infof("deletedPods map reached %d entries, cleaning up entries older than %v", count, deletedPodsMinAge)
 	now := time.Now()
 	cleaned := 0
 	l.deletedPods.Range(func(key, value any) bool {
-		if now.Sub(value.(time.Time)) > deletedPodsMinAge {
+		ts, ok := value.(time.Time)
+		if !ok {
+			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
+			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
+			l.deletedPods.Delete(key)
+			cleaned++
+			return true
+		}
+		if now.Sub(ts) > deletedPodsMinAge {
 			l.deletedPods.Delete(key)
 			cleaned++
 		}

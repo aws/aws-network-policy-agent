@@ -1099,9 +1099,9 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 	}
 
 	now := time.Now()
-	for i := 0; i < deletedPodsMaxSize+500; i++ {
+	for i := 0; i <= 500; i++ {
 		age := -10 * time.Minute // old
-		if i >= deletedPodsMaxSize {
+		if i > 100 {
 			age = -1 * time.Minute // recent
 		}
 		testBpfClient.deletedPods.Store(fmt.Sprintf("pod-%d-ns", i), now.Add(age))
@@ -1114,5 +1114,5 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 		remaining++
 		return true
 	})
-	assert.Equal(t, 500, remaining)
+	assert.Equal(t, 400, remaining)
 }

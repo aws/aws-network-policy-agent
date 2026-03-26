@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	churnDuration     = 20 * time.Minute
-	cronSchedule      = "*/1 * * * *" // every minute
-	podsPerJob        = 100
-	checkPodNamespace = "kube-system"
+	churnDuration = 20 * time.Minute
+	cronSchedule  = "*/1 * * * *" // every minute
+	podsPerJob    = 100
+	pollInterval  = 10 * time.Second
+	cronJobName   = "churn-generator"
 )
 
 var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
@@ -60,7 +61,8 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		By(fmt.Sprintf("Waiting %v for pod churn to complete", churnDuration))
-		time.Sleep(churnDuration)
+		// if no successful run of job in 3 minutes we will bail.
+		waitForChurnOrBail(3 * time.Minute)
 
 		By("Deleting the CronJob and waiting for pods to terminate")
 		err = fw.K8sClient.Delete(ctx, cronJob)
@@ -80,7 +82,7 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 			})
 
 			By(fmt.Sprintf("Checking BPF maps on node %s", node.Name))
-			mapsOutput, err := fw.PodManager.ExecInPod(checkPodNamespace, checkPodName,
+			mapsOutput, err := fw.PodManager.ExecInPod(namespace, checkPodName,
 				[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
 			Expect(err).ToNot(HaveOccurred())
 
@@ -135,7 +137,7 @@ func buildChurnCronJob() *batchv1.CronJob {
 
 	return &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "churn-generator",
+			Name:      cronJobName,
 			Namespace: namespace,
 		},
 		Spec: batchv1.CronJobSpec{
@@ -184,7 +186,7 @@ func buildNodeCheckPod(name, nodeName string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: checkPodNamespace,
+			Namespace: namespace,
 		},
 		Spec: v1.PodSpec{
 			NodeName:      nodeName,
@@ -244,7 +246,27 @@ func assertNoChurnPodLeaks(output, nodeName string) {
 		if line == "" {
 			continue
 		}
-		Expect(line).ToNot(ContainSubstring("churn"),
+		Expect(line).ToNot(ContainSubstring("churn-generator"),
 			fmt.Sprintf("Leaked BPF artifact found on node %s: %s", nodeName, line))
+	}
+}
+
+func waitForChurnOrBail(jobStuckTimeout time.Duration) {
+	deadline := time.Now().Add(churnDuration)
+
+	for time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+
+		cj := &batchv1.CronJob{}
+		Expect(fw.K8sClient.Get(ctx, client.ObjectKey{
+			Name:      cronJobName,
+			Namespace: namespace,
+		}, cj)).ToNot(HaveOccurred())
+
+		if cj.Status.LastSuccessfulTime != nil &&
+			time.Since(cj.Status.LastSuccessfulTime.Time) > jobStuckTimeout {
+			Fail(fmt.Sprintf("CronJob last succeeded %v ago, stuck for > %v, bailing early",
+				time.Since(cj.Status.LastSuccessfulTime.Time), jobStuckTimeout))
+		}
 	}
 }
