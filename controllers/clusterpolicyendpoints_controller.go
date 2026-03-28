@@ -26,6 +26,7 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -98,22 +99,26 @@ type ClusterPolicyEndpointsReconciler struct {
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=clusterpolicyendpoints/status,verbs=get
 
 func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log().Infof("Received a new reconcile request for ClusterPolicyEndpoint %v", req)
+	traceID := logger.NewTraceID()
+	ctx = logger.WithTraceID(ctx, traceID)
+	clog := logger.FromContext(ctx)
+	clog.Infof("Received a new reconcile request for ClusterPolicyEndpoint %v", req)
 	if err := r.reconcile(ctx, req); err != nil {
-		log().Errorf("ClusterPolicyEndpoint reconcile error: %v", err)
+		clog.Errorf("ClusterPolicyEndpoint reconcile error: %v", err)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
 func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
+	clog := logger.FromContext(ctx)
 	ClusterPolicyEndpoint := &policyk8sawsv1.ClusterPolicyEndpoint{}
 	// Cluster-scoped: use only name, no namespace
 	if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: req.Name}, ClusterPolicyEndpoint); err != nil {
 		if apierrors.IsNotFound(err) {
 			return r.cleanUpClusterPolicyEndpoint(ctx, req)
 		}
-		log().Errorf("Unable to get cluster policy endpoint spec for ClusterPolicyendpoint %s: %v", req.Name, err)
+		clog.Errorf("Unable to get cluster policy endpoint spec for ClusterPolicyendpoint %s: %v", req.Name, err)
 		return err
 	}
 	if !ClusterPolicyEndpoint.DeletionTimestamp.IsZero() {
@@ -123,7 +128,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ct
 }
 
 func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx context.Context, req ctrl.Request) error {
-	log().Infof("Clean Up ClusterPolicyEndpoint resources for name: %s", req.Name)
+	clog := logger.FromContext(ctx)
+	clog.Infof("Clean Up ClusterPolicyEndpoint resources for name: %s", req.Name)
 
 	parentCNP := utils.GetParentNPNameFromPEName(req.Name)
 	resourceName := req.Name
@@ -132,12 +138,12 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 
 	r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
 
-	log().Infof("cleanUpClusterPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
+	clog.Infof("cleanUpClusterPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
 
 	if len(targetPods) > 0 {
 		err := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, targetPods, targetPodIdentifiers, false)
 		if err != nil {
-			log().Errorf("failed to update cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
+			clog.Errorf("failed to update cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
 			return err
 		}
 	}
@@ -145,7 +151,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 	if len(podsToBeCleanedUp) > 0 {
 		err := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, podsToBeCleanedUp, targetPodIdentifiers, true)
 		if err != nil {
-			log().Errorf("failed to clean up cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
+			clog.Errorf("failed to clean up cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
 			return err
 		}
 	}
@@ -159,7 +165,8 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 }
 
 func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx context.Context, ClusterPolicyEndpoint *policyk8sawsv1.ClusterPolicyEndpoint) error {
-	log().Infof("Processing Cluster Policy Endpoint Name: %s", ClusterPolicyEndpoint.Name)
+	clog := logger.FromContext(ctx)
+	clog.Infof("Processing Cluster Policy Endpoint Name: %s", ClusterPolicyEndpoint.Name)
 
 	parentCNP := ClusterPolicyEndpoint.Spec.PolicyRef.Name
 	resourceName := ClusterPolicyEndpoint.Name
@@ -169,24 +176,24 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	// Handle cleanup of pods
 	err := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
 	if err != nil {
-		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", err)
+		clog.Errorf("failed to update cluster policy enforcement status for existing pods: %v", err)
 		return err
 	}
 
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
-			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
+			clog.Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
 			return err
 		}
 
-		err = r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
+		err = r.configureClusterPolicyBPFProbes(ctx, podIdentifier, targetPods, ingressRules, egressRules)
 		if err != nil {
-			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
+			clog.Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint)
+	r.observeClusterPolicyProgrammingLatency(ctx, ClusterPolicyEndpoint)
 
 	return nil
 }
@@ -194,7 +201,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 // observeClusterPolicyProgrammingLatency reads the last-change-trigger-time annotation
 // from the ClusterPolicyEndpoint and emits the E2E latency histogram if the timestamp
 // is newer than this agent's start time.
-func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint) {
+func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(ctx context.Context, cpe *policyk8sawsv1.ClusterPolicyEndpoint) {
 	if cpe.Annotations == nil {
 		return
 	}
@@ -202,9 +209,10 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	if !ok || triggerTimeStr == "" {
 		return
 	}
+	clog := logger.FromContext(ctx)
 	triggerTime, err := time.Parse(time.RFC3339Nano, triggerTimeStr)
 	if err != nil {
-		log().Debugf("Failed to parse %s annotation: %v", LastChangeTriggerTimeAnnotation, err)
+		clog.Debugf("Failed to parse %s annotation: %v", LastChangeTriggerTimeAnnotation, err)
 		return
 	}
 	if !triggerTime.After(r.trackerStartTime) {
@@ -212,10 +220,11 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	}
 	latency := time.Since(triggerTime).Seconds()
 	clusterPolicyProgrammingLatency.Observe(latency)
-	log().Debugf("E2E cluster policy programming latency: %.3fs for CPE %s", latency, cpe.Name)
+	clog.Debugf("E2E cluster policy programming latency: %.3fs for CPE %s", latency, cpe.Name)
 }
 
-func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
+func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(ctx context.Context, podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
+	clog := logger.FromContext(ctx)
 
 	for _, pod := range targetPods {
 		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -223,30 +232,31 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 			continue
 		}
 
-		err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
+		err := r.ebpfClient.AttacheBPFProbes(ctx, pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
 		if err != nil {
-			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
+			clog.Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
 			return err
 		}
-		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+		clog.Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 
-	err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules)
+	err := r.updateClusterPolicyBPFMaps(ctx, podIdentifier, ingressRules, egressRules)
 	if err != nil {
-		log().Errorf("cluster policy Map updates failed for podIdentifier %s: %v", podIdentifier, err)
+		clog.Errorf("cluster policy Map updates failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
 
 	return nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentifier string, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
+func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(ctx context.Context, podIdentifier string, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
+	clog := logger.FromContext(ctx)
 
 	state := ebpf.POLICIES_APPLIED
 
-	err := r.ebpfClient.UpdateClusterPolicyEbpfMaps(podIdentifier, ingressRules, egressRules)
+	err := r.ebpfClient.UpdateClusterPolicyEbpfMaps(ctx, podIdentifier, ingressRules, egressRules)
 	if err != nil {
-		log().Errorf("Cluster Policy Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
+		clog.Errorf("Cluster Policy Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
 
@@ -255,9 +265,9 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 		state = ebpf.DEFAULT_ALLOW
 	}
 
-	err = r.ebpfClient.UpdatePodStateEbpfMaps(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, state, true, true)
+	err = r.ebpfClient.UpdatePodStateEbpfMaps(ctx, podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, state, true, true)
 	if err != nil {
-		log().Errorf("Cluster Policy pod state maps update(s) failed for podIdentifier %s: %v", podIdentifier, err)
+		clog.Errorf("Cluster Policy pod state maps update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
 
@@ -267,17 +277,18 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 	}
 
 	// TODO: Can be optimized to avoid redundant createIfNotExists calls
-	r.ebpfClient.CreatePodStateEbpfEntryIfNotExists(podIdentifier, ebpf.POD_STATE_MAP_KEY, defaultState)
+	r.ebpfClient.CreatePodStateEbpfEntryIfNotExists(ctx, podIdentifier, ebpf.POD_STATE_MAP_KEY, defaultState)
 	return nil
 }
 
 func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFirewallRules(ctx context.Context, podIdentifier string, resourceName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, error) {
 
+	clog := logger.FromContext(ctx)
 	var clusterPolicyIngressRules, clusterPolicyEgressRules []fwrp.EbpfFirewallRules
 	currentCPE := &policyk8sawsv1.ClusterPolicyEndpoint{}
 
 	if ClusterPolicyEndpointList, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
-		log().Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(ClusterPolicyEndpointList.([]string)))
+		clog.Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(ClusterPolicyEndpointList.([]string)))
 		for _, ClusterPolicyEndpointResource := range ClusterPolicyEndpointList.([]string) {
 			// Cluster-scoped: no namespace
 			cpeNamespacedName := types.NamespacedName{Name: ClusterPolicyEndpointResource}
@@ -286,7 +297,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 				deletedCPEParentCNPName := utils.GetParentNPNameFromPEName(resourceName)
 				currentCPEParentCNPName := utils.GetParentNPNameFromPEName(ClusterPolicyEndpointResource)
 				if deletedCPEParentCNPName == currentCPEParentCNPName {
-					log().Debugf("CPE belongs to same CNP. Ignore and move on since it's a delete flow deletedCPE %s currentCPE %s", resourceName, ClusterPolicyEndpointResource)
+					clog.Debugf("CPE belongs to same CNP. Ignore and move on since it's a delete flow deletedCPE %s currentCPE %s", resourceName, ClusterPolicyEndpointResource)
 					continue
 				}
 			}
@@ -314,12 +325,12 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 			for _, endPointInfo := range currentCPE.Spec.Egress {
 
 				if endPointInfo.CIDR == "" && endPointInfo.DomainName == "" {
-					log().Warnf("both CIDR and DomainName are empty in PE name %s", currentCPE.Name)
+					clog.Warnf("both CIDR and DomainName are empty in PE name %s", currentCPE.Name)
 					continue
 				}
 
 				if endPointInfo.CIDR == "" {
-					log().Infof("CIDR is empty, skipping the egress rule %s", currentCPE.Name)
+					clog.Infof("CIDR is empty, skipping the egress rule %s", currentCPE.Name)
 					continue
 				}
 
@@ -335,7 +346,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 					L4Info:     endPointInfo.Ports,
 				})
 			}
-			log().Infof("Total no.of clusterPolicy ingressRules %d egressRules %d", len(clusterPolicyIngressRules), len(clusterPolicyEgressRules))
+			clog.Infof("Total no.of clusterPolicy ingressRules %d egressRules %d", len(clusterPolicyIngressRules), len(clusterPolicyEgressRules))
 		}
 	}
 	return clusterPolicyIngressRules, clusterPolicyEgressRules, nil
@@ -355,12 +366,13 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 
 	// Get all ClusterPolicyEndpoints for this ClusterNetworkPolicy in one call
 	parentCPEObjects := r.getClusterPolicyEndpointsOfParentCNP(ctx, parentCNP)
-	log().Infof("Parent Cluster Network Policy resource Name: %s Total Cluster Policy Endpoints for Parent CNP: Count: %d", parentCNP, len(parentCPEObjects))
+	clog := logger.FromContext(ctx)
+	clog.Infof("Parent Cluster Network Policy resource Name: %s Total Cluster Policy Endpoints for Parent CNP: Count: %d", parentCNP, len(parentCPEObjects))
 
 	if len(parentCPEObjects) == 0 {
 		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
 		r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
-		log().Infof("No CPEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
+		clog.Infof("No CPEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
 		return newTargetPods, podIdentifiers, podsToBeCleanedUp
 	}
 
@@ -423,11 +435,12 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(Cluster
 }
 
 func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusForPods(ctx context.Context, ClusterPolicyEndpointName string, cleanupPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) error {
+	clog := logger.FromContext(ctx)
 	var err error
 	for _, cleanupPod := range cleanupPods {
 		cleanupErr := r.cleanupClusterPolicyPod(ctx, cleanupPod, ClusterPolicyEndpointName, isDeleteFlow)
 		if cleanupErr != nil {
-			log().Errorf("Cluster Policy Cleanup/Update unsuccessful for Pod Name: %s Namespace: %s ", cleanupPod.Name, cleanupPod.Namespace)
+			clog.Errorf("Cluster Policy Cleanup/Update unsuccessful for Pod Name: %s Namespace: %s ", cleanupPod.Name, cleanupPod.Namespace)
 			err = errors.Join(err, cleanupErr)
 		}
 	}
@@ -435,19 +448,20 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusF
 }
 
 func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, isDeleteFlow bool) error {
+	clog := logger.FromContext(ctx)
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
 
 	if _, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
 		clusterPolicyIngressRules, clusterPolicyEgressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, clusterPolicyEndpoint, isDeleteFlow)
 		if err != nil {
-			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", clusterPolicyEndpoint, err)
+			clog.Errorf("Error Parsing cluster policy Endpoint resource %s: %v", clusterPolicyEndpoint, err)
 			return err
 		}
 
 		// No catch-all rules for cluster policies - just update with remaining rules
-		err = r.updateClusterPolicyBPFMaps(podIdentifier, clusterPolicyIngressRules, clusterPolicyEgressRules)
+		err = r.updateClusterPolicyBPFMaps(ctx, podIdentifier, clusterPolicyIngressRules, clusterPolicyEgressRules)
 		if err != nil {
-			log().Errorf("cluster policy map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
+			clog.Errorf("cluster policy map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 			return err
 		}
 	}
@@ -455,12 +469,13 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 }
 
 func (r *ClusterPolicyEndpointsReconciler) getClusterPolicyEndpointsOfParentCNP(ctx context.Context, parentCNP string) []policyk8sawsv1.ClusterPolicyEndpoint {
+	clog := logger.FromContext(ctx)
 	var parentClusterPolicyEndpoints []policyk8sawsv1.ClusterPolicyEndpoint
 
 	ClusterPolicyEndpointList := &policyk8sawsv1.ClusterPolicyEndpointList{}
 	// Cluster-scoped: no namespace filter
 	if err := r.k8sClient.List(ctx, ClusterPolicyEndpointList, &client.ListOptions{}); err != nil {
-		log().Errorf("Unable to list ClusterPolicyEndpoints err: %v", err)
+		clog.Errorf("Unable to list ClusterPolicyEndpoints err: %v", err)
 		return nil
 	}
 
@@ -475,19 +490,21 @@ func (r *ClusterPolicyEndpointsReconciler) getClusterPolicyEndpointsOfParentCNP(
 func (r *ClusterPolicyEndpointsReconciler) DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx context.Context, podIdentifier string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
 
+	clog := logger.FromContext(ctx)
 	clusterPolicyIngressRules, clusterPolicyEgressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, "", false)
 	if err != nil {
-		log().Errorf("Error deriving cluster firewall rules: %v", err)
+		clog.Errorf("Error deriving cluster firewall rules: %v", err)
 		return clusterPolicyIngressRules, clusterPolicyEgressRules, err
 	}
 
 	return clusterPolicyIngressRules, clusterPolicyEgressRules, nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {
+func (r *ClusterPolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(ctx context.Context, podIdentifier string) bool {
 	if policyEndpointList, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
 		if len(policyEndpointList.([]string)) > 0 {
-			log().Infof("Active cluster policies available against podIdentifier %s", podIdentifier)
+			clog := logger.FromContext(ctx)
+			clog.Infof("Active cluster policies available against podIdentifier %s", podIdentifier)
 			return true
 		}
 	}

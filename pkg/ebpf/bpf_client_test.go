@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -92,7 +93,7 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 				podIdentifier := utils.GetPodNamespacedName(tt.podName, tt.podNamespace)
 				testBpfClient.egressPodToProgMap.Store(podIdentifier, egressProgFD)
 			}
-			gotIngress, gotEgress := testBpfClient.isEBPFProbeAttached(tt.podName, tt.podNamespace)
+			gotIngress, gotEgress := testBpfClient.isEBPFProbeAttached(context.Background(), tt.podName, tt.podNamespace)
 			assert.Equal(t, tt.want.ingress, gotIngress)
 			assert.Equal(t, tt.want.egress, gotEgress)
 		})
@@ -110,7 +111,7 @@ func TestLoadBPFProgram(t *testing.T) {
 	}
 
 	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
-	_, _, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-abcd")
+	_, _, gotErr := testBpfClient.loadBPFProgram(context.Background(), "handle_ingress", "ingress", "test-abcd")
 	assert.Equal(t, gotErr, wantErr)
 }
 
@@ -192,7 +193,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 				egressPgmInfo:  sampleEgressPgmInfo,
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
-			gotErr := testBpfClient.UpdateEbpfMaps(tt.podIdentifier, tt.ingressFirewallRules,
+			gotErr := testBpfClient.UpdateEbpfMaps(context.Background(), tt.podIdentifier, tt.ingressFirewallRules,
 				tt.egressFirewallRules)
 			assert.Equal(t, gotErr, tt.wantErr)
 		})
@@ -250,7 +251,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 				egressPgmInfo:  sampleEgressPgmInfo,
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
-			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(context.Background(), tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
 			assert.Equal(t, gotErr, tt.wantErr)
 		})
 	}
@@ -442,7 +443,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				return fmt.Sprintf("mockedveth%d", interfaceIndex), nil
 			}
 
-			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces)
+			gotError := testBpfClient.AttacheBPFProbes(context.Background(), tt.testPod, tt.podIdentifier, tt.numInterfaces)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
@@ -692,7 +693,7 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 				}
 				testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			}
-			gotIsMapUpdateRequired := testBpfClient.IsFirstPodInPodIdentifier(tt.podIdentifier)
+			gotIsMapUpdateRequired := testBpfClient.IsFirstPodInPodIdentifier(context.Background(), tt.podIdentifier)
 			assert.Equal(t, tt.want, gotIsMapUpdateRequired)
 		})
 	}
@@ -754,7 +755,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 				testBpfClient.podNameToInterfaceCount.Store(key, count)
 			}
 
-			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(testPod, "test-pod-id", tt.providedCount)
+			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(context.Background(), testPod, "test-pod-id", tt.providedCount)
 			assert.Equal(t, tt.wantCount, gotCount)
 			assert.Equal(t, tt.wantErr, gotErr)
 		})
@@ -816,7 +817,7 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		return fmt.Sprintf("mockedveth%d", interfaceIndex), nil
 	}
 
-	err := testBpfClient.AttacheBPFProbes(testPod, podIdentifier, 2)
+	err := testBpfClient.AttacheBPFProbes(context.Background(), testPod, podIdentifier, 2)
 	assert.NoError(t, err)
 
 	podNamespacedName := utils.GetPodNamespacedName(testPod.Name, testPod.Namespace)
@@ -997,7 +998,7 @@ func TestIsProgFdShared(t *testing.T) {
 				currentPodSet.(map[string]struct{})[pod] = struct{}{}
 			}
 
-			isProgFdShared, _ := testBpfClient.isProgFdShared(tt.podName, tt.podNamespace)
+			isProgFdShared, _ := testBpfClient.isProgFdShared(context.Background(), tt.podName, tt.podNamespace)
 			assert.Equal(t, tt.want.isProgFdShared, isProgFdShared)
 		})
 	}

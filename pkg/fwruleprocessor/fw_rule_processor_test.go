@@ -1,6 +1,7 @@
 package fwruleprocessor
 
 import (
+	"context"
 	"net"
 	"sort"
 	"testing"
@@ -70,7 +71,7 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv4(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(context.Background(), tt.args.firewallRules)
 			var gotKeys []string
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
@@ -153,7 +154,7 @@ func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_IPv6(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeMapEntriesFromEndpointRules(tt.args.firewallRules)
+			got, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeMapEntriesFromEndpointRules(context.Background(), tt.args.firewallRules)
 			var gotKeys []string
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
@@ -220,7 +221,7 @@ func TestFWRuleProcessor_CheckAndDeriveL4InfoFromAnyMatchingCIDRs(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotMatchingCIDRL4Info := checkAndDeriveL4InfoFromAnyMatchingCIDRs(tt.firewallRule, tt.cidrsMap)
+			gotMatchingCIDRL4Info := checkAndDeriveL4InfoFromAnyMatchingCIDRs(context.Background(), tt.firewallRule, tt.cidrsMap)
 			assert.Equal(t, tt.want.matchingCIDRL4Info, gotMatchingCIDRL4Info)
 		})
 	}
@@ -568,7 +569,7 @@ func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6)
-			assert.Equal(t, tt.expected, f.shouldSkipRule(tt.cidr))
+			assert.Equal(t, tt.expected, f.shouldSkipRule(context.Background(), tt.cidr))
 		})
 	}
 }

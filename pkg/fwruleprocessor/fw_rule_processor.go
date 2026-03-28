@@ -1,6 +1,7 @@
 package fwruleprocessor
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -12,10 +13,6 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 )
-
-func log() logger.Logger {
-	return logger.Get()
-}
 
 var (
 	CATCH_ALL_PROTOCOL            corev1.Protocol = "ANY_IP_PROTOCOL"
@@ -70,7 +67,8 @@ func NewFirewallRuleProcessor(nodeIP string, hostMask string, enableIPv6 bool) *
 //   6. Finally, all CIDRs are encoded into trie keys and their corresponding merged/derived L4 info is encoded
 //      into the values, forming the output map.
 
-func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(ctx context.Context, firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+	clog := logger.FromContext(ctx)
 
 	firewallMap := make(map[string][]byte)
 	cidrsMap := make(map[string]EbpfFirewallRules)
@@ -98,13 +96,13 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(f.hostMask)
 		}
 
-		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
+		if f.shouldSkipRule(ctx, string(firewallRule.IPCidr)) {
 			continue
 		}
 
 		// If no L4 specified add catch all entry
 		if len(firewallRule.L4Info) == 0 {
-			log().Debugf("No L4 specified. Add Catch all entry CIDR: %s", string(firewallRule.IPCidr))
+			clog.Debugf("No L4 specified. Add Catch all entry CIDR: %s", string(firewallRule.IPCidr))
 			addCatchAllL4Entry(&firewallRule)
 		}
 
@@ -115,7 +113,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			// Check if the /m entry is part of any /n CIDRs that we've encountered so far
 			// If found, we need to include the port and protocol combination against the current entry as well since
 			// we use LPM TRIE map and the /m will always win out.
-			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
+			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRs(ctx, string(firewallRule.IPCidr), nonHostCIDRs)
 			if len(cidrL4Info) > 0 {
 				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
 			}
@@ -137,11 +135,11 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			addDenyAllL4Entry(&exceptFirewall)
 			cidrsMap[exceptCidr] = exceptFirewall
 		}
-		log().Debugf("Parsed Except CIDR: %s", exceptCidr)
+		clog.Debugf("Parsed Except CIDR: %s", exceptCidr)
 	}
 
 	for key, value := range cidrsMap {
-		log().Infof("Updating Map with IP Key: %s", string(key))
+		clog.Infof("Updating Map with IP Key: %s", string(key))
 		_, firewallMapKey, _ := net.ParseCIDR(string(key))
 		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 		firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
@@ -194,22 +192,23 @@ func addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
 	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
-func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
+func checkAndDeriveL4InfoFromAnyMatchingCIDRs(ctx context.Context, firewallRule string,
 	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
+	clog := logger.FromContext(ctx)
 	var matchingCIDRL4Info []v1alpha1.Port
 
 	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
 	for cidr, cidrFirewallInfo := range cidrsMap {
 		_, cidrEntry, _ := net.ParseCIDR(cidr)
 		if cidrEntry.Contains(ipToCheck.IP) {
-			log().Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)
+			clog.Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)
 			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
 			foundInExcept := false
 			for _, except := range cidrFirewallInfo.Except {
 				_, exceptEntry, _ := net.ParseCIDR(string(except))
 				if exceptEntry.Contains(ipToCheck.IP) {
 					foundInExcept = true
-					log().Debugf("Found IP: %s in except block %s of CIDR %s. Skipping CIDR match", firewallRule, string(except), cidr)
+					clog.Debugf("Found IP: %s in except block %s of CIDR %s. Skipping CIDR match", firewallRule, string(except), cidr)
 					break
 				}
 			}
@@ -258,7 +257,8 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 	return result
 }
 
-func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(ctx context.Context, firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
+	clog := logger.FromContext(ctx)
 	firewallMap := make(map[string][]byte)
 	cidrL4Rules := make(map[string][]utils.L4Rule)
 	processedCIDRs := make([]string, 0)
@@ -270,7 +270,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 	for _, rule := range firewallRules {
 
 		cidr := f.normalizeCIDR(string(rule.IPCidr))
-		if f.shouldSkipRule(cidr) {
+		if f.shouldSkipRule(ctx, cidr) {
 			continue
 		}
 
@@ -284,7 +284,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 		// If this current rule doesn't have any port/protocol, the rule is not specific to any port/protocol
 		if len(rule.L4Info) == 0 {
-			log().Info("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
+			clog.Info("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], utils.L4Rule{
 				Action:   rule.Action,
 				Priority: rule.Priority,
@@ -305,7 +305,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 	// Step 4: Resolve conflicts and create final map entries
 	for cidr, l4Rules := range cidrL4Rules {
-		log().Infof("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
+		clog.Infof("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
 		resolvedL4Rules := f.removeDuplicateL4Rules(l4Rules)
 
 		_, firewallMapKey, _ := net.ParseCIDR(cidr)
@@ -325,17 +325,18 @@ func (f *FirewallRuleProcessor) normalizeCIDR(cidr string) string {
 	return cidr
 }
 
-func (f *FirewallRuleProcessor) shouldSkipRule(cidr string) bool {
+func (f *FirewallRuleProcessor) shouldSkipRule(ctx context.Context, cidr string) bool {
+	clog := logger.FromContext(ctx)
 	if utils.IsNodeIP(f.nodeIP, cidr) {
 		return true
 	}
 	isIPv6CIDR := isIPv6(cidr)
 	if f.enableIPv6 && !isIPv6CIDR {
-		log().Debugf("Skipping ipv4 rule in ipv6 cluster CIDR: %s", cidr)
+		clog.Debugf("Skipping ipv4 rule in ipv6 cluster CIDR: %s", cidr)
 		return true
 	}
 	if !f.enableIPv6 && isIPv6CIDR {
-		log().Debugf("Skipping ipv6 rule in ipv4 cluster CIDR: %s", cidr)
+		clog.Debugf("Skipping ipv6 rule in ipv4 cluster CIDR: %s", cidr)
 		return true
 	}
 	return false

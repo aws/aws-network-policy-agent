@@ -957,7 +957,7 @@ func TestDeriveDefaultPodIsolation(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotIsIngressIsolated, gotIsEgressIsolated := policyEndpointReconciler.deriveDefaultPodIsolation(
-				&tt.policyendpoint, tt.ingressRuleCount, tt.egressRuleCount)
+				context.Background(), &tt.policyendpoint, tt.ingressRuleCount, tt.egressRuleCount)
 			assert.Equal(t, tt.want.isIngressIsolated, gotIsIngressIsolated)
 			assert.Equal(t, tt.want.isEgressIsolated, gotIsEgressIsolated)
 		})
@@ -1004,7 +1004,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
 
 		t.Run(tt.name, func(t *testing.T) {
-			activePoliciesAvailable := policyEndpointReconciler.ArePoliciesAvailableInLocalCache(tt.podIdentifier)
+			activePoliciesAvailable := policyEndpointReconciler.ArePoliciesAvailableInLocalCache(context.Background(), tt.podIdentifier)
 			assert.Equal(t, tt.want.activePoliciesAvailable, activePoliciesAvailable)
 		})
 	}
@@ -1260,7 +1260,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotIngressRules, gotEgressRules, gotError := policyEndpointReconciler.DeriveFireWallRulesPerPodIdentifier(tt.podIdentifier, tt.resourceNamespace)
+			gotIngressRules, gotEgressRules, gotError := policyEndpointReconciler.DeriveFireWallRulesPerPodIdentifier(context.Background(), tt.podIdentifier, tt.resourceNamespace)
 			assert.Equal(t, tt.want.ingressRules, gotIngressRules)
 			assert.Equal(t, tt.want.egressRules, gotEgressRules)
 			assert.Equal(t, tt.wantErr, gotError)
