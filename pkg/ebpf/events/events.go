@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-network-policy-agent/pkg/metadata"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -24,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
+
 )
 
 var (
@@ -223,6 +225,8 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
+                _ = metadata.LookupByIP(utils.ConvByteToIPv6(rb.SourceIP).String())
+
 
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
@@ -252,6 +256,8 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 					log().Errorf("Failed to read from Ring buf %v", err)
 					continue
 				}
+				_ = metadata.LookupByIP(utils.ConvByteArrayToIP(rb.SourceIP))
+
 				protocol := utils.GetProtocol(int(rb.Protocol))
 				verdict := getVerdict(int(rb.Verdict))
 
