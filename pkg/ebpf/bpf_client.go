@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,7 +118,7 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
+func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
@@ -279,7 +280,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	// Initializes prometheus metrics
 	prometheusRegister()
-	ebpfClient.startDeletedPodsCleanupRoutine()
+	ebpfClient.startDeletedPodsCleanupRoutine(ctx)
 
 	log().Info("BPF Client initialization done")
 	return ebpfClient, nil
@@ -1284,13 +1285,18 @@ func (l *bpfClient) deletePodFromEgressProgPodCaches(podName string, podNamespac
 	}
 }
 
-// startDeletedPodsCleanupRoutine cleans up entries from the deletedPods map that are older than deletedPodsMinAge and when the size exceeds deletedPodsMaxSize.
-func (l *bpfClient) startDeletedPodsCleanupRoutine() {
+// startDeletedPodsCleanupRoutine cleans up entries from the deletedPods map that are older than deletedPodsMinAge.
+func (l *bpfClient) startDeletedPodsCleanupRoutine(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(deletedPodsMinAge)
+		ticker := time.NewTicker(deletedPodsMinAge / 2)
 		defer ticker.Stop()
-		for range ticker.C {
-			l.cleanupDeletedPodsIfNeeded()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.cleanupDeletedPodsIfNeeded()
+			}
 		}
 	}()
 }
@@ -1302,7 +1308,6 @@ func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
 		ts, ok := value.(time.Time)
 		if !ok {
 			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
-			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
 			l.deletedPods.Delete(key)
 			cleaned++
 			return true
@@ -1313,5 +1318,5 @@ func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
 		}
 		return true
 	})
-	log().Infof("deletedPods cleanup complete, removed %d entries", cleaned)
+	log().Debugf("deletedPods cleanup complete, removed %d entries", cleaned)
 }
