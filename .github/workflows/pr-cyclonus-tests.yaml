@@ -25,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pr-sha: ${{ steps.pr-info.outputs.sha }}
-      pr-ref: refs/pull/${{ github.event.issue.number }}/head
     steps:
       - name: Get PR SHA and post acknowledgement
         id: pr-info
@@ -51,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: ./.github/actions/install-dependencies
 
@@ -86,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -111,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: ./.github/actions/install-dependencies
 
@@ -128,24 +127,19 @@ jobs:
 
       - name: Install addon and update node agent image
         run: |
-          # Get latest addon version for this k8s version
-          ADDON_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni \
-            --kubernetes-version $K8S_VERSION --region $REGION \
-            | jq -r '.addons[0].addonVersions[0].addonVersion')
-
-          # Update VPC CNI addon with network policy enabled
-          aws eks update-addon \
-            --cluster-name $CLUSTER_NAME \
-            --addon-name vpc-cni \
-            --addon-version $ADDON_VERSION \
-            --configuration-values '{"enableNetworkPolicy": "true"}' \
-            --resolve-conflicts OVERWRITE \
-            --region $REGION
-
-          aws eks wait addon-active \
-            --cluster-name $CLUSTER_NAME \
-            --addon-name vpc-cni \
-            --region $REGION
+          cat > /tmp/addon-config.yaml <<EOF
+          apiVersion: eksctl.io/v1alpha5
+          kind: ClusterConfig
+          metadata:
+            name: $CLUSTER_NAME
+            region: $REGION
+          addons:
+          - name: vpc-cni
+            version: latest
+            configurationValues: '{"enableNetworkPolicy": "true"}'
+            resolveConflicts: overwrite
+          EOF
+          eksctl update addon -f /tmp/addon-config.yaml --force
 
           # Patch node agent image to PR build
           kubectl set image daemonset/aws-node \
