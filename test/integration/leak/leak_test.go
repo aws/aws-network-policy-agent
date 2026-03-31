@@ -246,14 +246,14 @@ func assertNoChurnPodLeaks(output, nodeName string) {
 		if line == "" {
 			continue
 		}
-		Expect(line).ToNot(ContainSubstring("churn-generator"),
+		Expect(line).ToNot(ContainSubstring(cronJobName),
 			fmt.Sprintf("Leaked BPF artifact found on node %s: %s", nodeName, line))
 	}
 }
 
 func waitForChurnOrBail(jobStuckTimeout time.Duration) {
 	deadline := time.Now().Add(churnDuration)
-
+	start := time.Now()
 	for time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 
@@ -263,10 +263,14 @@ func waitForChurnOrBail(jobStuckTimeout time.Duration) {
 			Namespace: namespace,
 		}, cj)).ToNot(HaveOccurred())
 
-		if cj.Status.LastSuccessfulTime != nil &&
-			time.Since(cj.Status.LastSuccessfulTime.Time) > jobStuckTimeout {
-			Fail(fmt.Sprintf("CronJob last succeeded %v ago, stuck for > %v, bailing early",
-				time.Since(cj.Status.LastSuccessfulTime.Time), jobStuckTimeout))
+		if cj.Status.LastSuccessfulTime != nil {
+			if time.Since(cj.Status.LastSuccessfulTime.Time) > jobStuckTimeout {
+				Fail(fmt.Sprintf("CronJob last succeeded %v ago, stuck for > %v, bailing early",
+					time.Since(cj.Status.LastSuccessfulTime.Time), jobStuckTimeout))
+			}
+			continue
+		} else if time.Since(start) > jobStuckTimeout {
+			Fail(fmt.Sprintf("CronJob has never succeeded after %v, bailing early", jobStuckTimeout))
 		}
 	}
 }
