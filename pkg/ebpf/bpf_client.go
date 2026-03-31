@@ -336,7 +336,8 @@ type bpfClient struct {
 	clusterPolicyIngressInMemoryMap *sync.Map
 	// This is in-memory map backed by clusterPolicyEgressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	clusterPolicyEgressInMemoryMap *sync.Map
-	deletedPods                    *sync.Map
+	// This is in-memory map to track recently deleted pods (key: podNamespacedName, value: time added to map)
+	deletedPods *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -675,6 +676,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
+	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
+		log().Debugf("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
+		return nil
+	}
+
 	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
@@ -683,10 +689,6 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	log().Debugf("Got the podIdentifierLock for Pod: %s, Namespace: %s, PodIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
 	defer podIdentifierLock.Unlock()
 
-	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
-		log().Debugf("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
-		return nil
-	}
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
 	// If yes, then skip probe attach flow for this pod.
 	isIngressProbeAttached, isEgressProbeAttached := l.isEBPFProbeAttached(pod.Name, pod.Namespace)
