@@ -41,6 +41,10 @@ struct conntrack_value {
    __u8 val;
 };
 
+struct policy_scope {
+   __u8 scope;
+};
+
 struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
     .type = BPF_MAP_TYPE_LRU_HASH,
     .key_size =sizeof(struct conntrack_key),
@@ -52,6 +56,15 @@ struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {
 struct bpf_map_def_pvt SEC("maps") policy_events = {
     .type = BPF_MAP_TYPE_RINGBUF,
     .max_entries = 512 * 1024,
+    .pinning = PIN_GLOBAL_NS,
+};
+
+struct bpf_map_def_pvt SEC("maps") policy_events_scope = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(__u32), // default key = 0. We are storing a single entry for both ingress and egress traffic
+    .value_size = sizeof(struct policy_scope),
+    .max_entries = 1,
+	.map_flags = BPF_F_NO_PREALLOC,
     .pinning = PIN_GLOBAL_NS,
 };
 
