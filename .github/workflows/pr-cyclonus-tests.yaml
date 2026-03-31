@@ -25,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pr-sha: ${{ steps.pr-info.outputs.sha }}
-      pr-ref: refs/pull/${{ github.event.issue.number }}/head
     steps:
       - name: Get PR SHA and post acknowledgement
         id: pr-info
@@ -51,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: ./.github/actions/install-dependencies
 
@@ -86,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -111,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-ref }}
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
       - uses: ./.github/actions/install-dependencies
 
