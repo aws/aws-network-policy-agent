@@ -336,7 +336,8 @@ type bpfClient struct {
 	clusterPolicyIngressInMemoryMap *sync.Map
 	// This is in-memory map backed by clusterPolicyEgressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	clusterPolicyEgressInMemoryMap *sync.Map
-	deletedPods                    *sync.Map
+	// This is in-memorry map to track recently deleted pods (key: podNamespacedName, value: time added to map)
+	deletedPods *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
