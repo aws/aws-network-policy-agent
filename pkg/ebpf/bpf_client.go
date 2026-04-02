@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,6 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
-	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -355,7 +355,7 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 		}
 
 		log().Info("comparing new and existing probes ...")
-		isEqual := cmp.Equal(currentProbe, existingProbe)
+		isEqual := bytes.Equal(currentProbe, existingProbe)
 		if !isEqual {
 			if bpfProbe == EVENTS_BINARY || bpfProbe == EVENTS_V6_BINARY {
 				// Ingress and Egress probes refer to Conntrack and Policy Events maps defined in
