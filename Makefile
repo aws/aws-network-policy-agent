@@ -86,6 +86,40 @@ vet: setup-ebpf-sdk-override # Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./pkg/... ./controllers/... -v -coverprofile=coverage.txt -covermode=atomic
 
+.PHONY: check-dce
+check-dce: ## Verify that dead code elimination is working for the controller binary.
+	@echo "Checking for dead code elimination regressions..."
+	@# Build an unstripped binary for symbol analysis
+	@$(GO_ENV_EBPF) go build $(VENDOR_OVERRIDE_FLAG) -buildmode=pie -tags netgo,ebpf,core,grpcnotrace -o controller-dce-check main.go
+	@# Fail if any non-stdlib package calls reflect.Type.Method(int) — this globally
+	@# disables method DCE. Common offenders: google/go-cmp, text/template.
+	@if go tool nm controller-dce-check 2>/dev/null | grep -q 'go-cmp/cmp'; then \
+		echo "FAIL: go-cmp is linked into the controller binary." >&2; \
+		echo "      go-cmp calls reflect.Type.Method(int) which disables dead code elimination" >&2; \
+		echo "      for the entire binary. Use it only in _test.go files." >&2; \
+		rm -f controller-dce-check; \
+		exit 1; \
+	fi
+	@if go tool nm controller-dce-check 2>/dev/null | grep -q 'text/template\.'; then \
+		echo "FAIL: text/template is linked into the controller binary." >&2; \
+		echo "      text/template calls reflect.MethodByName with a runtime variable which" >&2; \
+		echo "      disables dead code elimination for the entire binary." >&2; \
+		rm -f controller-dce-check; \
+		exit 1; \
+	fi
+	@# Verify that unused SDK methods are actually pruned — cloudwatchlogs has 100+
+	@# operations but we only use 4. If all are linked, DCE is broken.
+	@CWL_METHODS=$$(go tool nm controller-dce-check 2>/dev/null | grep -c 'cloudwatchlogs\.(\*Client)\.' || true); \
+	if [ "$$CWL_METHODS" -gt 30 ]; then \
+		echo "FAIL: $$CWL_METHODS cloudwatchlogs.(*Client) methods linked (expected <30)." >&2; \
+		echo "      Dead code elimination appears to be broken. A dependency may be calling" >&2; \
+		echo "      reflect.Type.Method(int) or reflect.Value.MethodByName with a non-constant arg." >&2; \
+		rm -f controller-dce-check; \
+		exit 1; \
+	fi; \
+	rm -f controller-dce-check; \
+	echo "OK: dead code elimination is working ($$CWL_METHODS cloudwatchlogs methods linked)"
+
 ##@ Build
 
 .PHONY: build
@@ -107,7 +141,13 @@ GO_ENV_EBPF += CGO_LDFLAGS=$(CUSTOM_CGO_LDFLAGS)
 BUILD_MODE ?= -buildmode=pie
 build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) -extldflags "-static"'
 build-linux: ## Build the controllerusing the host's Go toolchain.
-	$(GO_ENV_EBPF) go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -tags netgo,ebpf,core -a -o controller main.go
+# grpcnotrace: eliminates grpc -> x/net/trace -> html/template -> text/template chain
+# which calls reflect.MethodByName with a runtime variable, globally disabling the
+# Go linker's dead code elimination for methods. This reduces the controller binary
+# by ~25%. The trade-off is that gRPC debug trace endpoints (/debug/requests,
+# /debug/events) are unavailable. Remove this tag only if you need those endpoints
+# and understand the binary size impact.
+	$(GO_ENV_EBPF) go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -tags netgo,ebpf,core,grpcnotrace -a -o controller main.go
 	go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -o aws-eks-na-cli ./cmd/cli
 	go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -o aws-eks-na-cli-v6 ./cmd/cliv6
 
