@@ -14,9 +14,13 @@
 package rpc
 
 import (
+	"context"
 	"os"
 	"testing"
 
+	"github.com/aws/amazon-vpc-cni-k8s/rpc"
+	"github.com/aws/aws-network-policy-agent/controllers"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -43,4 +47,26 @@ func TestRunRPCHandler_StaleSocketCleanup(t *testing.T) {
 	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
+}
+
+func TestEnforceNpToPod_ClearDeletedPodBeforeAttach(t *testing.T) {
+	mockBpfClient := &ebpf.MockBpfClient{}
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+
+	s := &server{
+		policyReconciler: reconciler,
+	}
+
+	resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+		K8S_POD_NAME:        "nginx-abc123",
+		K8S_POD_NAMESPACE:   "default",
+		NETWORK_POLICY_MODE: "standard",
+		InterfaceCount:      1,
+	})
+	assert.NoError(t, err)
+	assert.True(t, resp.Success)
+
+	// ClearDeletedPod must appear before AttacheBPFProbes
+	assert.Equal(t, "ClearDeletedPod", mockBpfClient.CallLog[1])
+	assert.Equal(t, "AttacheBPFProbes", mockBpfClient.CallLog[2])
 }
