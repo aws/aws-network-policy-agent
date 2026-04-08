@@ -125,7 +125,7 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, policyEventsLogsScope string, enableCloudWatchLogs bool,
+func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs bool, policyEventsLogsScope string, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 	var policyEventsScopeMap goebpfmaps.BpfMap
