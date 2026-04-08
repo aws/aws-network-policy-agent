@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
@@ -396,6 +397,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			ingressProgToPodsMap:      new(sync.Map),
 			egressProgToPodsMap:       new(sync.Map),
 			podIdentifierLock:         new(sync.Map),
+			deletedPods:               new(sync.Map),
 		}
 
 		sampleBPFContext := BPFContext{
@@ -430,6 +432,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				podIdentifierLock:         new(sync.Map),
 				isMultiNICEnabled:         tt.isMultiNICEnabled,
 				podNameToInterfaceCount:   new(sync.Map),
+				deletedPods:               new(sync.Map),
 			}
 
 			sampleBPFContext := BPFContext{
@@ -810,6 +813,7 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		isMultiNICEnabled:         true,
 		ingressBinary:             "tc.v4ingress.bpf.o",
 		egressBinary:              "tc.v4egress.bpf.o",
+		deletedPods:               new(sync.Map),
 	}
 
 	utils.GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
@@ -1001,4 +1005,114 @@ func TestIsProgFdShared(t *testing.T) {
 			assert.Equal(t, tt.want.isProgFdShared, isProgFdShared)
 		})
 	}
+}
+
+func TestAttacheBPFProbes_SkipsDeletedPod(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	testBpfClient := &bpfClient{
+		podIdentifierLock: new(sync.Map),
+		deletedPods:       new(sync.Map),
+		bpfTCClient:       mockTCClient,
+	}
+
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	testBpfClient.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
+
+	err := testBpfClient.AttacheBPFProbes(pod, utils.GetPodIdentifier(pod.Name, pod.Namespace), 1)
+	assert.NoError(t, err)
+}
+
+func TestAttacheBPFProbes_ProceedsAfterClearDeletedPod(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
+
+	mockBpfSDK := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfSDK.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
+
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+
+	testBpfClient := &bpfClient{
+		hostMask:                  "/32",
+		policyEndpointeBPFContext: new(sync.Map),
+		bpfSDKClient:              mockBpfSDK,
+		bpfTCClient:               mockTCClient,
+		ingressPodToProgMap:       new(sync.Map),
+		egressPodToProgMap:        new(sync.Map),
+		ingressProgToPodsMap:      new(sync.Map),
+		egressProgToPodsMap:       new(sync.Map),
+		podIdentifierLock:         new(sync.Map),
+		deletedPods:               new(sync.Map),
+	}
+	testBpfClient.policyEndpointeBPFContext.Store(podIdentifier, BPFContext{
+		ingressPgmInfo: goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgID: 2, ProgFD: 3}},
+		egressPgmInfo:  goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgID: 4, ProgFD: 5}},
+	})
+	utils.GetHostVethName = func(_, _ string, _ int, _ []string) (string, error) {
+		return "mockedveth0", nil
+	}
+
+	// Delete then clear — simulates CNI DEL followed by CNI ADD
+	testBpfClient.deletedPods.Store(podNamespacedName, time.Now())
+	testBpfClient.ClearDeletedPod(podNamespacedName)
+
+	err := testBpfClient.AttacheBPFProbes(pod, podIdentifier, 1)
+	assert.NoError(t, err)
+
+	_, attached := testBpfClient.ingressPodToProgMap.Load(podNamespacedName)
+	assert.True(t, attached)
+}
+
+func TestDeleteBPFProbes_AddsPodToDeletedMap(t *testing.T) {
+	testBpfClient := &bpfClient{
+		ingressPodToProgMap:  new(sync.Map),
+		egressPodToProgMap:   new(sync.Map),
+		ingressProgToPodsMap: new(sync.Map),
+		egressProgToPodsMap:  new(sync.Map),
+		podIdentifierLock:    new(sync.Map),
+		deletedPods:          new(sync.Map),
+	}
+
+	pod := types.NamespacedName{Name: "nginx-xyz789", Namespace: "production"}
+	_ = testBpfClient.DeleteBPFProbes(pod, utils.GetPodIdentifier(pod.Name, pod.Namespace))
+
+	val, exists := testBpfClient.deletedPods.Load(utils.GetPodNamespacedName(pod.Name, pod.Namespace))
+	assert.True(t, exists)
+	_, isTime := val.(time.Time)
+	assert.True(t, isTime)
+}
+
+func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
+	testBpfClient := &bpfClient{
+		deletedPods: new(sync.Map),
+	}
+
+	now := time.Now()
+	for i := 0; i <= 500; i++ {
+		age := -10 * time.Minute // old
+		if i > 100 {
+			age = -1 * time.Minute // recent
+		}
+		testBpfClient.deletedPods.Store(fmt.Sprintf("pod-%d-ns", i), now.Add(age))
+	}
+
+	testBpfClient.cleanupDeletedPodsIfNeeded()
+
+	remaining := 0
+	testBpfClient.deletedPods.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	assert.Equal(t, 400, remaining)
 }
