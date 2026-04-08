@@ -23,33 +23,42 @@ func NewMockBpfClient() *bpfClient {
 	}
 }
 
-type MockBpfClient struct{}
+type MockBpfClient struct {
+	CallLog []string
+}
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
 	return nil
 }
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+	m.CallLog = append(m.CallLog, "DeleteBPFProbes")
 	return nil
 }
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
 	return nil
 }
 
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+	m.CallLog = append(m.CallLog, "UpdateClusterPolicyEbpfMaps")
 	return nil
 }
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
+	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
 	return nil
 }
 
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
+	m.CallLog = append(m.CallLog, "IsFirstPodInPodIdentifier")
 	return false
 }
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
+	m.CallLog = append(m.CallLog, "ReAttachEbpfProbes")
 	return nil
 }
 
@@ -58,5 +67,10 @@ func (m *MockBpfClient) GetNetworkPolicyMode() string {
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
+	m.CallLog = append(m.CallLog, "CreatePodStateEbpfEntryIfNotExists")
 	return nil
+}
+
+func (m *MockBpfClient) ClearDeletedPod(podNamespacedName string) {
+	m.CallLog = append(m.CallLog, "ClearDeletedPod")
 }

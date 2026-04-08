@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ var (
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
+	deletedPodsMinAge                                = 5 * time.Minute
 )
 
 func log() logger.Logger {
@@ -114,6 +116,7 @@ type BpfClient interface {
 	ReAttachEbpfProbes() error
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
+	ClearDeletedPod(podNamespacedName string)
 }
 
 type BPFContext struct {
@@ -122,7 +125,7 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-func NewBpfClient(nodeIP string, enablePolicyEventLogs bool, policyEventsLogsScope string, enableCloudWatchLogs bool,
+func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, policyEventsLogsScope string, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 	var policyEventsScopeMap goebpfmaps.BpfMap
@@ -143,6 +146,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs bool, policyEventsLogsSco
 		egressInMemoryMap:               new(sync.Map),
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		deletedPods:                     new(sync.Map),
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -318,6 +322,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs bool, policyEventsLogsSco
 
 	// Initializes prometheus metrics
 	prometheusRegister()
+	ebpfClient.startDeletedPodsCleanupRoutine(ctx)
 
 	log().Info("BPF Client initialization done")
 	return ebpfClient, nil
@@ -373,6 +378,8 @@ type bpfClient struct {
 	clusterPolicyIngressInMemoryMap *sync.Map
 	// This is in-memory map backed by clusterPolicyEgressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	clusterPolicyEgressInMemoryMap *sync.Map
+	// This is in-memory map to track recently deleted pods (key: podNamespacedName, value: time added to map)
+	deletedPods *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -716,6 +723,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
+	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
+		log().Debugf("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
+		return nil
+	}
+
 	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
@@ -865,6 +877,10 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
+func (l *bpfClient) ClearDeletedPod(podNamespacedName string) {
+	l.deletedPods.Delete(podNamespacedName)
+}
+
 func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
 	podIdentifierLock := value.(*sync.Mutex)
@@ -875,6 +891,7 @@ func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier stri
 	isProgFdShared, err := l.isProgFdShared(pod.Name, pod.Namespace)
 	l.deletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
 	l.deletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
+	l.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 
 	if err == nil && !isProgFdShared {
 		err := l.deleteBPFProbes(podIdentifier)
@@ -1315,4 +1332,40 @@ func (l *bpfClient) deletePodFromEgressProgPodCaches(podName string, podNamespac
 			}
 		}
 	}
+}
+
+// startDeletedPodsCleanupRoutine cleans up entries from the deletedPods map that are older than deletedPodsMinAge.
+func (l *bpfClient) startDeletedPodsCleanupRoutine(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(deletedPodsMinAge / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.cleanupDeletedPodsIfNeeded()
+			}
+		}
+	}()
+}
+
+func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
+	now := time.Now()
+	cleaned := 0
+	l.deletedPods.Range(func(key, value any) bool {
+		ts, ok := value.(time.Time)
+		if !ok {
+			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
+			l.deletedPods.Delete(key)
+			cleaned++
+			return true
+		}
+		if now.Sub(ts) > deletedPodsMinAge {
+			l.deletedPods.Delete(key)
+			cleaned++
+		}
+		return true
+	})
+	log().Debugf("deletedPods cleanup complete, removed %d entries", cleaned)
 }
