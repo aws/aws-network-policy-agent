@@ -58,15 +58,22 @@ This feature requires you to provide relevant Cloudwatch permissions to `aws-nod
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "VisualEditor0",
+            "Sid": "CloudWatchLogsWrites",
             "Effect": "Allow",
             "Action": [
-                "logs:DescribeLogGroups",
                 "logs:CreateLogGroup",
                 "logs:CreateLogStream",
                 "logs:PutLogEvents"
             ],
-            "Resource": "*"
+            "Resource": [
+                "arn:aws:logs:<region-code>:<aws-account-id>:log-group:/aws/eks/<cluster-name>/cluster:*"
+            ]
+        },
+        {
+            "Sid": "CloudWatchLogsReads",
+            "Effect": "Allow",
+            "Action": "logs:DescribeLogGroups",
+            "Resource": "arn:aws:logs:<region-code>:<aws-account-id>:log-group::log-stream*"
         }
     ]
 }
