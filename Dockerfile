@@ -32,7 +32,7 @@ COPY . ./
 RUN make vmlinuxh
 
 # Build BPF
-FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
@@ -45,7 +45,7 @@ COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h ./pkg/ebpf/c/
 RUN make build-bpf
 
 # Container base image
-FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-glibc:latest.2
+FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-glibc:latest-al23
 
 WORKDIR /
 COPY --from=builder /workspace/controller .
