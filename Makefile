@@ -4,7 +4,7 @@ IMAGE ?= amazon/aws-network-policy-agent
 VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME ?= $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 GOLANG_VERSION ?= $(shell cat .go-version)
-GOLANG_IMAGE ?= public.ecr.aws/eks-distro-build-tooling/golang:$(GOLANG_VERSION)-gcc-al2
+GOLANG_IMAGE ?= public.ecr.aws/eks-distro-build-tooling/golang:$(GOLANG_VERSION)-gcc-al23
 # TEST_IMAGE is the testing environment container image.
 TEST_IMAGE = aws-network-policy-agent-test
 TEST_IMAGE_NAME = $(TEST_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
