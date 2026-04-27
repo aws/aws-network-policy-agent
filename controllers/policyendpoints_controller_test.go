@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -1266,4 +1267,101 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
+}
+
+// failClosedTestCase is the table row for fail-closed tests of the bpf-map update wrappers.
+type failClosedTestCase struct {
+	name        string   // human-readable test case name
+	ruleMapErr  error    // error injected on the bpf-client rule-map write; nil = succeed
+	podStateErr error    // error injected on the bpf-client pod-state write; nil = succeed
+	wantErr     error    // expected error, matched with errors.Is; nil = no error
+	wantCalls   []string // expected ordered sequence of bpf-client method names
+}
+
+// runFailClosedTable runs each case as a subtest. invoke wires the variant-specific mock field, builds the reconciler, and calls the function under test.
+func runFailClosedTable(t *testing.T, tests []failClosedTestCase, invoke func(mock *ebpf.MockBpfClient, tt failClosedTestCase) error) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &ebpf.MockBpfClient{
+				UpdatePodStateEbpfMapsErr: tt.podStateErr,
+			}
+			err := invoke(mock, tt)
+
+			if tt.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+			assert.Equal(t, tt.wantCalls, mock.CallLog)
+		})
+	}
+}
+
+// TestUpdateeBPFMaps_FailClosed verifies that updateeBPFMaps surfaces
+// errors from the bpf client and short-circuits the pod-state write when
+// the rule-map write fails. wantCalls asserts both the set and the order
+// of bpf-client calls.
+func TestUpdateeBPFMaps_FailClosed(t *testing.T) {
+	ruleMapErr := errors.New("rule map write failed")
+	podStateErr := errors.New("pod state write failed")
+
+	tests := []failClosedTestCase{
+		{
+			name:       "rule-map failure short-circuits before pod-state",
+			ruleMapErr: ruleMapErr,
+			wantErr:    ruleMapErr,
+			wantCalls:  []string{"UpdateEbpfMaps"},
+		},
+		{
+			name:        "pod-state failure surfaces",
+			podStateErr: podStateErr,
+			wantErr:     podStateErr,
+			wantCalls:   []string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps"},
+		},
+		{
+			name:      "happy path returns nil and runs the full sequence",
+			wantCalls: []string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+		},
+	}
+
+	runFailClosedTable(t, tests, func(mock *ebpf.MockBpfClient, tt failClosedTestCase) error {
+		mock.UpdateEbpfMapsErr = tt.ruleMapErr
+		r := &PolicyEndpointsReconciler{ebpfClient: mock}
+		return r.updateeBPFMaps("test-pod-id", nil, nil, ebpf.POLICIES_APPLIED)
+	})
+}
+
+// TestUpdateClusterPolicyBPFMaps_FailClosed mirrors TestUpdateeBPFMaps_FailClosed
+// for the ClusterPolicyEndpointsReconciler path: a cluster-policy rule-map
+// failure must short-circuit before pod-state runs, and either failure must
+// surface to the caller.
+func TestUpdateClusterPolicyBPFMaps_FailClosed(t *testing.T) {
+	ruleMapErr := errors.New("cluster rule map write failed")
+	podStateErr := errors.New("cluster pod state write failed")
+
+	tests := []failClosedTestCase{
+		{
+			name:       "cluster rule-map failure short-circuits before pod-state",
+			ruleMapErr: ruleMapErr,
+			wantErr:    ruleMapErr,
+			wantCalls:  []string{"UpdateClusterPolicyEbpfMaps"},
+		},
+		{
+			name:        "cluster pod-state failure surfaces",
+			podStateErr: podStateErr,
+			wantErr:     podStateErr,
+			wantCalls:   []string{"UpdateClusterPolicyEbpfMaps", "UpdatePodStateEbpfMaps"},
+		},
+		{
+			name:      "happy path returns nil and runs the full sequence",
+			wantCalls: []string{"UpdateClusterPolicyEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+		},
+	}
+
+	runFailClosedTable(t, tests, func(mock *ebpf.MockBpfClient, tt failClosedTestCase) error {
+		mock.UpdateClusterPolicyEbpfMapsErr = tt.ruleMapErr
+		r := &ClusterPolicyEndpointsReconciler{ebpfClient: mock}
+		return r.updateClusterPolicyBPFMaps("test-pod-id", nil, nil)
+	})
 }

@@ -25,6 +25,12 @@ func NewMockBpfClient() *bpfClient {
 
 type MockBpfClient struct {
 	CallLog []string
+
+	// Injected errors for failure-path tests. Zero values preserve the
+	// original success-path behavior, so existing tests continue to pass.
+	UpdateEbpfMapsErr              error
+	UpdateClusterPolicyEbpfMapsErr error
+	UpdatePodStateEbpfMapsErr      error
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -39,17 +45,17 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
-	return nil
+	return m.UpdateEbpfMapsErr
 }
 
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateClusterPolicyEbpfMaps")
-	return nil
+	return m.UpdateClusterPolicyEbpfMapsErr
 }
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
-	return nil
+	return m.UpdatePodStateEbpfMapsErr
 }
 
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
