@@ -150,7 +150,11 @@ func (t Tier) Index() int {
 }
 
 func GetPodNamespacedName(podName, podNamespace string) string {
-	return podName + podNamespace
+	// "_" is forbidden in DNS-1123 pod names and namespaces, so this separator
+	// makes the key injective on (podName, podNamespace). "_" is also pin-path
+	// safe (no filesystem meaning), matching the convention used in
+	// GetPodIdentifier where "." is substituted with "_" for the same reason.
+	return podName + "_" + podNamespace
 }
 
 func GetPodIdentifier(podName, podNamespace string) string {
