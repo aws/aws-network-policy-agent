@@ -20,8 +20,7 @@ jobs:
     if: |
       github.repository == 'aws/aws-network-policy-agent' &&
       github.event.issue.pull_request != null &&
-      startsWith(github.event.comment.body, '/test cyclonus ') &&
-      contains(fromJSON('["OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
+      startsWith(github.event.comment.body, '/test cyclonus ')
     runs-on: ubuntu-latest
     outputs:
       pr-sha: ${{ steps.validate-sha.outputs.sha }}
