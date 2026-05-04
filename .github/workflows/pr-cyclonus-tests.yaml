@@ -20,25 +20,66 @@ jobs:
     if: |
       github.repository == 'aws/aws-network-policy-agent' &&
       github.event.issue.pull_request != null &&
-      startsWith(github.event.comment.body, '/test cyclonus') &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      startsWith(github.event.comment.body, '/test cyclonus ')
     runs-on: ubuntu-latest
     outputs:
-      pr-sha: ${{ steps.pr-info.outputs.sha }}
+      pr-sha: ${{ steps.validate-sha.outputs.sha }}
     steps:
-      - name: Get PR SHA and post acknowledgement
-        id: pr-info
+      - name: Validate SHA from comment
+        id: validate-sha
         uses: actions/github-script@v7
         with:
           script: |
+            // Check triggering user has write+ permission on the repo
+            const { data: permData } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo,
+              username: context.actor
+            });
+            if (!['admin', 'write'].includes(permData.permission)) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: `❌ @${context.actor} does not have write permission on this repository.`
+              });
+              core.setFailed('Insufficient permissions');
+              return;
+            }
+
+            const comment = context.payload.comment.body.trim();
+            const shaMatch = comment.match(/^\/test cyclonus ([a-f0-9]{40})$/);
+
+            if (!shaMatch) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: '❌ Invalid format. Use: `/test cyclonus <full-40-char-sha>`'
+              });
+              core.setFailed('Invalid SHA format');
+              return;
+            }
+
+            const requestedSHA = shaMatch[1];
+
             const pr = (await github.rest.pulls.get({
-              ...context.repo, pull_number: context.issue.number
+              ...context.repo,
+              pull_number: context.issue.number
             })).data;
 
-            core.setOutput('sha', pr.head.sha);
+            if (pr.head.sha !== requestedSHA) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: `❌ SHA mismatch!\n- Provided: \`${requestedSHA}\`\n- Current PR head: \`${pr.head.sha}\`\n\nPlease verify the PR has not been updated since review.`
+              });
+              core.setFailed('SHA mismatch - possible TOCTOU');
+              return;
+            }
+
+            core.setOutput('sha', requestedSHA);
             await github.rest.issues.createComment({
-              ...context.repo, issue_number: context.issue.number,
-              body: `Cyclonus tests triggered by @${context.actor} for \`${pr.head.sha}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `✅ Cyclonus tests triggered by @${context.actor} for \`${requestedSHA}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
             });
 
   create-cluster:
