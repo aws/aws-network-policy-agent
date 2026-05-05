@@ -48,7 +48,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -139,18 +138,32 @@ func main() {
 
 	//+kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Errorf("unable to set up health check %v", err)
+	// Liveness probe: gRPC server responsiveness.
+	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+		log.Errorf("unable to set up gRPC socket health check %v", err)
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Errorf("unable to set up ready check %v", err)
+
+	// Readiness probe: gRPC server responsiveness and BPF map pins (when
+	// network policy is enabled).
+	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+		log.Errorf("unable to set up grpc-socket readiness check %v", err)
 		os.Exit(1)
+	}
+
+	if ctrlConfig.EnableNetworkPolicy {
+		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH}
+		if ctrlConfig.EnablePolicyEventLogs {
+			readyzPaths = append(readyzPaths, ebpf.POLICY_EVENTS_MAP_PIN_PATH)
+		}
+		if err := mgr.AddReadyzCheck("bpf-maps", ebpf.NewGlobalMapsReadinessCheck(readyzPaths)); err != nil {
+			log.Errorf("unable to set up bpf-maps readiness check %v", err)
+			os.Exit(1)
+		}
 	}
 
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
-	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
 	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath)
 	if err != nil {
 		log.Errorf("Failed to set up gRPC Handler %v", err)
