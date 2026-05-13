@@ -20,16 +20,22 @@ COPY . ./
 
 RUN make build-linux
 
-# Vmlinux
+# Vmlinux - set GEN_VMLINUX=true to generate kernel header dynamically
+# By default, uses the checked-in vmlinux.h from the repo
+ARG GEN_VMLINUX=false
+
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as vmlinuxbuilder
+ARG GEN_VMLINUX
 WORKDIR /vmlinuxbuilder
-RUN yum update -y && \
+RUN if [ "$GEN_VMLINUX" = "true" ]; then \
+    yum update -y && \
     yum install -y iproute procps-ng && \
     yum install -y llvm clang make gcc && \
     yum install -y kernel-devel elfutils-libelf-devel zlib-devel libbpf-devel bpftool && \
-    yum clean all
+    yum clean all; \
+    fi
 COPY . ./
-RUN make vmlinuxh
+RUN if [ "$GEN_VMLINUX" = "true" ]; then make vmlinuxh; fi
 
 # Build BPF
 FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
