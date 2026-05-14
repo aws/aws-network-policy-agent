@@ -79,9 +79,9 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		assert.Nil(t, err)
 		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
 		assert.True(t, ok)
-		assert.True(t, lo.Contains(val.([]string), "deployment1rs-my-namespace"))
+		assert.True(t, lo.Contains(val.([]string), "deployment1rs@my-namespace"))
 
-		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs-my-namespace")
+		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
 
@@ -125,9 +125,9 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		assert.Nil(t, err)
 		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
 		assert.True(t, ok)
-		assert.True(t, lo.Contains(val.([]string), "deployment1rs-my-namespace"))
+		assert.True(t, lo.Contains(val.([]string), "deployment1rs@my-namespace"))
 
-		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs-my-namespace")
+		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
 

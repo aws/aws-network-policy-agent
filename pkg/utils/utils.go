@@ -169,13 +169,34 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + "_" + podNamespace
 }
 
+// Separator is "@" because it is illegal in DNS-1123 pod names and namespaces,
+// making the identifier injective on (podName-prefix, podNamespace). "@" also
+// keeps pin filenames parseable by aws-ebpf-sdk-go, which splits on the first
+// "_" to find the suffix boundary; using "_" here would shadow that split.
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
 		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
-	if strings.Contains(string(podName), "-") {
+	if strings.Contains(podName, "-") {
+		tmpName := strings.Split(podName, "-")
+		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
+	}
+	return podIdentifierPrefix + "@" + podNamespace
+}
+
+// LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm
+// with the "-" separator. Used only by the legacy bpffs pin migration to
+// compute what a previously-running agent would have produced for a given
+// (podName, podNamespace) pair.
+// TODO: remove after the migration window closes.
+func LegacyGetPodIdentifier(podName, podNamespace string) string {
+	if strings.Contains(podName, ".") {
+		podName = strings.Replace(podName, ".", "_", -1)
+	}
+	podIdentifierPrefix := podName
+	if strings.Contains(podName, "-") {
 		tmpName := strings.Split(podName, "-")
 		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
 	}

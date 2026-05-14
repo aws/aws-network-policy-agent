@@ -409,7 +409,7 @@ func TestGetPodIdentifier(t *testing.T) {
 				podName:      "hello-udp-748dc8d996-fb8b2",
 				podNamespace: "default",
 			},
-			want: "hello-udp-748dc8d996-default",
+			want: "hello-udp-748dc8d996@default",
 		},
 	}
 	for _, tt := range tests {
@@ -417,6 +417,24 @@ func TestGetPodIdentifier(t *testing.T) {
 			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// Distinct (podName, podNamespace) pairs that aliased to the same podIdentifier
+// under the previous "-" separator must produce different identifiers now.
+func TestGetPodIdentifier_NoCrossNamespaceCollision(t *testing.T) {
+	pairs := [][2][2]string{
+		{{"deny-me-x", "ns1"}, {"deny", "me-ns1"}},
+		{{"a-b-c", "d"}, {"a", "b-c-d"}},
+		{{"deploy-app-x", "ns1"}, {"deploy", "app-x-ns1"}},
+		{{"deploy-app-abc-xyz", "kube-system"}, {"deploy", "app-abc-xyz-kube-system"}},
+		{{"my.pod-x", "ns"}, {"my_pod", "x-ns"}},
+		{{"my.pod-x", "ns"}, {"my-pod-x", "ns"}},
+	}
+	for _, p := range pairs {
+		left := GetPodIdentifier(p[0][0], p[0][1])
+		right := GetPodIdentifier(p[1][0], p[1][1])
+		assert.NotEqual(t, left, right, "distinct pods must not collide: %v vs %v", p[0], p[1])
 	}
 }
 
@@ -437,7 +455,7 @@ func TestGetDotPodIdentifier(t *testing.T) {
 				podName:      "my.pod.name-udp-748dc8d996-fb8b2",
 				podNamespace: "default",
 			},
-			want: "my_pod_name-udp-748dc8d996-default",
+			want: "my_pod_name-udp-748dc8d996@default",
 		},
 	}
 	for _, tt := range tests {
