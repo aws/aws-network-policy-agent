@@ -32,6 +32,11 @@ ENVTEST_K8S_VERSION = 1.25.0
 # Skip installing the latest managed addon while running cyclonus test
 SKIP_ADDON_INSTALLATION ?= "false"
 
+# Set GEN_VMLINUX=true to regenerate vmlinux.h from the host's running kernel
+# during docker build (requires a host with /sys/kernel/btf/vmlinux). Default
+# uses the checked-in pkg/ebpf/c/vmlinux.h.
+GEN_VMLINUX ?= false
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -125,6 +130,13 @@ EBPF_OBJ_SRC_TC = ./pkg/ebpf/c/tc.bpf.c
 
 vmlinuxh:
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(abspath ./$(EBPF_DIR))/vmlinux.h
+	cd $(abspath ./$(EBPF_DIR)) && sha256sum vmlinux.h > vmlinux.h.sha256
+
+# Verify the checked-in vmlinux.h matches its committed SHA256 sidecar.
+# CI runs this so any silent edit to vmlinux.h fails the PR unless the sidecar
+# is regenerated with `make vmlinuxh` (or `make vmlinuxh-sums`).
+verify-vmlinux:
+	cd $(abspath ./$(EBPF_DIR)) && sha256sum -c vmlinux.h.sha256
 
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/g; s/aarch64/arm64/g')
 
@@ -159,7 +171,10 @@ build-bpf: ## Build BPF.
 #docker-build: test ## Build docker image with the manager.
 #	docker build -t ${IMAGE_NAME} .
 docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
-	docker build -t ${IMAGE_NAME} --build-arg golang_image="$(GOLANG_IMAGE)" .
+	docker build -t ${IMAGE_NAME} \
+		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg GEN_VMLINUX=$(GEN_VMLINUX) \
+		.
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -200,6 +215,7 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 		--cache-from=type=gha \
 		--cache-to=type=gha,mode=max \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg GEN_VMLINUX=$(GEN_VMLINUX) \
 		.
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
@@ -215,6 +231,7 @@ multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker imag
 		--cache-to=type=gha,mode=max \
 		-t $(IMAGE):$(VERSION) \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg GEN_VMLINUX=$(GEN_VMLINUX) \
 		--push \
 		.
 
