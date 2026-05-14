@@ -385,6 +385,41 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
 }
 
+// migrateLegacyPodIdentifierPins renames the program and per-pod map pin
+// files on bpffs from the legacy pod-identifier format (separator "-") to
+// the new format (separator "_"). Missing map pins are skipped (e.g. global
+// maps that don't follow the per-pod path scheme). Individual map rename
+// failures are logged but do not abort the program-pin migration.
+// TODO: remove after the migration window closes.
+func migrateLegacyPodIdentifierPins(
+	oldProgPinPath, oldIdentifier, newIdentifier, direction string,
+	mapNames []string,
+	programsDir, mapsDir string,
+) (string, error) {
+	progName := utils.TC_INGRESS_PROG
+	if direction == "egress" {
+		progName = utils.TC_EGRESS_PROG
+	}
+	newProgPinPath := programsDir + newIdentifier + "_" + progName
+
+	if err := os.Rename(oldProgPinPath, newProgPinPath); err != nil {
+		return oldProgPinPath, fmt.Errorf("rename program pin %q -> %q: %w", oldProgPinPath, newProgPinPath, err)
+	}
+
+	for _, mapName := range mapNames {
+		oldMapPath := mapsDir + oldIdentifier + "_" + mapName
+		newMapPath := mapsDir + newIdentifier + "_" + mapName
+		if _, err := os.Stat(oldMapPath); err != nil {
+			continue
+		}
+		if err := os.Rename(oldMapPath, newMapPath); err != nil {
+			log().Warnf("migration: rename map pin %q -> %q: %v", oldMapPath, newMapPath, err)
+		}
+	}
+
+	return newProgPinPath, nil
+}
+
 func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
 	updateEgressProbe, updateEventsProbe bool) (bool, bool, int, map[string]string, map[string]string, error) {
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
@@ -430,6 +465,20 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		log().Infof("Number of probes/maps recovered - count: %d", len(bpfState))
 		for pinPath, bpfEntry := range bpfState {
 			podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+			if newPodIdentifier := utils.TranslateLegacyPodIdentifier(podIdentifier); newPodIdentifier != podIdentifier {
+				mapNames := make([]string, 0, len(bpfEntry.Maps))
+				for n := range bpfEntry.Maps {
+					mapNames = append(mapNames, n)
+				}
+				newPinPath, err := migrateLegacyPodIdentifierPins(pinPath, podIdentifier, newPodIdentifier, direction, mapNames, utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY, utils.BPF_MAPS_PIN_PATH_DIRECTORY)
+				if err != nil {
+					log().Errorf("Migration failed for %s, keeping legacy identifier: %v", podIdentifier, err)
+				} else {
+					log().Infof("Migrated pin paths %s -> %s", podIdentifier, newPodIdentifier)
+					pinPath = newPinPath
+					podIdentifier = newPodIdentifier
+				}
+			}
 			log().Infof("Recovered program Identifier: Pin Path: %s PodIdentifier: %s direction: %s", pinPath, podIdentifier, direction)
 			var peBPFContext BPFContext
 			value, ok := policyEndpointeBPFContext.Load(podIdentifier)

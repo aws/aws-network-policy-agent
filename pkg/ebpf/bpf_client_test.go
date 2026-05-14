@@ -1116,3 +1116,65 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 	})
 	assert.Equal(t, 400, remaining)
 }
+
+// TestMigrateLegacyPodIdentifierPins verifies the one-shot bpffs rename of
+// program and per-pod map pin files from the legacy "-" separator to the new
+// "_" separator. Uses temp dirs in place of /sys/fs/bpf so the test is
+// runnable without root or bpffs.
+func TestMigrateLegacyPodIdentifierPins(t *testing.T) {
+	progsDir := t.TempDir() + "/"
+	mapsDir := t.TempDir() + "/"
+
+	const oldID = "hello-udp-748dc8d996-default"
+	const newID = "hello-udp-748dc8d996_default"
+	const direction = "ingress"
+
+	oldProgPath := progsDir + oldID + "_" + utils.TC_INGRESS_PROG
+	if err := os.WriteFile(oldProgPath, []byte("p"), 0644); err != nil {
+		t.Fatalf("seed program pin: %v", err)
+	}
+	mapNames := []string{utils.TC_INGRESS_MAP, utils.TC_CLUSTER_POLICY_INGRESS_MAP, utils.TC_INGRESS_POD_STATE_MAP}
+	for _, name := range mapNames {
+		if err := os.WriteFile(mapsDir+oldID+"_"+name, []byte("m"), 0644); err != nil {
+			t.Fatalf("seed map pin %s: %v", name, err)
+		}
+	}
+	// A map name with no on-disk pin (simulates a global map present in the
+	// recovered bpfEntry.Maps but not pinned at the per-pod path).
+	missingMap := "absent_map"
+
+	newProgPath, err := migrateLegacyPodIdentifierPins(
+		oldProgPath, oldID, newID, direction,
+		append(mapNames, missingMap),
+		progsDir, mapsDir,
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, progsDir+newID+"_"+utils.TC_INGRESS_PROG, newProgPath)
+
+	_, err = os.Stat(oldProgPath)
+	assert.True(t, os.IsNotExist(err), "old program pin must be gone")
+	_, err = os.Stat(newProgPath)
+	assert.NoError(t, err, "new program pin must exist")
+
+	for _, name := range mapNames {
+		_, err = os.Stat(mapsDir + oldID + "_" + name)
+		assert.True(t, os.IsNotExist(err), "old map pin %s must be gone", name)
+		_, err = os.Stat(mapsDir + newID + "_" + name)
+		assert.NoError(t, err, "new map pin %s must exist", name)
+	}
+}
+
+// TestMigrateLegacyPodIdentifierPins_MissingProgramPin verifies the helper
+// returns an error and leaves filesystem unchanged when the program pin file
+// is absent, so the caller can decide to keep the legacy identifier.
+func TestMigrateLegacyPodIdentifierPins_MissingProgramPin(t *testing.T) {
+	progsDir := t.TempDir() + "/"
+	mapsDir := t.TempDir() + "/"
+
+	oldProgPath := progsDir + "does-not-exist-default_" + utils.TC_INGRESS_PROG
+	_, err := migrateLegacyPodIdentifierPins(
+		oldProgPath, "does-not-exist-default", "does-not-exist_default", "ingress",
+		nil, progsDir, mapsDir,
+	)
+	assert.Error(t, err)
+}

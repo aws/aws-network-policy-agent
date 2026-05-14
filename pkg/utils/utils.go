@@ -153,17 +153,33 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + podNamespace
 }
 
+// Separator is "_" because it is illegal in DNS-1123 pod names and namespaces,
+// making the identifier injective on (podName-prefix, podNamespace).
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
 		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
 	}
 	podIdentifierPrefix := podName
-	if strings.Contains(string(podName), "-") {
+	if strings.Contains(podName, "-") {
 		tmpName := strings.Split(podName, "-")
 		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
 	}
-	return podIdentifierPrefix + "-" + podNamespace
+	return podIdentifierPrefix + "_" + podNamespace
+}
+
+// TranslateLegacyPodIdentifier converts a pre-fix pod identifier (separator
+// "-") to the post-fix format (separator "_"). A legacy identifier has its
+// last "-" appearing after its last "_"; the new format always has "_" as
+// the final separator. Returns the input unchanged when already new format.
+// TODO: remove after the migration window closes.
+func TranslateLegacyPodIdentifier(id string) string {
+	lastDash := strings.LastIndex(id, "-")
+	lastUnderscore := strings.LastIndex(id, "_")
+	if lastDash <= lastUnderscore {
+		return id
+	}
+	return id[:lastDash] + "_" + id[lastDash+1:]
 }
 
 func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
