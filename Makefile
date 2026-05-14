@@ -130,6 +130,13 @@ EBPF_OBJ_SRC_TC = ./pkg/ebpf/c/tc.bpf.c
 
 vmlinuxh:
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(abspath ./$(EBPF_DIR))/vmlinux.h
+	cd $(abspath ./$(EBPF_DIR)) && sha256sum vmlinux.h > vmlinux.h.sha256
+
+# Verify the checked-in vmlinux.h matches its committed SHA256 sidecar.
+# CI runs this so any silent edit to vmlinux.h fails the PR unless the sidecar
+# is regenerated with `make vmlinuxh` (or `make vmlinuxh-sums`).
+verify-vmlinux:
+	cd $(abspath ./$(EBPF_DIR)) && sha256sum -c vmlinux.h.sha256
 
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/g; s/aarch64/arm64/g')
 

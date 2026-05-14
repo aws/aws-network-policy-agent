@@ -40,6 +40,8 @@ jobs:
         run: |
           make check-format
           make vet
+      - name: Verify vmlinux.h checksum
+        run: make verify-vmlinux
       - name: Build
         run: make build-linux
       - name: Unit test
