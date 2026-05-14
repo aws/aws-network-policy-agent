@@ -344,6 +344,7 @@ int handle_ingress(struct __sk_buff *skb)
 		struct tcphdr *l4_tcp_hdr = data + sizeof(struct iphdr);
 		struct udphdr *l4_udp_hdr = data + sizeof(struct iphdr);
 		struct sctphdr *l4_sctp_hdr = data + sizeof(struct iphdr);
+		struct icmphdr *icmp_hdr = data + sizeof(struct iphdr);
 
 		if (data + sizeof(*ip) > data_end) {
 			return BPF_OK;
@@ -373,6 +374,12 @@ int handle_ingress(struct __sk_buff *skb)
 				}
 				l4_src_port = (((((unsigned short)(l4_sctp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->source) & 0xFF00) >> 8));
 				l4_dst_port = (((((unsigned short)(l4_sctp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->dest) & 0xFF00) >> 8));
+				break;
+			case IPPROTO_ICMP:
+				// Allow ICMP destination unreachable (fragmentation needed) packets
+				if (icmp_hdr->type == 3 && icmp_hdr->code == 4) {
+					return BPF_OK;
+				}
 				break;
 		}
 
