@@ -378,13 +378,47 @@ func TestGetPodIdentifier(t *testing.T) {
 				podName:      "hello-udp-748dc8d996-fb8b2",
 				podNamespace: "default",
 			},
-			want: "hello-udp-748dc8d996-default",
+			want: "hello-udp-748dc8d996_default",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// Distinct (podName, podNamespace) pairs that aliased to the same podIdentifier
+// under the previous "-" separator must produce different identifiers now.
+func TestGetPodIdentifier_NoCrossNamespaceCollision(t *testing.T) {
+	pairs := [][2][2]string{
+		{{"deny-me-x", "ns1"}, {"deny", "me-ns1"}},
+		{{"a-b-c", "d"}, {"a", "b-c-d"}},
+	}
+	for _, p := range pairs {
+		left := GetPodIdentifier(p[0][0], p[0][1])
+		right := GetPodIdentifier(p[1][0], p[1][1])
+		assert.NotEqual(t, left, right, "distinct pods must not collide: %v vs %v", p[0], p[1])
+	}
+}
+
+func TestTranslateLegacyPodIdentifier(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"legacy simple", "hello-udp-748dc8d996-default", "hello-udp-748dc8d996_default"},
+		{"legacy with dot-replaced underscore in prefix", "my_pod-udp-748dc8d996-default", "my_pod-udp-748dc8d996_default"},
+		{"new format unchanged", "hello-udp-748dc8d996_default", "hello-udp-748dc8d996_default"},
+		{"new format with underscore in prefix unchanged", "my_pod-udp-748dc8d996_default", "my_pod-udp-748dc8d996_default"},
+		{"no separators", "foo", "foo"},
+		{"only underscores", "foo_bar", "foo_bar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, TranslateLegacyPodIdentifier(tt.in))
 		})
 	}
 }
@@ -406,7 +440,7 @@ func TestGetDotPodIdentifier(t *testing.T) {
 				podName:      "my.pod.name-udp-748dc8d996-fb8b2",
 				podNamespace: "default",
 			},
-			want: "my_pod_name-udp-748dc8d996-default",
+			want: "my_pod_name-udp-748dc8d996_default",
 		},
 	}
 	for _, tt := range tests {
