@@ -15,9 +15,11 @@ import (
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 var (
@@ -230,14 +232,46 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 // short bounded retry budget eliminates the transient failure without
 // extending the CNI ADD path materially for the happy case.
 //
-// Defaults: ~50 ms, 100 ms, 200 ms, 400 ms, 500 ms (capped), 500 ms, 500 ms, 500 ms
-// with +/-10% jitter -> ~2.65s worst case across 8 attempts.
+// Defaults: ~50 ms, 100 ms, 200 ms, 400 ms, 800 ms, 1 s (capped), 1 s, 1 s
+// with +/-10% jitter -> ~5 s worst case across 8 attempts. This is well under
+// kubelet's pod-sandbox retry interval (~10 s) and gives plenty of headroom
+// for the high-concurrency case (e.g. Karpenter scale-up bursts).
 var GetHostVethNameBackoff = wait.Backoff{
 	Duration: 50 * time.Millisecond,
 	Factor:   2.0,
 	Jitter:   0.1,
 	Steps:    8,
-	Cap:      500 * time.Millisecond,
+	Cap:      1 * time.Second,
+}
+
+var (
+	// vethLookupRetries counts terminal outcomes of GetHostVethName when the
+	// retry path was exercised (i.e. attempt > 1, or the call exhausted the
+	// retry budget). The single-attempt happy path is intentionally not
+	// counted; use vethLookupAttempts for the full distribution.
+	vethLookupRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_veth_lookup_retries_total",
+			Help: "Terminal outcomes of host-veth lookups that exercised the retry path. " +
+				"result=success: link resolved on a retry; result=exhausted: retry budget exhausted with LinkNotFoundError.",
+		},
+		[]string{"result"},
+	)
+
+	// vethLookupAttempts is observed on every GetHostVethName call (success
+	// or failure) and records the number of probe attempts taken. Buckets
+	// align with the default Steps in GetHostVethNameBackoff.
+	vethLookupAttempts = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "awsnodeagent_veth_lookup_attempts",
+			Help:    "Number of probe attempts taken by GetHostVethName per call.",
+			Buckets: prometheus.LinearBuckets(1, 1, 8),
+		},
+	)
+)
+
+func init() {
+	metrics.Registry.MustRegister(vethLookupRetries, vethLookupAttempts)
 }
 
 // isLinkNotFoundError reports whether err (or anything wrapped by it) is a
@@ -268,7 +302,12 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		interfaceName string
 		lastErr       error
 		attempt       int
+		exhausted     bool
 	)
+
+	defer func() {
+		vethLookupAttempts.Observe(float64(attempt))
+	}()
 
 	backoff := GetHostVethNameBackoff
 	// wait.ExponentialBackoff treats Steps as the total number of attempts
@@ -301,13 +340,20 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		if !allNotFound {
 			return false, attemptErr
 		}
+		exhausted = true
 		log().Debugf("Host veth not yet visible for pod %s/%s (hash %s), attempt %d/%d",
 			podNamespace, podName, hashSuffix, attempt, backoff.Steps)
 		return false, nil
 	})
 
 	if err == nil {
+		if attempt > 1 {
+			vethLookupRetries.WithLabelValues("success").Inc()
+		}
 		return interfaceName, nil
+	}
+	if exhausted {
+		vethLookupRetries.WithLabelValues("exhausted").Inc()
 	}
 	// err is either wait.ErrWaitTimeout (retry budget exhausted) or the
 	// non-retryable error we returned from the condition. In both cases we
