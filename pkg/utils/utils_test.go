@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
@@ -794,6 +795,8 @@ func TestGetHostVethName_RetriesOnTransientLinkNotFound(t *testing.T) {
 		return errors.Is(err, sentinelLinkNotFound)
 	}
 
+	successBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("success"))
+
 	var calls int32
 	// Return Link-not-found for the first 4 calls (covers both prefixes on
 	// attempts 1 and 2), then succeed for the "eni" prefix.
@@ -810,6 +813,8 @@ func TestGetHostVethName_RetriesOnTransientLinkNotFound(t *testing.T) {
 	assert.Equal(t, "eni9cfdfc6963c", got)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(5),
 		"should have probed at least 5 times across multiple attempts")
+	assert.Equal(t, successBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("success")),
+		"retries_total{result=success} should increment when success follows a retry")
 }
 
 // TestGetHostVethName_ExhaustsRetries verifies the bounded retry budget:
@@ -830,6 +835,8 @@ func TestGetHostVethName_ExhaustsRetries(t *testing.T) {
 		return errors.Is(err, sentinelLinkNotFound)
 	}
 
+	exhaustedBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted"))
+
 	var calls int32
 	getLinkByNameFunc = func(name string) (netlink.Link, error) {
 		atomic.AddInt32(&calls, 1)
@@ -842,6 +849,8 @@ func TestGetHostVethName_ExhaustsRetries(t *testing.T) {
 	// 3 attempts x 2 prefixes = 6 netlink lookups.
 	assert.Equal(t, int32(6), atomic.LoadInt32(&calls))
 	assert.Contains(t, err.Error(), "failed to find link")
+	assert.Equal(t, exhaustedBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")),
+		"retries_total{result=exhausted} should increment when retries are exhausted")
 }
 
 // TestGetHostVethName_NoRetryOnNonNotFound verifies that errors other than
