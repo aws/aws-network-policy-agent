@@ -1,14 +1,36 @@
 package utils
 
 import (
+	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+// sentinelLinkNotFound is a test-only error used by the GetHostVethName retry
+// tests to mimic netlink.LinkNotFoundError. We do not construct the netlink
+// type directly because its embedded error field is unexported.
+var sentinelLinkNotFound = errors.New("Link not found")
+
+// fastBackoff returns a Backoff with the given number of steps and zero delay
+// so retry tests do not actually sleep.
+func fastBackoff(steps int) wait.Backoff {
+	return wait.Backoff{
+		Duration: time.Nanosecond,
+		Factor:   1.0,
+		Jitter:   0,
+		Steps:    steps,
+		Cap:      time.Nanosecond,
+	}
+}
 
 func TestComputeTrieKey(t *testing.T) {
 
@@ -682,8 +704,13 @@ func TestGetHostVethName(t *testing.T) {
 		mockNetlink     bool
 	}
 
-	originalFunc := getLinkByNameFunc                   // Save original function
-	defer func() { getLinkByNameFunc = originalFunc }() // Restore after test
+	originalFunc := getLinkByNameFunc
+	originalBackoff := GetHostVethNameBackoff
+	defer func() {
+		getLinkByNameFunc = originalFunc
+		GetHostVethNameBackoff = originalBackoff
+	}()
+	GetHostVethNameBackoff = fastBackoff(1)
 
 	tests := []struct {
 		name    string
@@ -730,6 +757,10 @@ func TestGetHostVethName(t *testing.T) {
 			getLinkByNameFunc = func(name string) (netlink.Link, error) {
 				return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
 			}
+		} else {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				return nil, errors.New("Link not found")
+			}
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -742,6 +773,115 @@ func TestGetHostVethName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetHostVethName_RetriesOnTransientLinkNotFound verifies that
+// GetHostVethName transparently retries when netlink first reports
+// LinkNotFoundError and the interface becomes visible on a later attempt.
+// This is the failure mode reported in
+// https://github.com/aws/aws-network-policy-agent/issues/569 .
+func TestGetHostVethName_RetriesOnTransientLinkNotFound(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalMatcher := isLinkNotFoundError
+	originalBackoff := GetHostVethNameBackoff
+	defer func() {
+		getLinkByNameFunc = originalFunc
+		isLinkNotFoundError = originalMatcher
+		GetHostVethNameBackoff = originalBackoff
+	}()
+
+	GetHostVethNameBackoff = fastBackoff(5)
+	isLinkNotFoundError = func(err error) bool {
+		return errors.Is(err, sentinelLinkNotFound)
+	}
+
+	successBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("success"))
+
+	var calls int32
+	// Return Link-not-found for the first 4 calls (covers both prefixes on
+	// attempts 1 and 2), then succeed for the "eni" prefix.
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		c := atomic.AddInt32(&calls, 1)
+		if c <= 4 {
+			return nil, sentinelLinkNotFound
+		}
+		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.NoError(t, err)
+	assert.Equal(t, "eni9cfdfc6963c", got)
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(5),
+		"should have probed at least 5 times across multiple attempts")
+	assert.Equal(t, successBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("success")),
+		"retries_total{result=success} should increment when success follows a retry")
+}
+
+// TestGetHostVethName_ExhaustsRetries verifies the bounded retry budget:
+// after the configured Steps, GetHostVethName returns the accumulated
+// multierror.
+func TestGetHostVethName_ExhaustsRetries(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalMatcher := isLinkNotFoundError
+	originalBackoff := GetHostVethNameBackoff
+	defer func() {
+		getLinkByNameFunc = originalFunc
+		isLinkNotFoundError = originalMatcher
+		GetHostVethNameBackoff = originalBackoff
+	}()
+
+	GetHostVethNameBackoff = fastBackoff(3)
+	isLinkNotFoundError = func(err error) bool {
+		return errors.Is(err, sentinelLinkNotFound)
+	}
+
+	exhaustedBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted"))
+
+	var calls int32
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, sentinelLinkNotFound
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.Empty(t, got)
+	assert.Error(t, err)
+	// 3 attempts x 2 prefixes = 6 netlink lookups.
+	assert.Equal(t, int32(6), atomic.LoadInt32(&calls))
+	assert.Contains(t, err.Error(), "failed to find link")
+	assert.Equal(t, exhaustedBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")),
+		"retries_total{result=exhausted} should increment when retries are exhausted")
+}
+
+// TestGetHostVethName_NoRetryOnNonNotFound verifies that errors other than
+// LinkNotFoundError short-circuit (no retry). Permission errors, netlink
+// socket failures, etc. are not transient and retrying just adds latency.
+func TestGetHostVethName_NoRetryOnNonNotFound(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalMatcher := isLinkNotFoundError
+	originalBackoff := GetHostVethNameBackoff
+	defer func() {
+		getLinkByNameFunc = originalFunc
+		isLinkNotFoundError = originalMatcher
+		GetHostVethNameBackoff = originalBackoff
+	}()
+
+	GetHostVethNameBackoff = fastBackoff(5)
+	isLinkNotFoundError = func(err error) bool {
+		return errors.Is(err, sentinelLinkNotFound)
+	}
+
+	var calls int32
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New("permission denied")
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.Empty(t, got)
+	assert.Error(t, err)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
+		"should probe each prefix once then bail without retry on non-retryable error")
 }
 
 func TestIsFileExistsError(t *testing.T) {

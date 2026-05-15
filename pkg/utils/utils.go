@@ -4,17 +4,22 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 var (
@@ -219,28 +224,146 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
-	var interfaceName string
-	var errors error
+// GetHostVethNameBackoff controls the retry schedule used by GetHostVethName.
+// During CNI ADD there is a small race window in which the VPC CNI plugin has
+// requested NPA to enforce policy on a newly created pod but the host-side
+// veth (eni<hash> or vlan<hash>) is not yet visible to netlink on this thread.
+// The interface is consistently present within tens of milliseconds, so a
+// short bounded retry budget eliminates the transient failure without
+// extending the CNI ADD path materially for the happy case.
+//
+// Defaults: ~50 ms, 100 ms, 200 ms, 400 ms, 800 ms, 1 s (capped), 1 s, 1 s
+// with +/-10% jitter -> ~5 s worst case across 8 attempts. This is well under
+// kubelet's pod-sandbox retry interval (~10 s) and gives plenty of headroom
+// for the high-concurrency case (e.g. Karpenter scale-up bursts).
+var GetHostVethNameBackoff = wait.Backoff{
+	Duration: 50 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Steps:    8,
+	Cap:      1 * time.Second,
+}
 
+var (
+	// vethLookupRetries counts terminal outcomes of GetHostVethName when the
+	// retry path was exercised (i.e. attempt > 1, or the call exhausted the
+	// retry budget). The single-attempt happy path is intentionally not
+	// counted; use vethLookupAttempts for the full distribution.
+	vethLookupRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_veth_lookup_retries_total",
+			Help: "Terminal outcomes of host-veth lookups that exercised the retry path. " +
+				"result=success: link resolved on a retry; result=exhausted: retry budget exhausted with LinkNotFoundError.",
+		},
+		[]string{"result"},
+	)
+
+	// vethLookupAttempts is observed on every GetHostVethName call (success
+	// or failure) and records the number of probe attempts taken. Buckets
+	// align with the default Steps in GetHostVethNameBackoff.
+	vethLookupAttempts = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "awsnodeagent_veth_lookup_attempts",
+			Help:    "Number of probe attempts taken by GetHostVethName per call.",
+			Buckets: prometheus.LinearBuckets(1, 1, 8),
+		},
+	)
+)
+
+func init() {
+	metrics.Registry.MustRegister(vethLookupRetries, vethLookupAttempts)
+}
+
+// isLinkNotFoundError reports whether err (or anything wrapped by it) is a
+// netlink.LinkNotFoundError. Only this specific error indicates the transient
+// "veth not yet visible" condition that is safe to retry.
+//
+// Exposed as a var so tests can substitute a matcher (the embedded error in
+// netlink.LinkNotFoundError is unexported, which makes it hard to construct
+// the concrete type from another package for table-driven tests).
+var isLinkNotFoundError = func(err error) bool {
+	if err == nil {
+		return false
+	}
+	var lnf netlink.LinkNotFoundError
+	return errors.As(err, &lnf)
+}
+
+var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
 	if interfaceIndex > 0 {
 		podName = fmt.Sprintf("%s.%s", podName, strconv.Itoa(interfaceIndex))
 	}
 
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
+	hashSuffix := hex.EncodeToString(h.Sum(nil))[:11]
 
-	for _, prefix := range interfacePrefixes {
-		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
-		if _, err := getHostLinkByName(interfaceName); err == nil {
-			return interfaceName, nil
-		} else {
-			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
+	var (
+		interfaceName string
+		lastErr       error
+		attempt       int
+		exhausted     bool
+	)
+
+	defer func() {
+		vethLookupAttempts.Observe(float64(attempt))
+	}()
+
+	backoff := GetHostVethNameBackoff
+	// wait.ExponentialBackoff treats Steps as the total number of attempts
+	// (each iteration consumes one step). It returns ErrWaitTimeout when the
+	// budget is exhausted without the condition becoming true.
+	err := wait.ExponentialBackoff(backoff, func() (bool, error) {
+		attempt++
+		var attemptErr error
+		allNotFound := true
+		for _, prefix := range interfacePrefixes {
+			name := fmt.Sprintf("%s%s", prefix, hashSuffix)
+			if _, lookupErr := getHostLinkByName(name); lookupErr == nil {
+				interfaceName = name
+				if attempt > 1 {
+					log().Infof("Resolved host veth %s for pod %s/%s on attempt %d",
+						name, podNamespace, podName, attempt)
+				}
+				return true, nil
+			} else {
+				attemptErr = multierror.Append(attemptErr, fmt.Errorf("failed to find link %s: %w", name, lookupErr))
+				if !isLinkNotFoundError(lookupErr) {
+					allNotFound = false
+				}
+			}
 		}
-	}
+		lastErr = attemptErr
+		// Only the transient "link not found" case is worth retrying; any
+		// other netlink error (e.g. permission, socket failure) won't be
+		// resolved by waiting.
+		if !allNotFound {
+			return false, attemptErr
+		}
+		exhausted = true
+		log().Debugf("Host veth not yet visible for pod %s/%s (hash %s), attempt %d/%d",
+			podNamespace, podName, hashSuffix, attempt, backoff.Steps)
+		return false, nil
+	})
 
-	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
-	return "", errors
+	if err == nil {
+		if attempt > 1 {
+			vethLookupRetries.WithLabelValues("success").Inc()
+		}
+		return interfaceName, nil
+	}
+	if exhausted {
+		vethLookupRetries.WithLabelValues("exhausted").Inc()
+	}
+	// err is either wait.ErrWaitTimeout (retry budget exhausted) or the
+	// non-retryable error we returned from the condition. In both cases we
+	// already captured the underlying per-attempt details in lastErr.
+	if lastErr == nil {
+		lastErr = err
+	}
+	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v",
+		interfacePrefixes, hashSuffix, lastErr)
+	return "", lastErr
 }
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
