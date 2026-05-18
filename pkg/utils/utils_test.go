@@ -2,6 +2,7 @@ package utils
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -851,6 +852,100 @@ func TestGetHostVethName_ExhaustsRetries(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to find link")
 	assert.Equal(t, exhaustedBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")),
 		"retries_total{result=exhausted} should increment when retries are exhausted")
+}
+
+// TestIsLinkNotFoundError_MatchesRealType validates the production
+// isLinkNotFoundError matcher against the real netlink.LinkNotFoundError
+// type with no override. The retry path's entire gate is the errors.As
+// check this matcher performs; if netlink ever changes its returned type
+// or someone wraps the error upstream, this test catches the regression
+// where the matcher silently stops firing.
+func TestIsLinkNotFoundError_MatchesRealType(t *testing.T) {
+	realErr := netlink.LinkNotFoundError{}
+	wrappedReal := fmt.Errorf("netlink lookup failed: %w", netlink.LinkNotFoundError{})
+	doubleWrapped := fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", netlink.LinkNotFoundError{}))
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "real netlink.LinkNotFoundError", err: realErr, want: true},
+		{name: "wrapped real netlink.LinkNotFoundError", err: wrappedReal, want: true},
+		{name: "double-wrapped real netlink.LinkNotFoundError", err: doubleWrapped, want: true},
+		// Negative cases: string-equal but wrong type must not match. The
+		// matcher MUST gate on type identity, never on the error string.
+		{name: "plain errors.New with same text", err: errors.New("Link not found"), want: false},
+		{name: "plain errors.New unrelated", err: errors.New("permission denied"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isLinkNotFoundError(tt.err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestGetHostVethName_RealLinkNotFoundError_DrivesRetry exercises the full
+// GetHostVethName retry path using the real netlink.LinkNotFoundError type
+// without overriding the production isLinkNotFoundError matcher. This is the
+// end-to-end check that the errors.As gate inside the retry condition
+// recognizes the actual concrete type returned by netlink.
+func TestGetHostVethName_RealLinkNotFoundError_DrivesRetry(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalBackoff := GetHostVethNameBackoff
+	t.Cleanup(func() {
+		getLinkByNameFunc = originalFunc
+		GetHostVethNameBackoff = originalBackoff
+	})
+
+	GetHostVethNameBackoff = fastBackoff(5)
+
+	exhaustedBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted"))
+
+	var calls int32
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, netlink.LinkNotFoundError{}
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.Empty(t, got)
+	assert.Error(t, err)
+	// 5 attempts x 2 prefixes = 10 probes. If the production matcher fails
+	// to recognize netlink.LinkNotFoundError as retryable, we would see
+	// exactly 2 probes (one per prefix, then bail).
+	assert.Equal(t, int32(10), atomic.LoadInt32(&calls),
+		"production isLinkNotFoundError matcher must recognize real netlink.LinkNotFoundError and drive retries")
+	assert.Equal(t, exhaustedBefore+1, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")))
+}
+
+// TestGetHostVethName_RealLinkNotFoundError_WrappedDrivesRetry covers the
+// case where an upstream caller wraps the netlink error before returning it
+// (e.g. fmt.Errorf("...: %w", lnf)). The production matcher uses errors.As
+// so wrapping must not defeat the retry decision.
+func TestGetHostVethName_RealLinkNotFoundError_WrappedDrivesRetry(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalBackoff := GetHostVethNameBackoff
+	t.Cleanup(func() {
+		getLinkByNameFunc = originalFunc
+		GetHostVethNameBackoff = originalBackoff
+	})
+
+	GetHostVethNameBackoff = fastBackoff(3)
+
+	var calls int32
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, fmt.Errorf("netlink lookup for %s: %w", name, netlink.LinkNotFoundError{})
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.Empty(t, got)
+	assert.Error(t, err)
+	assert.Equal(t, int32(6), atomic.LoadInt32(&calls),
+		"wrapped netlink.LinkNotFoundError must still satisfy errors.As and drive retries")
 }
 
 // TestGetHostVethName_NoRetryOnNonNotFound verifies that errors other than
