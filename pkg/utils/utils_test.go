@@ -951,6 +951,8 @@ func TestGetHostVethName_RealLinkNotFoundError_WrappedDrivesRetry(t *testing.T) 
 // TestGetHostVethName_NoRetryOnNonNotFound verifies that errors other than
 // LinkNotFoundError short-circuit (no retry). Permission errors, netlink
 // socket failures, etc. are not transient and retrying just adds latency.
+// It also pins down the contract that the exhausted counter is reserved for
+// "retry budget actually ran out" and never fires on a non-retryable error.
 func TestGetHostVethName_NoRetryOnNonNotFound(t *testing.T) {
 	originalFunc := getLinkByNameFunc
 	originalMatcher := isLinkNotFoundError
@@ -966,6 +968,8 @@ func TestGetHostVethName_NoRetryOnNonNotFound(t *testing.T) {
 		return errors.Is(err, sentinelLinkNotFound)
 	}
 
+	exhaustedBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted"))
+
 	var calls int32
 	getLinkByNameFunc = func(name string) (netlink.Link, error) {
 		atomic.AddInt32(&calls, 1)
@@ -977,6 +981,51 @@ func TestGetHostVethName_NoRetryOnNonNotFound(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
 		"should probe each prefix once then bail without retry on non-retryable error")
+	assert.Equal(t, exhaustedBefore, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")),
+		"non-retryable error must not increment retries_total{result=exhausted}")
+}
+
+// TestGetHostVethName_NoExhaustedOnLateNonRetryable guards the specific
+// failure mode where a retryable LinkNotFound on attempt 1 is followed by a
+// non-retryable error (e.g. permission denied) on attempt 2. The retry
+// budget was not exhausted in that scenario, so retries_total{result=
+// exhausted} must stay flat even though the function did exercise the
+// retry path.
+func TestGetHostVethName_NoExhaustedOnLateNonRetryable(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	originalMatcher := isLinkNotFoundError
+	originalBackoff := GetHostVethNameBackoff
+	defer func() {
+		getLinkByNameFunc = originalFunc
+		isLinkNotFoundError = originalMatcher
+		GetHostVethNameBackoff = originalBackoff
+	}()
+
+	GetHostVethNameBackoff = fastBackoff(5)
+	isLinkNotFoundError = func(err error) bool {
+		return errors.Is(err, sentinelLinkNotFound)
+	}
+
+	exhaustedBefore := testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted"))
+
+	var calls int32
+	getLinkByNameFunc = func(name string) (netlink.Link, error) {
+		c := atomic.AddInt32(&calls, 1)
+		// Attempt 1 (calls 1,2): both prefixes return retryable LinkNotFound.
+		// Attempt 2 (calls 3,4): permission denied -> non-retryable.
+		if c <= 2 {
+			return nil, sentinelLinkNotFound
+		}
+		return nil, errors.New("permission denied")
+	}
+
+	got, err := GetHostVethName("foo", "bar", 0, []string{"eni", "vlan"})
+	assert.Empty(t, got)
+	assert.Error(t, err)
+	assert.Equal(t, int32(4), atomic.LoadInt32(&calls),
+		"should retry past attempt 1 (all LinkNotFound) and bail on attempt 2 (non-retryable)")
+	assert.Equal(t, exhaustedBefore, testutil.ToFloat64(vethLookupRetries.WithLabelValues("exhausted")),
+		"non-retryable error after a retryable attempt must not be counted as exhausted")
 }
 
 func TestIsFileExistsError(t *testing.T) {

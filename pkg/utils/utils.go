@@ -302,7 +302,6 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		interfaceName string
 		lastErr       error
 		attempt       int
-		exhausted     bool
 	)
 
 	defer func() {
@@ -340,7 +339,6 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		if !allNotFound {
 			return false, attemptErr
 		}
-		exhausted = true
 		log().Debugf("Host veth not yet visible for pod %s/%s (hash %s), attempt %d/%d",
 			podNamespace, podName, hashSuffix, attempt, backoff.Steps)
 		return false, nil
@@ -352,7 +350,12 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		}
 		return interfaceName, nil
 	}
-	if exhausted {
+	// Only count "exhausted" when the retry budget actually ran out (i.e.
+	// wait.ExponentialBackoff returned because Steps was reached, not
+	// because the condition surfaced a non-retryable error). Otherwise we
+	// would conflate "budget consumed" with "permission denied" in the
+	// metric, which is the signal operators tune the backoff against.
+	if wait.Interrupted(err) {
 		vethLookupRetries.WithLabelValues("exhausted").Inc()
 	}
 	// err is either wait.ErrWaitTimeout (retry budget exhausted) or the
