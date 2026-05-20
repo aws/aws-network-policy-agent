@@ -321,7 +321,13 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 			if _, lookupErr := getHostLinkByName(name); lookupErr == nil {
 				interfaceName = name
 				if attempt > 1 {
-					log().Infof("Resolved host veth %s for pod %s/%s on attempt %d",
+					// Debug-level: during scale-up bursts every recovered
+					// pod would emit one of these. Operators should rely
+					// on the awsnodeagent_veth_lookup_retries_total and
+					// awsnodeagent_veth_lookup_attempts metrics for the
+					// hot-path observability signal; this log line is for
+					// per-pod debugging when needed.
+					log().Debugf("Resolved host veth %s for pod %s/%s on attempt %d",
 						name, podNamespace, podName, attempt)
 				}
 				return true, nil

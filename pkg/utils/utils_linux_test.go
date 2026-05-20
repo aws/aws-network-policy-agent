@@ -6,6 +6,7 @@ package utils
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -27,9 +28,12 @@ func TestGetHostVethName_RealNetlink_TriggersRetries(t *testing.T) {
 	// Probe netlink first; if the test environment cannot open an
 	// AF_NETLINK socket (rare, but possible in heavily sandboxed CI),
 	// skip rather than fail on infrastructure noise. We only want to fail
-	// when the retry/matcher contract itself regresses.
+	// when the retry/matcher contract itself regresses. Use errors.As so
+	// a wrapped LinkNotFoundError is still recognized as a "netlink works"
+	// signal rather than incorrectly skipping.
 	if _, err := netlink.LinkByName("definitely-not-a-real-link-aws-npa-test"); err != nil {
-		if _, ok := err.(netlink.LinkNotFoundError); !ok {
+		var lnf netlink.LinkNotFoundError
+		if !errors.As(err, &lnf) {
 			t.Skipf("netlink not usable in this environment, skipping: %v", err)
 		}
 	}

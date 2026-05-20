@@ -218,7 +218,12 @@ func findCniNetworkPolicyFailures(startTime metav1.Time) []string {
 		if e.Reason != "FailedCreatePodSandBox" {
 			continue
 		}
-		if e.LastTimestamp.Before(&startTime) {
+		// Filter by event time. Use the most recent of EventTime,
+		// LastTimestamp, CreationTimestamp; CreationTimestamp is always
+		// set by the API server even when the legacy LastTimestamp is
+		// zero (depends on event source).
+		et := eventTime(&e)
+		if et.Before(&startTime) {
 			continue
 		}
 		if !strings.Contains(e.Message, cniNetworkPolicyFailMsg) {
@@ -230,13 +235,27 @@ func findCniNetworkPolicyFailures(startTime metav1.Time) []string {
 	return hits
 }
 
+// eventTime returns the most recent timestamp available on the event,
+// preferring EventTime (microsecond precision, set by newer event
+// recorders), falling back to LastTimestamp (legacy) and finally to
+// CreationTimestamp (always set by the API server).
+func eventTime(e *v1.Event) metav1.Time {
+	if !e.EventTime.IsZero() {
+		return metav1.NewTime(e.EventTime.Time)
+	}
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp
+	}
+	return e.CreationTimestamp
+}
+
 // waitForJobCompletion polls the churn Job until either the desired number
 // of completions is reached or the timeout is hit. Polling is sized so the
 // race window between batches stays exercised continuously.
 func waitForJobCompletion() {
-	err := wait.PollUntilContextTimeout(ctx, pollInterval, churnTimeout, true, func(context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, pollInterval, churnTimeout, true, func(pollCtx context.Context) (bool, error) {
 		j := &batchv1.Job{}
-		if err := fw.K8sClient.Get(ctx, client.ObjectKey{Name: jobName, Namespace: namespace}, j); err != nil {
+		if err := fw.K8sClient.Get(pollCtx, client.ObjectKey{Name: jobName, Namespace: namespace}, j); err != nil {
 			return false, err
 		}
 		return j.Status.Succeeded >= int32(completions), nil
