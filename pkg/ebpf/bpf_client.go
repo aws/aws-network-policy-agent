@@ -182,6 +182,18 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	}
 	log().Info("Copied eBPF binaries to the host directory")
 
+	// Reverse migration: rename "@" separator pin files back to the legacy
+	// "-" format to prepare for downgrade to a pre-fix NPA version. Only
+	// runs if the forward migration marker (.npa_format_v2) is present.
+	if err := migrateReversePinsFromCNIState(
+		utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY,
+		utils.BPF_MAPS_PIN_PATH_DIRECTORY,
+		cniIpamStatePath,
+		formatV2MarkerPath,
+	); err != nil {
+		log().Errorf("reverse pin migration failed (non-fatal): %v", err)
+	}
+
 	var interfaceNametoIngressPinPath map[string]string
 	var interfaceNametoEgressPinPath map[string]string
 	eventBufferFD := 0
