@@ -48,6 +48,17 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+// NamespacedBPFMaps lists BPF map names that are pinned per pod-identifier
+// rather than globally.
+var NamespacedBPFMaps = []string{
+	TC_INGRESS_MAP,
+	TC_EGRESS_MAP,
+	TC_CLUSTER_POLICY_INGRESS_MAP,
+	TC_CLUSTER_POLICY_EGRESS_MAP,
+	TC_INGRESS_POD_STATE_MAP,
+	TC_EGRESS_POD_STATE_MAP,
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
