@@ -534,6 +534,7 @@ type ConntrackKeyV6 struct {
 	Protocol    uint8
 	_           uint8    //Padding
 	Owner_ip    [16]byte //16
+	Ifindex     uint32
 }
 
 type ConntrackKey struct {
@@ -545,6 +546,7 @@ type ConntrackKey struct {
 	Protocol    uint8
 	_           uint8 //Padding
 	Owner_ip    uint32
+	Ifindex     uint32
 }
 
 type ConntrackVal struct {
