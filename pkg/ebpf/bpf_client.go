@@ -153,7 +153,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
-	ebpfClient.bpfSDKClient = goelf.New()
+	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)

@@ -48,6 +48,18 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+// NamespacedBPFMaps lists BPF map names that are pinned per pod-identifier
+// rather than globally.
+// Any new pod scoped eBPF maps added in ebpf C programs needs to be added in this list for recovery
+var NamespacedBPFMaps = []string{
+	TC_INGRESS_MAP,
+	TC_EGRESS_MAP,
+	TC_CLUSTER_POLICY_INGRESS_MAP,
+	TC_CLUSTER_POLICY_EGRESS_MAP,
+	TC_INGRESS_POD_STATE_MAP,
+	TC_EGRESS_POD_STATE_MAP,
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
