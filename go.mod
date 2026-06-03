@@ -1,6 +1,6 @@
 module github.com/aws/aws-network-policy-agent
 
-go 1.26.1
+go 1.26.4
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.20.0
