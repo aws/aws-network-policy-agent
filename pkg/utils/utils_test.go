@@ -350,7 +350,23 @@ func TestGetPodNamespacedName(t *testing.T) {
 				podName:      "testPod",
 				podNamespace: "testNamespace",
 			},
-			want: "testPodtestNamespace",
+			want: "testPod_testNamespace",
+		},
+		{
+			name: "Collision-prone pair (ab, c) is distinguishable",
+			args: args{
+				podName:      "ab",
+				podNamespace: "c",
+			},
+			want: "ab_c",
+		},
+		{
+			name: "Collision-prone pair (a, bc) is distinguishable",
+			args: args{
+				podName:      "a",
+				podNamespace: "bc",
+			},
+			want: "a_bc",
 		},
 	}
 	for _, tt := range tests {
@@ -358,6 +374,21 @@ func TestGetPodNamespacedName(t *testing.T) {
 			got := GetPodNamespacedName(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// Distinct (podName, podNamespace) pairs that aliased to the same string under
+// raw concatenation must produce different keys after the delimiter fix.
+func TestGetPodNamespacedName_NoCollisionAcrossDistinctPods(t *testing.T) {
+	pairs := [][2][2]string{
+		{{"ab", "c"}, {"a", "bc"}},
+		{{"a-b", "c-d"}, {"a", "b-c-d"}},
+		{{"foo", "bar-baz"}, {"foo-bar", "baz"}},
+	}
+	for _, p := range pairs {
+		left := GetPodNamespacedName(p[0][0], p[0][1])
+		right := GetPodNamespacedName(p[1][0], p[1][1])
+		assert.NotEqual(t, left, right, "distinct pods must not collide: %v vs %v", p[0], p[1])
 	}
 }
 

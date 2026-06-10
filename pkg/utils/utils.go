@@ -48,6 +48,18 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+// NamespacedBPFMaps lists BPF map names that are pinned per pod-identifier
+// rather than globally.
+// Any new pod scoped eBPF maps added in ebpf C programs needs to be added in this list for recovery
+var NamespacedBPFMaps = []string{
+	TC_INGRESS_MAP,
+	TC_EGRESS_MAP,
+	TC_CLUSTER_POLICY_INGRESS_MAP,
+	TC_CLUSTER_POLICY_EGRESS_MAP,
+	TC_INGRESS_POD_STATE_MAP,
+	TC_EGRESS_POD_STATE_MAP,
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -150,7 +162,11 @@ func (t Tier) Index() int {
 }
 
 func GetPodNamespacedName(podName, podNamespace string) string {
-	return podName + podNamespace
+	// "_" is forbidden in DNS-1123 pod names and namespaces, so this separator
+	// makes the key injective on (podName, podNamespace). "_" is also pin-path
+	// safe (no filesystem meaning), matching the convention used in
+	// GetPodIdentifier where "." is substituted with "_" for the same reason.
+	return podName + "_" + podNamespace
 }
 
 func GetPodIdentifier(podName, podNamespace string) string {
@@ -519,6 +535,7 @@ type ConntrackKeyV6 struct {
 	Protocol    uint8
 	_           uint8    //Padding
 	Owner_ip    [16]byte //16
+	Ifindex     uint32
 }
 
 type ConntrackKey struct {
@@ -530,6 +547,7 @@ type ConntrackKey struct {
 	Protocol    uint8
 	_           uint8 //Padding
 	Owner_ip    uint32
+	Ifindex     uint32
 }
 
 type ConntrackVal struct {

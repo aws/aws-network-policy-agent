@@ -100,6 +100,28 @@ func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	}
 }
 
+// Pre-attach pod ("ab", "c") and verify pod ("a", "bc") does not inherit
+// attachment state — the buggy raw concatenation aliased these to the same key.
+func TestBpfClient_IsEBPFProbeAttached_NoCollisionAcrossPods(t *testing.T) {
+	ingressProgFD, egressProgFD := 12, 13
+	testBpfClient := &bpfClient{
+		hostMask:            "/32",
+		ingressPodToProgMap: new(sync.Map),
+		egressPodToProgMap:  new(sync.Map),
+	}
+
+	// Pod A: ("ab", "c") is the first pod attached.
+	attachedKey := utils.GetPodNamespacedName("ab", "c")
+	testBpfClient.ingressPodToProgMap.Store(attachedKey, ingressProgFD)
+	testBpfClient.egressPodToProgMap.Store(attachedKey, egressProgFD)
+
+	// Pod B: ("a", "bc") arrives next; under the buggy concatenation both
+	// pods produced key "abc" and Pod B inherited Pod A's attachment state.
+	gotIngress, gotEgress := testBpfClient.isEBPFProbeAttached("a", "bc")
+	assert.False(t, gotIngress, "pod (a, bc) must not see pod (ab, c)'s ingress attachment")
+	assert.False(t, gotEgress, "pod (a, bc) must not see pod (ab, c)'s egress attachment")
+}
+
 func TestLoadBPFProgram(t *testing.T) {
 	var wantErr error
 	ctrl := gomock.NewController(t)
@@ -733,7 +755,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 			name:                        "Multi-NIC enabled with IPAM cache data",
 			providedCount:               0,
 			isMultiNICEnabled:           true,
-			podNameToInterfaceCountData: map[string]int{"testPodtestNS": 2},
+			podNameToInterfaceCountData: map[string]int{"testPod_testNS": 2},
 			wantCount:                   2,
 			wantErr:                     nil,
 		},
@@ -859,8 +881,8 @@ func TestBpfClient_loadIPAMData(t *testing.T) {
 			}`,
 			wantErr: false,
 			wantCached: map[string]int{
-				"test-poddefault":      2,
-				"multi-podkube-system": 3,
+				"test-pod_default":      2,
+				"multi-pod_kube-system": 3,
 			},
 		},
 		{
@@ -913,7 +935,7 @@ func TestBpfClient_getInterfaceCountFromBackupFile(t *testing.T) {
 	}{
 		{
 			name:      "Interface count found in cache",
-			cacheData: map[string]int{"test-poddefault": 2},
+			cacheData: map[string]int{"test-pod_default": 2},
 			wantCount: 2,
 			wantErr:   false,
 		},
@@ -955,9 +977,9 @@ func TestIsProgFdShared(t *testing.T) {
 		isProgFdShared bool
 	}
 	podToProgFd := map[string]int{
-		"pod1A": 2,
-		"pod2A": 2,
-		"pod1B": 15,
+		"pod1_A": 2,
+		"pod2_A": 2,
+		"pod1_B": 15,
 	}
 	tests := []struct {
 		name         string

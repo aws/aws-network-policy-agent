@@ -36,6 +36,7 @@ struct conntrack_key {
 	__u16 dest_port;
 	__u8  protocol;
 	struct in6_addr owner_addr;
+	__u32 ifindex;
 };
 
 
