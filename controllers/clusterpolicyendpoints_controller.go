@@ -267,7 +267,10 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 	}
 
 	// TODO: Can be optimized to avoid redundant createIfNotExists calls
-	r.ebpfClient.CreatePodStateEbpfEntryIfNotExists(podIdentifier, ebpf.POD_STATE_MAP_KEY, defaultState)
+	if err := r.ebpfClient.CreatePodStateEbpfEntryIfNotExists(podIdentifier, ebpf.POD_STATE_MAP_KEY, defaultState); err != nil {
+		log().Errorf("Pod-state seed failed for podIdentifier %s: %v", podIdentifier, err)
+		return err
+	}
 	return nil
 }
 

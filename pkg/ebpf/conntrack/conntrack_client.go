@@ -91,6 +91,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 					newKey.Dest_port = iterKey.Dest_port
 					newKey.Protocol = iterKey.Protocol
 					newKey.Owner_ip = iterKey.Owner_ip
+					newKey.Ifindex = iterKey.Ifindex
 					c.localConntrackV4Cache[newKey] = true
 				}
 				err = goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterNextKey)), mapID)
@@ -116,7 +117,10 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			return
 		}
 		kernelConntrackV4Cache := make(map[utils.ConntrackKey]bool)
-		// Build kernel conntrack cache
+		// Kernel conntrack (netlink) identifies flows by 5-tuple only. It has no
+		// concept of per-veth ifindex. For GC, a BPF entry is considered active if
+		// its 5-tuple + owner matches a live kernel flow, regardless of interface.
+		// Ifindex is only relevant for policy enforcement, not for stale entry cleanup.
 		for _, conntrackFlow := range conntrackFlows {
 			//Check fwd flow with SIP as owner
 			fwdFlowWithSIP := utils.ConntrackKey{}
@@ -126,6 +130,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
 			fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
 			fwdFlowWithSIP.Owner_ip = fwdFlowWithSIP.Source_ip
+			fwdFlowWithSIP.Ifindex = 0 // not available from netlink
 
 			kernelConntrackV4Cache[fwdFlowWithSIP] = true
 
@@ -137,6 +142,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
 			fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
 			fwdFlowWithDIP.Owner_ip = fwdFlowWithDIP.Dest_ip
+			fwdFlowWithDIP.Ifindex = 0 // not available from netlink
 
 			kernelConntrackV4Cache[fwdFlowWithDIP] = true
 
@@ -153,6 +159,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
 				revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
 				revFlowWithSIP.Owner_ip = revFlowWithSIP.Source_ip
+				revFlowWithSIP.Ifindex = 0 // not available from netlink
 
 				kernelConntrackV4Cache[revFlowWithSIP] = true
 
@@ -164,6 +171,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				revFlowWithDIP.Dest_port = conntrackFlow.Reverse.SrcPort
 				revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
 				revFlowWithDIP.Owner_ip = revFlowWithDIP.Dest_ip
+				revFlowWithDIP.Ifindex = 0 // not available from netlink
 
 				kernelConntrackV4Cache[revFlowWithDIP] = true
 			}
@@ -177,11 +185,12 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			newKey.Dest_port = localConntrackEntry.Dest_port
 			newKey.Protocol = localConntrackEntry.Protocol
 			newKey.Owner_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Owner_ip))
+			newKey.Ifindex = 0 // strip for 5-tuple comparison
 			_, ok := kernelConntrackV4Cache[newKey]
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String())
+				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				log().Infof("Conntrack cleanup Delete - %s", key)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
 
@@ -239,6 +248,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 					newKey.Protocol = connKey.Protocol
 
 					utils.CopyV6Bytes(&newKey.Owner_ip, connKey.Owner_ip)
+					newKey.Ifindex = connKey.Ifindex
 					c.localConntrackV6Cache[newKey] = true
 				}
 				err = goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&nextbyteSlice[0])), mapID)
@@ -264,7 +274,10 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		}
 
 		kernelConntrackV6Cache := make(map[utils.ConntrackKeyV6]bool)
-		// Build local conntrack cache
+		// Kernel conntrack (netlink) identifies flows by 5-tuple only. It has no
+		// concept of per-veth ifindex. For GC, a BPF entry is considered active if
+		// its 5-tuple + owner matches a live kernel flow, regardless of interface.
+		// Ifindex is only relevant for policy enforcement, not for stale entry cleanup.
 		for _, conntrackFlow := range conntrackFlows {
 			//Check fwd flow with SIP as owner
 			fwdFlowWithSIP := utils.ConntrackKeyV6{}
@@ -277,6 +290,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
 			copy(fwdFlowWithSIP.Owner_ip[:], sip)
 
+			fwdFlowWithSIP.Ifindex = 0 // not available from netlink
 			kernelConntrackV6Cache[fwdFlowWithSIP] = true
 
 			//Check fwd flow with DIP as owner
@@ -290,6 +304,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
 			copy(fwdFlowWithDIP.Owner_ip[:], dip)
 
+			fwdFlowWithDIP.Ifindex = 0 // not available from netlink
 			kernelConntrackV6Cache[fwdFlowWithDIP] = true
 
 			//Dest can be VIP and pods can be on same node
@@ -308,6 +323,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
 				copy(revFlowWithSIP.Owner_ip[:], sip)
 
+				revFlowWithSIP.Ifindex = 0 // not available from netlink
 				kernelConntrackV6Cache[revFlowWithSIP] = true
 
 				//Check fwd flow with DIP as owner
@@ -321,17 +337,20 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
 				copy(revFlowWithDIP.Owner_ip[:], dip)
 
+				revFlowWithDIP.Ifindex = 0 // not available from netlink
 				kernelConntrackV6Cache[revFlowWithDIP] = true
 			}
 
 		}
 		// Check if the local cache and kernel cache is in sync
 		for localConntrackEntry, _ := range c.localConntrackV6Cache {
-			_, ok := kernelConntrackV6Cache[localConntrackEntry]
+			lookupKey := localConntrackEntry
+			lookupKey.Ifindex = 0 // strip for 5-tuple comparison
+			_, ok := kernelConntrackV6Cache[lookupKey]
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String())
+				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				log().Infof("Conntrack cleanup Delete - %s", key)
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))

@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +57,7 @@ var (
 	INTERFACE_COUNT_UNKNOWN                          = -1 // Used when caller doesn't know interface count
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
+	deletedPodsMinAge                                = 5 * time.Minute
 )
 
 func log() logger.Logger {
@@ -107,6 +109,7 @@ type BpfClient interface {
 	ReAttachEbpfProbes() error
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
+	ClearDeletedPod(podNamespacedName string)
 }
 
 type BPFContext struct {
@@ -115,8 +118,8 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
-func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
+func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -135,6 +138,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 		egressInMemoryMap:               new(sync.Map),
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		deletedPods:                     new(sync.Map),
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -149,7 +153,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
-	ebpfClient.bpfSDKClient = goelf.New()
+	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
@@ -245,7 +249,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
-		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
+		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, logLevel)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
 			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
@@ -276,6 +280,7 @@ func NewBpfClient(nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs boo
 
 	// Initializes prometheus metrics
 	prometheusRegister()
+	ebpfClient.startDeletedPodsCleanupRoutine(ctx)
 
 	log().Info("BPF Client initialization done")
 	return ebpfClient, nil
@@ -331,6 +336,8 @@ type bpfClient struct {
 	clusterPolicyIngressInMemoryMap *sync.Map
 	// This is in-memory map backed by clusterPolicyEgressBpfMap (key: podIdentifier, value: InMemoryBpfMap pointer)
 	clusterPolicyEgressInMemoryMap *sync.Map
+	// This is in-memory map to track recently deleted pods (key: podNamespacedName, value: time added to map)
+	deletedPods *sync.Map
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
@@ -440,6 +447,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						inMemMap, err := NewInMemoryBpfMap(&ingressVal)
 						if err != nil {
 							log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
+							sdkAPIErr.WithLabelValues("recoverBPFState-ingress").Inc()
 						} else {
 							l.ingressInMemoryMap.Store(podIdentifier, inMemMap)
 							log().Infof("ingress map for %v loaded successfully", podIdentifier)
@@ -455,6 +463,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						inMemMap, err := NewInMemoryBpfMap(&cpIngressVal)
 						if err != nil {
 							log().Errorf("got err for cluster policy ingress in-mem map for %v, err %v", podIdentifier, err)
+							sdkAPIErr.WithLabelValues("recoverBPFState-cluster-ingress").Inc()
 						} else {
 							l.clusterPolicyIngressInMemoryMap.Store(podIdentifier, inMemMap)
 							log().Infof("cluster policy ingress map for %v loaded successfully", podIdentifier)
@@ -472,6 +481,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						inMemMap, err := NewInMemoryBpfMap(&egressVal)
 						if err != nil {
 							log().Errorf("got err for egress in-mem map for %v, err %v", podIdentifier, err)
+							sdkAPIErr.WithLabelValues("recoverBPFState-egress").Inc()
 						} else {
 							l.egressInMemoryMap.Store(podIdentifier, inMemMap)
 							log().Infof("egress map for %v loaded successfully", podIdentifier)
@@ -487,6 +497,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						inMemMap, err := NewInMemoryBpfMap(&cpEgressVal)
 						if err != nil {
 							log().Errorf("got err for cluster policy egress in-mem map for %v, err %v", podIdentifier, err)
+							sdkAPIErr.WithLabelValues("recoverBPFState-cluster-egress").Inc()
 						} else {
 							l.clusterPolicyEgressInMemoryMap.Store(podIdentifier, inMemMap)
 							log().Infof("cluster policy egress map for %v loaded successfully", podIdentifier)
@@ -669,6 +680,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 	podNamespacedName := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 
+	if _, deleted := l.deletedPods.Load(podNamespacedName); deleted {
+		log().Debugf("ignoring attaching ebpf probe to pod %s in namespace %s with pod identifier %s as it is already deleted", pod.Name, pod.Namespace, podIdentifier)
+		return nil
+	}
+
 	// Two go routines can try to attach the probes at the same time
 	// Locking will help updating all the datastructures correctly
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
@@ -818,6 +834,10 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	return progFD, nil
 }
 
+func (l *bpfClient) ClearDeletedPod(podNamespacedName string) {
+	l.deletedPods.Delete(podNamespacedName)
+}
+
 func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	value, _ := l.podIdentifierLock.LoadOrStore(podIdentifier, &sync.Mutex{})
 	podIdentifierLock := value.(*sync.Mutex)
@@ -828,6 +848,7 @@ func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier stri
 	isProgFdShared, err := l.isProgFdShared(pod.Name, pod.Namespace)
 	l.deletePodFromIngressProgPodCaches(pod.Name, pod.Namespace)
 	l.deletePodFromEgressProgPodCaches(pod.Name, pod.Namespace)
+	l.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 
 	if err == nil && !isProgFdShared {
 		err := l.deleteBPFProbes(podIdentifier)
@@ -935,204 +956,297 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	return progInfo, progFD, nil
 }
 
+// UpdateEbpfMaps writes the namespaced-policy ingress and egress firewall rule
+// sets for podIdentifier into the kernel TC_INGRESS_MAP / TC_EGRESS_MAP, hydrating
+// the userspace shadow map on first use. Ingress and egress are attempted
+// independently and any errors are returned joined.
 func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
 
 	start := time.Now()
+	var ingressErr, egressErr error
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateEbpfMap-no-context").Inc()
+		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
+	}
+	peBPFContext, ok := value.(BPFContext)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateEbpfMap-bad-context-type").Inc()
+		return fmt.Errorf("unexpected bpf context type %T for pod %s", value, podIdentifier)
+	}
+	ingressProgInfo := peBPFContext.ingressPgmInfo
+	egressProgInfo := peBPFContext.egressPgmInfo
 
-	if ok {
-		peBPFContext := value.(BPFContext)
-		ingressProgInfo := peBPFContext.ingressPgmInfo
-		egressProgInfo := peBPFContext.egressPgmInfo
+	if ingressProgInfo.Program.ProgFD != 0 {
+		ingressProgFD := ingressProgInfo.Program.ProgFD
+		mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_MAP]
+		log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s", ingressProgFD, utils.TC_INGRESS_MAP)
 
-		if ingressProgInfo.Program.ProgFD != 0 {
-			ingressProgFD := ingressProgInfo.Program.ProgFD
-			mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_MAP]
-			log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s", ingressProgFD, utils.TC_INGRESS_MAP)
-
-			inMemVal, exists := l.ingressInMemoryMap.Load(podIdentifier)
-			if !exists {
-				log().Infof("Ingress in-mem map not found for %v", podIdentifier)
-				inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
-				if err != nil {
-					log().Errorf("got err for ingress in-mem map for %v, err %v", podIdentifier, err)
-				} else {
-					l.ingressInMemoryMap.Store(podIdentifier, inMemMap)
-					log().Infof("ingress map for %v loaded successfully", podIdentifier)
-					inMemVal = inMemMap
-				}
-			}
-
-			err := l.updateEbpfMap(ingressFirewallRules, inMemVal.(*InMemoryBpfMap))
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateEbpfMap-ingress", fmt.Sprint(err != nil)).Observe(duration)
+		inMemVal, exists := l.ingressInMemoryMap.Load(podIdentifier)
+		if !exists {
+			log().Infof("Ingress in-mem map not found for %v", podIdentifier)
+			inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
 			if err != nil {
-				log().Errorf("Ingress Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateEbpfMap-ingress").Inc()
+				ingressErr = fmt.Errorf("ingress in-mem map hydrate: %w", err)
+			} else {
+				l.ingressInMemoryMap.Store(podIdentifier, inMemMap)
+				log().Infof("ingress map for %v loaded successfully", podIdentifier)
+				inMemVal = inMemMap
 			}
 		}
-		if egressProgInfo.Program.ProgFD != 0 {
-			egressProgFD := egressProgInfo.Program.ProgFD
-			mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_MAP]
 
-			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s", egressProgFD, utils.TC_EGRESS_MAP)
-
-			inMemVal, exists := l.egressInMemoryMap.Load(podIdentifier)
-			if !exists {
-				log().Infof("didn't find egress in-mem map for %v", podIdentifier)
-				inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
-				if err != nil {
-					log().Errorf("got err for egress in-mem map for %v, err %v", podIdentifier, err)
-				} else {
-					l.egressInMemoryMap.Store(podIdentifier, inMemMap)
-					log().Infof("egress map for %v loaded successfully", podIdentifier)
-					inMemVal = inMemMap
+		if ingressErr == nil {
+			inMemMap, typeOk := inMemVal.(*InMemoryBpfMap)
+			if !typeOk {
+				ingressErr = fmt.Errorf("ingress in-mem map: unexpected type %T", inMemVal)
+			} else {
+				writeErr := l.updateEbpfMap(ingressFirewallRules, inMemMap)
+				duration := msSince(start)
+				sdkAPILatency.WithLabelValues("updateEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
+				if writeErr != nil {
+					ingressErr = fmt.Errorf("ingress map write: %w", writeErr)
 				}
 			}
-
-			err := l.updateEbpfMap(egressFirewallRules, inMemVal.(*InMemoryBpfMap))
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateEbpfMap-egress", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				log().Errorf("Egress Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateEbpfMap-egress").Inc()
-			}
+		}
+		if ingressErr != nil {
+			log().Errorf("Ingress Map update failed: %v", ingressErr)
+			sdkAPIErr.WithLabelValues("updateEbpfMap-ingress").Inc()
 		}
 	}
-	return nil
+	if egressProgInfo.Program.ProgFD != 0 {
+		egressProgFD := egressProgInfo.Program.ProgFD
+		mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_MAP]
+
+		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s", egressProgFD, utils.TC_EGRESS_MAP)
+
+		inMemVal, exists := l.egressInMemoryMap.Load(podIdentifier)
+		if !exists {
+			log().Infof("didn't find egress in-mem map for %v", podIdentifier)
+			inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
+			if err != nil {
+				egressErr = fmt.Errorf("egress in-mem map hydrate: %w", err)
+			} else {
+				l.egressInMemoryMap.Store(podIdentifier, inMemMap)
+				log().Infof("egress map for %v loaded successfully", podIdentifier)
+				inMemVal = inMemMap
+			}
+		}
+
+		if egressErr == nil {
+			inMemMap, typeOk := inMemVal.(*InMemoryBpfMap)
+			if !typeOk {
+				egressErr = fmt.Errorf("egress in-mem map: unexpected type %T", inMemVal)
+			} else {
+				writeErr := l.updateEbpfMap(egressFirewallRules, inMemMap)
+				duration := msSince(start)
+				sdkAPILatency.WithLabelValues("updateEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
+				if writeErr != nil {
+					egressErr = fmt.Errorf("egress map write: %w", writeErr)
+				}
+			}
+		}
+		if egressErr != nil {
+			log().Errorf("Egress Map update failed: %v", egressErr)
+			sdkAPIErr.WithLabelValues("updateEbpfMap-egress").Inc()
+		}
+	}
+	return errors.Join(ingressErr, egressErr)
 }
 
+// UpdateClusterPolicyEbpfMaps writes the cluster-policy ingress and egress
+// firewall rule sets for podIdentifier into the kernel
+// TC_CLUSTER_POLICY_INGRESS_MAP / TC_CLUSTER_POLICY_EGRESS_MAP, hydrating the
+// userspace shadow map on first use. Ingress and egress are attempted
+// independently and any errors are returned joined.
 func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
 
 	var ingressProgFD, egressProgFD int
 	start := time.Now()
+	var ingressErr, egressErr error
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-no-context").Inc()
+		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
+	}
+	peBPFContext, ok := value.(BPFContext)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-bad-context-type").Inc()
+		return fmt.Errorf("unexpected bpf context type %T for pod %s", value, podIdentifier)
+	}
+	ingressProgInfo := peBPFContext.ingressPgmInfo
+	egressProgInfo := peBPFContext.egressPgmInfo
 
-	if ok {
-		peBPFContext := value.(BPFContext)
-		ingressProgInfo := peBPFContext.ingressPgmInfo
-		egressProgInfo := peBPFContext.egressPgmInfo
+	if ingressProgInfo.Program.ProgFD != 0 {
+		ingressProgFD = ingressProgInfo.Program.ProgFD
+		mapToUpdate := ingressProgInfo.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
+		log().Infof("Pod has a ClusterPolicyIngress hook attached. Update the corresponding map progFD: %d, mapName: %s", ingressProgFD, utils.TC_CLUSTER_POLICY_INGRESS_MAP)
 
-		if ingressProgInfo.Program.ProgFD != 0 {
-			ingressProgFD = ingressProgInfo.Program.ProgFD
-			mapToUpdate := ingressProgInfo.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
-			log().Infof("Pod has a ClusterPolicyIngress hook attached. Update the corresponding map progFD: %d, mapName: %s", ingressProgFD, utils.TC_CLUSTER_POLICY_INGRESS_MAP)
-
-			inMemVal, exists := l.clusterPolicyIngressInMemoryMap.Load(podIdentifier)
-			if !exists {
-				log().Infof("Cluster Policy Ingress in-mem map not found for %v", podIdentifier)
-				inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
-				if err != nil {
-					log().Errorf("got err for Cluster Policy Ingress in-mem map for %v, err %v", podIdentifier, err)
-				} else {
-					l.clusterPolicyIngressInMemoryMap.Store(podIdentifier, inMemMap)
-					log().Infof("cluster policy ingress map for %v loaded successfully", podIdentifier)
-					inMemVal = inMemMap
-				}
-			}
-			err := l.updateClusterPolicyEbpfMap(ingressFirewallRules, inMemVal.(*InMemoryBpfMap))
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-ingress", fmt.Sprint(err != nil)).Observe(duration)
+		inMemVal, exists := l.clusterPolicyIngressInMemoryMap.Load(podIdentifier)
+		if !exists {
+			log().Infof("Cluster Policy Ingress in-mem map not found for %v", podIdentifier)
+			inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
 			if err != nil {
-				log().Errorf("Ingress Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-ingress").Inc()
+				ingressErr = fmt.Errorf("cluster policy ingress in-mem map hydrate: %w", err)
+			} else {
+				l.clusterPolicyIngressInMemoryMap.Store(podIdentifier, inMemMap)
+				log().Infof("cluster policy ingress map for %v loaded successfully", podIdentifier)
+				inMemVal = inMemMap
 			}
 		}
-		if egressProgInfo.Program.ProgFD != 0 {
-			egressProgFD = egressProgInfo.Program.ProgFD
-			mapToUpdate := egressProgInfo.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
-
-			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s", egressProgFD, utils.TC_CLUSTER_POLICY_EGRESS_MAP)
-
-			inMemVal, exists := l.clusterPolicyEgressInMemoryMap.Load(podIdentifier)
-			if !exists {
-				log().Infof("didn't find cluster policy egress in-mem map for %v", podIdentifier)
-				inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
-				if err != nil {
-					log().Errorf("got err for cluster policy egress in-mem map for %v, err %v", podIdentifier, err)
-				} else {
-					l.clusterPolicyEgressInMemoryMap.Store(podIdentifier, inMemMap)
-					log().Infof("cluster policy egress map for %v loaded successfully", podIdentifier)
-					inMemVal = inMemMap
+		if ingressErr == nil {
+			inMemMap, typeOk := inMemVal.(*InMemoryBpfMap)
+			if !typeOk {
+				ingressErr = fmt.Errorf("cluster policy ingress in-mem map: unexpected type %T", inMemVal)
+			} else {
+				writeErr := l.updateClusterPolicyEbpfMap(ingressFirewallRules, inMemMap)
+				duration := msSince(start)
+				sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
+				if writeErr != nil {
+					ingressErr = fmt.Errorf("cluster policy ingress map write: %w", writeErr)
 				}
 			}
-
-			err := l.updateClusterPolicyEbpfMap(egressFirewallRules, inMemVal.(*InMemoryBpfMap))
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-egress", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				log().Errorf("Cluster Policy Egress Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-egress").Inc()
-			}
+		}
+		if ingressErr != nil {
+			log().Errorf("Ingress Map update failed: %v", ingressErr)
+			sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-ingress").Inc()
 		}
 	}
-	return nil
+	if egressProgInfo.Program.ProgFD != 0 {
+		egressProgFD = egressProgInfo.Program.ProgFD
+		mapToUpdate := egressProgInfo.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
+
+		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s", egressProgFD, utils.TC_CLUSTER_POLICY_EGRESS_MAP)
+
+		inMemVal, exists := l.clusterPolicyEgressInMemoryMap.Load(podIdentifier)
+		if !exists {
+			log().Infof("didn't find cluster policy egress in-mem map for %v", podIdentifier)
+			inMemMap, err := NewInMemoryBpfMap(&mapToUpdate)
+			if err != nil {
+				egressErr = fmt.Errorf("cluster policy egress in-mem map hydrate: %w", err)
+			} else {
+				l.clusterPolicyEgressInMemoryMap.Store(podIdentifier, inMemMap)
+				log().Infof("cluster policy egress map for %v loaded successfully", podIdentifier)
+				inMemVal = inMemMap
+			}
+		}
+
+		if egressErr == nil {
+			inMemMap, typeOk := inMemVal.(*InMemoryBpfMap)
+			if !typeOk {
+				egressErr = fmt.Errorf("cluster policy egress in-mem map: unexpected type %T", inMemVal)
+			} else {
+				writeErr := l.updateClusterPolicyEbpfMap(egressFirewallRules, inMemMap)
+				duration := msSince(start)
+				sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
+				if writeErr != nil {
+					egressErr = fmt.Errorf("cluster policy egress map write: %w", writeErr)
+				}
+			}
+		}
+		if egressErr != nil {
+			log().Errorf("Cluster Policy Egress Map update failed: %v", egressErr)
+			sdkAPIErr.WithLabelValues("updateClusterPolicyEbpfMap-egress").Inc()
+		}
+	}
+	return errors.Join(ingressErr, egressErr)
 }
 
+// CreatePodStateEbpfEntryIfNotExists seeds the initial pod-state map entry for
+// podIdentifier under both the ingress and egress hooks. Used at probe-attach
+// time to put the pod into a defined default state (DEFAULT_ALLOW or
+// DEFAULT_DENY) before any policy rules are programmed.
 func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
 	keyval := uint32(key)
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
-
-	if ok {
-		peBPFContext := value.(BPFContext)
-		ingressProgInfo := peBPFContext.ingressPgmInfo
-		egressProgInfo := peBPFContext.egressPgmInfo
-		value := pod_state{state: uint8(state)}
-		if ingressProgInfo.Program.ProgFD != 0 {
-			mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-			mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&value)))
-		}
-		if egressProgInfo.Program.ProgFD != 0 {
-			mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-			mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&value)))
+	if !ok {
+		sdkAPIErr.WithLabelValues("createPodStateEntry-no-context").Inc()
+		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
+	}
+	peBPFContext, ok := value.(BPFContext)
+	if !ok {
+		sdkAPIErr.WithLabelValues("createPodStateEntry-bad-context-type").Inc()
+		return fmt.Errorf("unexpected bpf context type %T for pod %s", value, podIdentifier)
+	}
+	ingressProgInfo := peBPFContext.ingressPgmInfo
+	egressProgInfo := peBPFContext.egressPgmInfo
+	podStateValue := pod_state{state: uint8(state)}
+	var ingressErr, egressErr error
+	// CreateMapEntry uses BPF_NOEXIST and the SDK swallows EEXIST as nil,
+	// so repeated calls are no-ops and this function stays idempotent.
+	if ingressProgInfo.Program.ProgFD != 0 {
+		mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
+		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+			log().Errorf("Ingress Pod State entry create failed: %v", err)
+			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress").Inc()
+			ingressErr = fmt.Errorf("ingress pod state entry create: %w", err)
 		}
 	}
-	return nil
+	if egressProgInfo.Program.ProgFD != 0 {
+		mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
+		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+			log().Errorf("Egress Pod State entry create failed: %v", err)
+			sdkAPIErr.WithLabelValues("createPodStateEntry-egress").Inc()
+			egressErr = fmt.Errorf("egress pod state entry create: %w", err)
+		}
+	}
+	return errors.Join(ingressErr, egressErr)
 }
 
+// UpdatePodStateEbpfMaps writes the pod-state value (DEFAULT_ALLOW,
+// DEFAULT_DENY, or POLICIES_APPLIED) for podIdentifier into the
+// TC_INGRESS_POD_STATE_MAP and/or TC_EGRESS_POD_STATE_MAP, gated by the
+// updateIngress and updateEgress flags. Ingress and egress are attempted
+// independently and any errors are returned joined.
 func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 
 	var ingressProgFD, egressProgFD int
 	var mapToUpdate goebpfmaps.BpfMap
-	start := time.Now()
+	var ingressErr, egressErr error
 	keyval := uint32(key)
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateEbpfMap-podstate-no-context").Inc()
+		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
+	}
+	peBPFContext, ok := value.(BPFContext)
+	if !ok {
+		sdkAPIErr.WithLabelValues("updateEbpfMap-podstate-bad-context-type").Inc()
+		return fmt.Errorf("unexpected bpf context type %T for pod %s", value, podIdentifier)
+	}
+	ingressProgInfo := peBPFContext.ingressPgmInfo
+	egressProgInfo := peBPFContext.egressPgmInfo
+	podStateValue := pod_state{state: uint8(state)}
 
-	if ok {
-		peBPFContext := value.(BPFContext)
-		ingressProgInfo := peBPFContext.ingressPgmInfo
-		egressProgInfo := peBPFContext.egressPgmInfo
-		value := pod_state{state: uint8(state)} // pod_state_map value
-
-		if updateIngress && ingressProgInfo.Program.ProgFD != 0 {
-			ingressProgFD = ingressProgInfo.Program.ProgFD
-			mapToUpdate = ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-			log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, value)
-			err := mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&value)), 0)
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				log().Errorf("Ingress Pod State Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
-			}
-		}
-		if updateEgress && egressProgInfo.Program.ProgFD != 0 {
-			egressProgFD = egressProgInfo.Program.ProgFD
-			mapToUpdate = egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-
-			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, value)
-			err := mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&value)), 0)
-			duration := msSince(start)
-			sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(err != nil)).Observe(duration)
-			if err != nil {
-				log().Errorf("Egress Map update failed: %v", err)
-				sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
-			}
+	if updateIngress && ingressProgInfo.Program.ProgFD != 0 {
+		ingressProgFD = ingressProgInfo.Program.ProgFD
+		mapToUpdate = ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
+		log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, podStateValue.state)
+		start := time.Now()
+		ingressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(ingressErr != nil)).Observe(msSince(start))
+		if ingressErr != nil {
+			log().Errorf("Ingress Pod State Map update failed: %v", ingressErr)
+			sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
+			ingressErr = fmt.Errorf("ingress pod state map write: %w", ingressErr)
 		}
 	}
-	return nil
+	if updateEgress && egressProgInfo.Program.ProgFD != 0 {
+		egressProgFD = egressProgInfo.Program.ProgFD
+		mapToUpdate = egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
+
+		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
+		start := time.Now()
+		egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
+		if egressErr != nil {
+			log().Errorf("Egress Map update failed: %v", egressErr)
+			sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
+			egressErr = fmt.Errorf("egress pod state map write: %w", egressErr)
+		}
+	}
+	return errors.Join(ingressErr, egressErr)
 }
 
 func (l *bpfClient) isEBPFProbeAttached(podName string, podNamespace string) (bool, bool) {
@@ -1268,4 +1382,40 @@ func (l *bpfClient) deletePodFromEgressProgPodCaches(podName string, podNamespac
 			}
 		}
 	}
+}
+
+// startDeletedPodsCleanupRoutine cleans up entries from the deletedPods map that are older than deletedPodsMinAge.
+func (l *bpfClient) startDeletedPodsCleanupRoutine(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(deletedPodsMinAge / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.cleanupDeletedPodsIfNeeded()
+			}
+		}
+	}()
+}
+
+func (l *bpfClient) cleanupDeletedPodsIfNeeded() {
+	now := time.Now()
+	cleaned := 0
+	l.deletedPods.Range(func(key, value any) bool {
+		ts, ok := value.(time.Time)
+		if !ok {
+			log().Warnf("unexpected type for timestamp, got %T, expected time.Time", value)
+			l.deletedPods.Delete(key)
+			cleaned++
+			return true
+		}
+		if now.Sub(ts) > deletedPodsMinAge {
+			l.deletedPods.Delete(key)
+			cleaned++
+		}
+		return true
+	})
+	log().Debugf("deletedPods cleanup complete, removed %d entries", cleaned)
 }

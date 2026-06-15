@@ -97,7 +97,7 @@ else
     echo "Skipping making ginkgo test binaries"
 fi
 
-CGO_ENABLED=0 ginkgo -v -timeout 15m $GINKGO_TEST_BUILD_DIR/policy.test --no-color --fail-on-pending -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
+CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending $GINKGO_TEST_BUILD_DIR/policy.test -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
