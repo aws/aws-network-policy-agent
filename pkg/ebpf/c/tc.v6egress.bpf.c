@@ -472,4 +472,5 @@ int handle_egress(struct __sk_buff *skb)
 	return BPF_OK;
 }
 
+const volatile __u32 NPA_FILE_VERSION = 2;
 char _license[] SEC("license") = "GPL";
