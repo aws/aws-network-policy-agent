@@ -126,7 +126,7 @@ type BPFContext struct {
 }
 
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs bool, policyEventsLogsScope string, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 	var policyEventsScopeMap goebpfmaps.BpfMap
 
@@ -161,7 +161,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs bool
 	isConntrackMapPresent, isPolicyEventsMapPresent, isPolicyEventsScopeMapPresent := false, false, false
 	var err error
 
-	ebpfClient.bpfSDKClient = goelf.New()
+	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
@@ -291,7 +291,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs bool
 	}
 
 	if enablePolicyEventLogs {
-		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
+		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, logLevel)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
 			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
@@ -433,6 +433,18 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 	eventsMapFD := 0
 	var interfaceNametoIngressPinPath = make(map[string]string)
 	var interfaceNametoEgressPinPath = make(map[string]string)
+
+	// Rename legacy "-" separator pin files to the new "_" format using
+	// VPC CNI's local pod inventory. Runs once per node, guarded by
+	// formatV2MarkerPath.
+	if err := migrateLegacyPinsFromCNIState(
+		utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY,
+		utils.BPF_MAPS_PIN_PATH_DIRECTORY,
+		cniIpamStatePath,
+		formatV2MarkerPath,
+	); err != nil {
+		log().Errorf("legacy pin migration failed (non-fatal): %v", err)
+	}
 
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
@@ -836,7 +848,15 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 
 	log().Infof("Attempting to do an Ingress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
-	if err != nil && !utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err.Error()) {
+		log().Warnf("Stale ingress TC filter on %s; detaching before re-attach", hostVethName)
+		if detachErr := l.bpfTCClient.TCEgressDetach(hostVethName); detachErr != nil {
+			log().Errorf("Ingress TC detach failed on %s: %v", hostVethName, detachErr)
+			return 0, detachErr
+		}
+		err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
+	}
+	if err != nil {
 		log().Errorf("Ingress Attach failed %v", err)
 		return 0, err
 	}
@@ -873,7 +893,15 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 	log().Infof("Attempting to do an Egress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
-	if err != nil && !utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err.Error()) {
+		log().Warnf("Stale egress TC filter on %s; detaching before re-attach", hostVethName)
+		if detachErr := l.bpfTCClient.TCIngressDetach(hostVethName); detachErr != nil {
+			log().Errorf("Egress TC detach failed on %s: %v", hostVethName, detachErr)
+			return 0, detachErr
+		}
+		err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
+	}
+	if err != nil {
 		log().Errorf("Egress Attach failed %v", err)
 		return 0, err
 	}

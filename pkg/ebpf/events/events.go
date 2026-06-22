@@ -88,7 +88,7 @@ type ringBufferDataV6_t struct {
 	Tier       uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, logLevel string) error {
 	// Enable logging and setup ring buffer
 	ctx := context.Background()
 	if mapFD <= 0 {
@@ -113,7 +113,7 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 			}
 		}
 		log().Debug("Configure Event loop ... ")
-		capturePolicyEvents(ctx, eventChanList[mapFD], enableCloudWatchLogs, enableIPv6)
+		capturePolicyEvents(ctx, eventChanList[mapFD], enableCloudWatchLogs, enableIPv6, logLevel)
 	}
 	return nil
 }
@@ -207,7 +207,7 @@ func publishDataToCloudwatch(ctx context.Context, logQueue []types.InputLogEvent
 	return true
 }
 
-func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool) {
+func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enableCloudWatchLogs bool, enableIPv6 bool, logLevel string) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// Read from ringbuffer channel, perf buffer support is not there and 5.10 kernel is needed.
 	go func(ringbufferdata <-chan []byte) {
@@ -215,6 +215,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 		for record := range ringbufferdata {
 			var logQueue []types.InputLogEvent
 			var message string
+			var isDenyVerdict bool
 			direction := "egress"
 			if enableIPv6 {
 				var rb ringBufferDataV6_t
@@ -232,6 +233,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				}
 
 				tier := getTier(int(rb.Tier))
+				isDenyVerdict = rb.Verdict == VerdictDeny
 
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
@@ -260,6 +262,7 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 				}
 
 				tier := getTier(int(rb.Tier))
+				isDenyVerdict = rb.Verdict == VerdictDeny
 
 				if rb.Verdict == VerdictDeny {
 					dropCountTotal.WithLabelValues(direction).Add(float64(1))
@@ -274,9 +277,13 @@ func capturePolicyEvents(ctx context.Context, ringbufferdata <-chan []byte, enab
 			}
 
 			if enableCloudWatchLogs {
-				done = publishDataToCloudwatch(ctx, logQueue, message)
-				if done {
-					break
+				// Apply same filtering as local logging:
+				// DENY always published, ACCEPT only at debug level
+				if isDenyVerdict || logLevel == "debug" {
+					done = publishDataToCloudwatch(ctx, logQueue, message)
+					if done {
+						break
+					}
 				}
 			}
 		}

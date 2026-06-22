@@ -85,6 +85,7 @@ struct conntrack_key {
 	__u16 dest_port;
 	__u8  protocol;
 	struct in6_addr owner_addr;
+	__u32 ifindex;
 };
 
 struct conntrack_value {
@@ -418,6 +419,8 @@ int handle_egress(struct __sk_buff *skb)
 		flow_key.dest_port = l4_dst_port;
 		flow_key.protocol = ip->nexthdr;
 		flow_key.owner_addr = ip->saddr;
+		// ifindex scopes conntrack entries to this pod's veth, preventing cross-pod poisoning
+		flow_key.ifindex = skb->ifindex;
 
 		evt.src_ip = ip->saddr;
 		evt.dest_ip = ip->daddr;
@@ -469,6 +472,7 @@ int handle_egress(struct __sk_buff *skb)
 		reverse_flow_key.dest_port = l4_src_port;
 		reverse_flow_key.protocol = ip->nexthdr;
 		reverse_flow_key.owner_addr = ip->saddr;
+		reverse_flow_key.ifindex = skb->ifindex; // same veth for both directions in TC
 			
 		//Check if it's a response packet
 		reverse_flow_val = (struct conntrack_value *)bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
@@ -481,4 +485,5 @@ int handle_egress(struct __sk_buff *skb)
 	return BPF_OK;
 }
 
+const volatile __u32 NPA_FILE_VERSION = 2;
 char _license[] SEC("license") = "GPL";
