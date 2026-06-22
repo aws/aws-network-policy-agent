@@ -394,10 +394,18 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 			// Update the Maps and move on
 			log().Infof("Active policies against this pod. Skip Detaching probes and Update Maps... ")
 			if noActiveIngressPolicies {
-				// No active ingress rules for this pod, but we only should land here
-				// if there are active egress rules. So, we need to add an allow-all entry to ingress rule set
+				// No active ingress rules for this pod (only egress rules remain).
+				// Add an allow-all entry to ingress rule set so non-egress traffic isn't dropped.
 				log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
 				r.addCatchAllEntry(&ingressRules)
+			}
+			if noActiveEgressPolicies {
+				// No active egress rules for this pod (only ingress rules remain).
+				// Add an allow-all entry to egress rule set so egress isn't dropped.
+				// Without this, egress_map ends up empty while egress_pod_state_map stays
+				// at POLICIES_APPLIED, and the eBPF dataplane drops all egress traffic.
+				log().Info("No Egress rules and no egress isolation - Appending catch all entry")
+				r.addCatchAllEntry(&egressRules)
 			}
 
 			err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED)
