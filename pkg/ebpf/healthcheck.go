@@ -17,7 +17,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
+
+// BPF_FS_ROOT is the mount point the agent pins its programs and maps under.
+const BPF_FS_ROOT = "/sys/fs/bpf"
 
 // NewGlobalMapsReadinessCheck returns a health check that verifies the given
 // BPF map pin paths exist.
@@ -29,6 +34,32 @@ func NewGlobalMapsReadinessCheck(paths []string) func(_ *http.Request) error {
 				log().Errorf("bpf-maps check failed: %v", err)
 				return err
 			}
+		}
+		return nil
+	}
+}
+
+// NewBpfFsReadinessCheck returns a readiness check that verifies the BPF
+// filesystem at root is mounted as bpffs and is not mounted read-only. Without
+// a writable bpffs the agent cannot pin programs or maps, so it should not be
+// reported ready even if the process and gRPC server are up.
+func NewBpfFsReadinessCheck(root string) func(_ *http.Request) error {
+	return func(_ *http.Request) error {
+		var st unix.Statfs_t
+		if err := unix.Statfs(root, &st); err != nil {
+			err = fmt.Errorf("statfs %s failed: %w", root, err)
+			log().Errorf("bpf-fs check failed: %v", err)
+			return err
+		}
+		if st.Type != unix.BPF_FS_MAGIC {
+			err := fmt.Errorf("%s is not a bpffs mount (fs magic 0x%x)", root, st.Type)
+			log().Errorf("bpf-fs check failed: %v", err)
+			return err
+		}
+		if st.Flags&unix.ST_RDONLY != 0 {
+			err := fmt.Errorf("bpf filesystem at %s is mounted read-only", root)
+			log().Errorf("bpf-fs check failed: %v", err)
+			return err
 		}
 		return nil
 	}
