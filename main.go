@@ -155,12 +155,12 @@ func main() {
 
 	// The gRPC server runs whether or not network policy is enabled, so its
 	// health checks are registered unconditionally.
-	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketHealthCheck(npaSocketPath)); err != nil {
 		log.Errorf("unable to set up gRPC socket health check %v", err)
 		os.Exit(1)
 	}
 
-	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketHealthCheck(npaSocketPath)); err != nil {
 		log.Errorf("unable to set up grpc-socket readiness check %v", err)
 		os.Exit(1)
 	}

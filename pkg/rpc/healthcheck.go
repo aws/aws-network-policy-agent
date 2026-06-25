@@ -27,11 +27,15 @@ import (
 
 const livenessCheckTimeout = 10 * time.Second
 
-// NewGRPCSocketLivenessCheck returns a health check that issues a gRPC
+// NewGRPCSocketHealthCheck returns a health check that issues a gRPC
 // Health/Check RPC against the NPA Unix socket at socketPath.
-func NewGRPCSocketLivenessCheck(socketPath string) func(_ *http.Request) error {
-	return func(_ *http.Request) error {
-		ctx, cancel := context.WithTimeout(context.Background(), livenessCheckTimeout)
+func NewGRPCSocketHealthCheck(socketPath string) func(r *http.Request) error {
+	return func(r *http.Request) error {
+		baseCtx := context.Background()
+		if r != nil {
+			baseCtx = r.Context()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, livenessCheckTimeout)
 		defer cancel()
 
 		conn, err := grpc.NewClient(
