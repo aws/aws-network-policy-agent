@@ -133,26 +133,7 @@ func main() {
 			log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
 			os.Exit(1)
 		}
-	} else {
-		log.Info("Network Policy is disabled, skip the controller registration")
-	}
 
-	//+kubebuilder:scaffold:builder
-
-	// Liveness probe: gRPC server responsiveness.
-	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
-		log.Errorf("unable to set up gRPC socket health check %v", err)
-		os.Exit(1)
-	}
-
-	// Readiness probe: gRPC server responsiveness and BPF map pins (when
-	// network policy is enabled).
-	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
-		log.Errorf("unable to set up grpc-socket readiness check %v", err)
-		os.Exit(1)
-	}
-
-	if ctrlConfig.EnableNetworkPolicy {
 		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH}
 		if ctrlConfig.EnablePolicyEventLogs {
 			readyzPaths = append(readyzPaths, ebpf.POLICY_EVENTS_MAP_PIN_PATH)
@@ -161,10 +142,32 @@ func main() {
 			log.Errorf("unable to set up bpf-maps readiness check %v", err)
 			os.Exit(1)
 		}
+
+		if err := mgr.AddReadyzCheck("bpf-fs", ebpf.NewBpfFsReadinessCheck(ebpf.BPF_FS_ROOT)); err != nil {
+			log.Errorf("unable to set up bpf-fs readiness check %v", err)
+			os.Exit(1)
+		}
+	} else {
+		log.Info("Network Policy is disabled, skip the controller registration")
+	}
+
+	//+kubebuilder:scaffold:builder
+
+	// The gRPC server runs whether or not network policy is enabled, so its
+	// health checks are registered unconditionally.
+	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+		log.Errorf("unable to set up gRPC socket health check %v", err)
+		os.Exit(1)
+	}
+
+	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketLivenessCheck(npaSocketPath)); err != nil {
+		log.Errorf("unable to set up grpc-socket readiness check %v", err)
+		os.Exit(1)
 	}
 
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
+	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
 	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath)
 	if err != nil {
 		log.Errorf("Failed to set up gRPC Handler %v", err)
