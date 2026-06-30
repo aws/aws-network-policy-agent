@@ -30,6 +30,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
+	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/samber/lo"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -74,7 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
-	log.Infof("Starting network policy agent with log level: %s", ctrlConfig.LogLevel)
+	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
 	if ctrlConfig.EnableProfiling {
