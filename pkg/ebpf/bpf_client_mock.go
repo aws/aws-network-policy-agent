@@ -32,6 +32,10 @@ type MockBpfClient struct {
 	UpdateClusterPolicyEbpfMapsErr        error
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
+
+	// Captured args from the most recent UpdateEbpfMaps call.
+	LastIngressRules []fwrp.EbpfFirewallRules
+	LastEgressRules  []fwrp.EbpfFirewallRules
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -46,6 +50,8 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
+	m.LastIngressRules = ingressFirewallRules
+	m.LastEgressRules = egressFirewallRules
 	return m.UpdateEbpfMapsErr
 }
 
