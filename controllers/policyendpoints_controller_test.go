@@ -1381,3 +1381,177 @@ func TestUpdateClusterPolicyBPFMaps_FailClosed(t *testing.T) {
 		return r.updateClusterPolicyBPFMaps("test-pod-id", nil, nil)
 	})
 }
+
+// Regression test for the asymmetric catch-all bug in cleanupPod (issue #591):
+// after cleaning up one of N Ingress-only NPs selecting a pod, the egress rules
+// written to the bpf client must still contain the 0.0.0.0/0 catch-all so that
+// egress_map stays consistent with pod_state=POLICIES_APPLIED.
+func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+
+	namespace := "my-namespace"
+	podIdentifier := "deployment1rs@my-namespace"
+	cleanedUpPE := "ingress-1-abcd"
+	remainingPE := "ingress-2-abcd"
+
+	remainingPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: remainingPE, Namespace: namespace},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef:   policyendpoint.PolicyReference{Name: "ingress-2", Namespace: namespace},
+			Ingress: []policyendpoint.EndpointInfo{
+				{
+					CIDR:  "10.0.0.0/24",
+					Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}},
+				},
+			},
+		},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*currentPE = remainingPolicy
+			return nil
+		},
+	).AnyTimes()
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	assert.NoError(t, err)
+
+	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
+	assert.Contains(t, mockBpf.LastEgressRules, catchAll)
+	assert.NotContains(t, mockBpf.LastIngressRules, catchAll)
+	assert.NotEmpty(t, mockBpf.LastIngressRules)
+}
+
+// Symmetric variant of TestCleanupPod_PreservesCatchAllOnRemainingPolicy:
+// after cleaning up one of N Egress-only NPs selecting a pod, the ingress rules
+// written to the bpf client must contain the 0.0.0.0/0 catch-all so that
+// ingress_map stays consistent with pod_state=POLICIES_APPLIED.
+func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+
+	namespace := "my-namespace"
+	podIdentifier := "deployment1rs@my-namespace"
+	cleanedUpPE := "egress-1-abcd"
+	remainingPE := "egress-2-abcd"
+
+	remainingPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: remainingPE, Namespace: namespace},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef:   policyendpoint.PolicyReference{Name: "egress-2", Namespace: namespace},
+			Egress: []policyendpoint.EndpointInfo{
+				{
+					CIDR:  "10.0.0.0/24",
+					Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}},
+				},
+			},
+		},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*currentPE = remainingPolicy
+			return nil
+		},
+	).AnyTimes()
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	assert.NoError(t, err)
+
+	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
+	assert.Contains(t, mockBpf.LastIngressRules, catchAll)
+	assert.NotContains(t, mockBpf.LastEgressRules, catchAll)
+	assert.NotEmpty(t, mockBpf.LastEgressRules)
+}
+
+// When the remaining PolicyEndpoint has BOTH ingress and egress rules,
+// neither side should get a 0.0.0.0/0 catch-all appended on cleanup —
+// the existing rule sets are non-empty so the dataplane will not drop traffic.
+func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+
+	namespace := "my-namespace"
+	podIdentifier := "deployment1rs@my-namespace"
+	cleanedUpPE := "ingress-1-abcd"
+	remainingPE := "mixed-2-abcd"
+
+	remainingPolicy := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: remainingPE, Namespace: namespace},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef:   policyendpoint.PolicyReference{Name: "mixed-2", Namespace: namespace},
+			Ingress: []policyendpoint.EndpointInfo{
+				{
+					CIDR:  "10.0.0.0/24",
+					Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}},
+				},
+			},
+			Egress: []policyendpoint.EndpointInfo{
+				{
+					CIDR:  "10.0.1.0/24",
+					Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}},
+				},
+			},
+		},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*currentPE = remainingPolicy
+			return nil
+		},
+	).AnyTimes()
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	assert.NoError(t, err)
+
+	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
+	assert.NotContains(t, mockBpf.LastIngressRules, catchAll)
+	assert.NotContains(t, mockBpf.LastEgressRules, catchAll)
+	assert.NotEmpty(t, mockBpf.LastIngressRules)
+	assert.NotEmpty(t, mockBpf.LastEgressRules)
+}
