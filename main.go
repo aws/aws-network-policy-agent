@@ -22,6 +22,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"time"
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
@@ -54,7 +55,7 @@ import (
 
 var (
 	scheme              = runtime.NewScheme()
-	LOCAL_IPAMD_ADDRESS = "127.0.0.1:50051"
+	LOCAL_IPAMD_ADDRESS = "unix:///var/run/aws-node/ipamd.sock"
 	npaSocketPath       = "/var/run/aws-node/npa.sock"
 )
 
@@ -115,7 +116,7 @@ func main() {
 			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
 		}
 
-		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(log))
+		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
@@ -184,14 +185,13 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 	return controllerConfig, nil
 }
 
-func getNetworkPolicyConfigsFromIpamd(log logger.Logger) (string, bool, error) {
-	ctx := context.Background()
-
-	// grpc connection waits till the ipmad is up and running
-	log.Info("Trying to establish GRPC connection to ipamd")
+func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (string, bool, error) {
+	log.Infof("Trying to establish GRPC connection to ipamd at %s", LOCAL_IPAMD_ADDRESS)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
 	if err != nil {
-		log.Errorf("Failed to connect to ipamd %v", err)
+		log.Errorf("Failed to connect to ipamd at %s: %v", LOCAL_IPAMD_ADDRESS, err)
 		return "", false, err
 	}
 	defer grpcConn.Close()
@@ -202,7 +202,7 @@ func getNetworkPolicyConfigsFromIpamd(log logger.Logger) (string, bool, error) {
 		log.Errorf("Failed to get network policy configs %v", err)
 		return "", false, err
 	}
-	log.Infof("Connected to ipamd grpc endpoint. NetworkPolicyMode: %s MultiNICEnabled: %v", resp.NetworkPolicyMode, resp.MultiNICEnabled)
+	log.Infof("Connected to ipamd at %s. NetworkPolicyMode: %s MultiNICEnabled: %v", LOCAL_IPAMD_ADDRESS, resp.NetworkPolicyMode, resp.MultiNICEnabled)
 	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
 		err = errors.New("Invalid Network Policy Mode")
 		log.Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
