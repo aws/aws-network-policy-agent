@@ -67,21 +67,32 @@ func assertNoBPFLeak(rec *Recorder, base baseline, nodes []v1.Node) {
 }
 
 // dumpBPFState runs the node agent CLI inside a privileged pod and parses the
-// loaded-ebpfdata dump, reusing the same primitives as the leak and restart
-// suites so the soak observes BPF state exactly as they do.
+// loaded-ebpfdata dump. It asserts on success, so it is only safe to call from the
+// main goroutine (baseline capture, end-of-run leak check). Concurrent activity
+// loops must use tryDumpBPFState, which returns an error instead of asserting.
 func dumpBPFState(nodeName string) utils.BPFState {
+	state, err := tryDumpBPFState(nodeName)
+	Expect(err).ToNot(HaveOccurred(), "failed to dump bpf state on "+nodeName)
+	return state
+}
+
+// tryDumpBPFState is the non-asserting form. A transient infra error (check pod
+// failed to schedule, exec hiccup) is returned rather than failing the whole run,
+// so a driver loop can log and move on instead of a flake tanking a 4h soak.
+func tryDumpBPFState(nodeName string) (utils.BPFState, error) {
 	checkPod := utils.BuildBPFCheckPod(namespace, nodeName)
 	created, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, podReadyTimeout)
-	Expect(err).ToNot(HaveOccurred())
+	if err != nil {
+		return utils.BPFState{}, fmt.Errorf("start bpf-check pod on %s: %w", nodeName, err)
+	}
 	defer fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, created)
 
 	output, err := fw.PodManager.ExecInPod(namespace, created.Name,
 		[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
-	Expect(err).ToNot(HaveOccurred(), "failed to dump bpf state")
-
-	state, err := utils.ParseLoadedEBPFData(output)
-	Expect(err).ToNot(HaveOccurred(), "failed to parse loaded-ebpfdata")
-	return state
+	if err != nil {
+		return utils.BPFState{}, fmt.Errorf("dump bpf state on %s: %w", nodeName, err)
+	}
+	return utils.ParseLoadedEBPFData(output)
 }
 
 // scanForConntrackRace reads each node's agent log and records a ConntrackRace

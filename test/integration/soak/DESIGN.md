@@ -5,35 +5,75 @@ AAT-A-3 test-class 2 ("Soak — None"): the existing `test/integration/leak` sui
 runs only 20 min and never reaches the conntrack-cleanup race on port reuse under
 sustained churn.
 
-Primary regression target: **GitHub
-[#462](https://github.com/aws/aws-network-policy-agent/issues/462)** /
-`V2221143078` (Kaltura) — "Race Condition in NPA Conntrack Cleanup Causing
-Intermittent Traffic Denials". See §4a for the exact reproduction recipe; this is
-the scenario the whole harness is built around.
+The soak's own lane is **accumulation and drift over time at fixed small scale**:
+BPF and conntrack leaks, memory and CPU and goroutine growth, agent restarts, and
+enforcement staying correct across the whole window and across repeated agent
+kills. Scale ceilings and absolute perf baselines are not this suite's job; they
+belong to X-1 (scale/breaking-point) and X-3 (perf baseline). See §5a for that
+boundary.
+
+GitHub [#462](https://github.com/aws/aws-network-policy-agent/issues/462) /
+`V2221143078` (Kaltura), the conntrack-cleanup race that denies return traffic
+under port reuse, is a **timing race, not an accumulation failure**. A single 4h
+run samples the race once, which is a weak way to prove a fix holds. So it is split
+in two: a **separate, fast, repeatable aggressive-timing test** owns the repro and
+fix-validation (§4a), and the soak keeps only a **mild continuous regression
+guard** so a reintroduced bug still trips a long run.
 
 This doc fixes **what we measure** and **what scenarios we run** before any Go is
 written. Scope of v1 is **EC2 mode only** (sidecar `aws-eks-nodeagent` in the
-`aws-node` DaemonSet). Auto-mode extensions (ANP/FQDN, DNS proxy load, watchdog
-pressure) and AZ-impairment are deferred to a later section.
+`aws-node` DaemonSet). Auto-mode (ANP/FQDN, DNS proxy load, watchdog pressure) is
+deferred to §8, but note ORR X-2 names it in scope, so it is tracked for v2, not
+dropped. AZ-impairment is also deferred.
 
 ---
 
-## 1. Goal
+## 1. Goals
 
-Run sustained mixed traffic + churn against NPA on a small node set (1–3 nodes)
+Run sustained mixed traffic and churn against NPA on a small node set (1-3 nodes)
 for a configurable window (**default 4h**; `--soak-duration`) and prove the agent
-does not:
+holds up over time. The goals are tiered by what v1 gates on. Tier ordering comes
+from the goals/dimensions audit against the ORR and the Cilium/Calico prior art.
 
-- silently mis-enforce policy (false-allow / false-deny) at any point,
-- drop return traffic due to the conntrack-cleanup race (#462),
-- leak BPF programs or maps,
-- grow memory unboundedly (>50 MiB growth over the run),
-- regress policy-programming latency (>10s).
+**Tier 1 (v1 gates on these):**
 
-The soak is a **detector for slow/accumulating and timing-dependent failures**
-that point-in-time integration tests miss. Correctness is judged on signals we
-control directly (probes + BPF dumps + policy event logs); resource cost is judged
-from CloudWatch Container Insights; agent-reported latency is advisory (see §6).
+- **No BPF program or map leak.** Counts return to baseline after churn drains.
+  This is the reason the suite exists; the 20-minute leak suite never reaches it.
+- **No established-connection disruption.** Long-lived connections stay up across
+  churn, hot-updates, and agent kills. This is the most robust correctness signal
+  and needs no metrics endpoint.
+- **No agent restart, OOM, or watchdog kill.** The `aws-eks-nodeagent` container's
+  restart count does not move over the run. Maps to the top recurring failure class
+  (ORR NDP-A-5 #1) and is always observable.
+- **Enforcement stays correct over the window, ingress AND egress, false-allow AND
+  false-deny.** Egress is a separate eBPF program, map, and conntrack direction, so
+  it needs its own probes, not just ingress.
+- **Recovery stays correct across repeated agent kills.** After each kill the
+  conntrack map is preserved, programs re-attach, and enforcement still holds.
+- **Memory, CPU, and goroutines do not grow unboundedly.** Judged as growth against
+  the run's own post-warmup baseline, not a fixed absolute (see §2c and §3a for why
+  the ORR's flat >50 MiB number is too loose at soak scale).
+
+**Tier 2 (add to v1 as gates):**
+
+- **Strict (DefaultDeny) mode holds over the window.** Strict mode is where
+  programming drift becomes a customer-visible outage rather than a metrics blip,
+  so it is the highest-risk dimension the plan was missing.
+- **Policy hot-update does not transiently drop a newly allowed flow.** Distinct
+  from established-connection survival; a new flow initiated mid-reconcile must not
+  be dropped (see the coherence note in §2a about retry-to-expected).
+- **#462 continuous regression guard.** A mild always-on port-reuse driver so a
+  reintroduced conntrack-race bug trips a long run. The aggressive repro and
+  fix-validation live in a separate targeted test (§4a).
+
+**Advisory, not gated:** NPA's own Prometheus business-logic metrics (ORR X-6 flags
+several as implemented incorrectly) and absolute programming latency (an X-3 perf
+number, not a soak signal). Collected and charted; opt-in to gate (§2f).
+
+The soak detects slow, accumulating, and timing-dependent failures that
+point-in-time integration tests miss. It judges correctness from signals we control
+directly (probes, BPF dumps, policy event logs) and resource cost from kubelet
+per-container stats (§2c).
 
 ---
 
@@ -60,6 +100,14 @@ transient reconcile window isn't a false fail, while a *persistent* mismatch is.
 
 A single persistent wrong result (false-allow on deny, false-deny on allow) is a
 **hard fail**; the run records timestamp + probe identity.
+
+**Coherence note on retry-to-expected.** Retrying a probe until it matches the
+expected verdict tolerates programming lag, but by construction it cannot see a
+*transient* wrong result on a flow that was already correct. So the two tolerances
+are stated explicitly: we tolerate first-probe lag right after a policy applies, and
+we must catch a drop on an already-correct flow. The Tier-2 hot-update goal is
+tested with a *newly initiated* allowed flow during the reconcile window (not a
+retry-to-expected probe), so a transient drop there is caught rather than masked.
 
 **Long-lived-connection disruption detector** (from Cilium `upgrade.go` /
 `no_interrupted_connections.go`): in addition to point probes, keep a set of
@@ -96,46 +144,35 @@ timing, so we detect it two ways:
    cross-check against `network_policy_drop_count_total{direction="ingress"}` —
    the counter should not tick for traffic that policy intends to allow.
 
-### 2c. Resource cost — CloudWatch Container Insights (PRIMARY for mem/CPU)
+### 2c. Resource cost — kubelet per-container stats (PRIMARY for mem/CPU)
 
-Install the **Amazon CloudWatch Observability EKS add-on** on the soak cluster and
-read the NPA container's CPU/memory from the cluster's **own AWS account**.
+Read the NPA container's CPU and working-set memory from the kubelet
+`/stats/summary` endpoint, reached through the API-server proxy with the kubeconfig
+the suite already has. This is what the implemented harness uses.
 
-Critical nuance: the default `ContainerInsights` *metrics* only aggregate at
-cluster/node/**pod** level — there is **no per-container metric**. The `aws-node`
-pod bundles three containers (`aws-vpc-cni-init`, `aws-node`, `aws-eks-nodeagent`),
-so pod-level memory would fold in the CNI and pollute the >50 MiB signal. To
-isolate NPA we query the **performance log events**, which carry per-container
-fields, via CloudWatch Logs Insights.
+Two reasons for kubelet stats over the alternatives. First, the signal must isolate
+one container: the `aws-node` pod bundles `aws-vpc-cni-init`, `aws-node`, and
+`aws-eks-nodeagent`, so a pod-level number folds in the CNI and pollutes the growth
+signal. The kubelet summary reports per-container `workingSetBytes`, from the same
+cadvisor source CloudWatch uses. Second, it needs no AWS credentials and no
+observability add-on, so the soak runs anywhere the kubeconfig reaches, and it
+sidesteps NPA's own metrics, which X-6 flags as incorrect.
 
-- Log group: `/aws/containerinsights/<cluster-name>/performance`
-- Fields: `container_memory_working_set`, `container_cpu_usage_total`
-- Filter dims: `ContainerName="aws-eks-nodeagent"`, `Namespace="kube-system"`,
-  `ClusterName`, (optionally `FullPodName`/`NodeName` per node).
+- Endpoint: `/api/v1/nodes/<node>/proxy/stats/summary`
+- Container: `aws-eks-nodeagent` in namespace `kube-system`
+- Fields: `memory.workingSetBytes`, `cpu.usageNanoCores` / `usageCoreNanoSeconds`
 
-```
-fields @timestamp, container_memory_working_set, FullPodName
-| filter Type = "Container"
-    and ContainerName = "aws-eks-nodeagent"
-    and Namespace = "kube-system"
-| stats max(container_memory_working_set) as peak_ws,
-        min(container_memory_working_set) as start_ws by bin(5m), FullPodName
-```
+**Growth model.** Per node, track a post-warmup baseline and the peak, and gate on
+`peak - baseline` (see §3a for how the threshold is derived, and why the ORR's flat
+>50 MiB is too loose). Discard the first ~10 min or `D/24` as warm-up, and baseline
+on a short average of post-warmup samples rather than a single first reading.
 
-Why CloudWatch over the on-node Prometheus `:8162` surface for resource cost: the
-Prometheus endpoint exposes NPA's *own* metrics but not its process RSS, and X-5
-flags several NPA metrics as incorrect. Container Insights gets working-set from
-cadvisor, independent of NPA's code.
-
-**Memory-growth criterion** = `peak_ws (last bin)` − `working_set (first stable
-bin, post-warmup)` per node. Discard the first ~10 min as warm-up.
-
-(Alternative considered: the clusterloader2 / k8s `ContainerResourceGatherer` polls
-kubelet stats per-container and `StopAndSummarize` checks p99 against a
-`ResourceConstraint` — same per-container working-set source. We prefer CloudWatch
-because it persists the trend off-cluster for post-run analysis and matches how
-the fleet is actually observed. The gatherer is the in-cluster fallback if the
-observability add-on isn't available.)
+CloudWatch Container Insights is a **future** off-cluster option, not v1. If the
+`amazon-cloudwatch-observability` add-on is installed, the same per-container
+working-set lives in the `/aws/containerinsights/<cluster>/performance` log group
+(field `container_memory_working_set`, filter `ContainerName=aws-eks-nodeagent`),
+which persists the trend off-cluster and matches how the fleet is observed. v1 does
+not depend on it.
 
 ### 2d. BPF / leak — on-node `aws-eks-na-cli` dump (PRIMARY for leak)
 
@@ -156,23 +193,139 @@ Reuse `utils.BuildBPFCheckPod` + `aws-eks-na-cli ebpf loaded-ebpfdata` +
 ### 2e. Programming latency — Prometheus `:8162` (ADVISORY)
 
 Scrape `awsnodeagent_policy_programming_latency_seconds` / `..._cluster_...`
-histograms and `network_policy_drop_count_total{direction}`. X-5 lists the latency
+histograms and `network_policy_drop_count_total{direction}`. X-6 lists the latency
 metrics as suspect, so we **chart** them but **hard-fail only on probe-observed
-propagation delay** (apply→first-correct-probe). Promote to a gate after X-5 lands.
+propagation delay** (apply→first-correct-probe). Promote to a gate after X-6 lands.
+
+### 2f. NPA-emitted metrics and resource counters (opt-in assertions)
+
+This is the goal added in §1: assert on NPA's own business-logic metrics and on
+its restart, CPU, and memory counters. The assertions are opt-in. Two reasons.
+Our test infra may not scrape the `:8162` Prometheus endpoint, and X-6 flags
+several NPA metrics as implemented incorrectly. So the default is to collect and
+chart every value without failing, and one env var promotes specific checks to
+hard gates.
+
+**Gating model.** `SOAK_ASSERT_METRICS` is a comma-separated env var, empty by
+default. A metric not in the list is still scraped and logged for the trend, but
+never fails the run. A metric in the list becomes a hard gate under the rule in
+the table below. `all` enables every check; empty or `none` disables all of them.
+It is an env var rather than a flag because the value describes the environment
+(does this cluster expose metrics?), so it sits with the rest of the environment
+config and CI can set it per-lane without touching the invocation.
+
+**Three independent signal sources.** If the metrics endpoint is missing, the
+run can still observe the other two:
+
+1. **NPA Prometheus `:8162/metrics`** carries the business-logic metrics. We scrape
+   it by running `curl -s localhost:8162/metrics` inside the nodeagent container,
+   since the port is bound to localhost and a co-located exec reaches it without a
+   Service or scrape config. Setup checks that the endpoint answers. If it does
+   not, the metric assertions are skipped and the reason is logged, so a skip is
+   never mistaken for a pass.
+2. **Pod status** gives `containerStatuses[name=aws-eks-nodeagent].restartCount`
+   from the k8s API. This is always available and needs no metrics endpoint.
+3. **kubelet `/stats/summary`** gives per-container CPU and working-set memory. We
+   already built this for §2c, and it works with the kubeconfig alone.
+
+**Metrics inventory.** Read from the source, not the ORR appendix. NPA registers
+exactly these on `:8162`:
+
+| Metric | Type | Labels | Source file |
+|---|---|---|---|
+| `network_policy_drop_count_total` | Counter | `direction` | `pkg/ebpf/events/events.go` |
+| `network_policy_drop_bytes_total` | Counter | `direction` | `pkg/ebpf/events/events.go` |
+| `awsnodeagent_aws_ebpf_sdk_latency_ms` | Summary | `api`,`error` | `pkg/ebpf/bpf_client.go` |
+| `awsnodeagent_aws_ebpfsdk_error_count` | Counter | `fn` | `pkg/ebpf/bpf_client.go` |
+| `awsnodeagent_policy_setup_latency_ms` | Summary | `name`,`namespace` | `controllers/policyendpoints_controller.go` |
+| `awsnodeagent_policy_teardown_latency_ms` | Summary | `name`,`namespace` | `controllers/policyendpoints_controller.go` |
+| `awsnodeagent_policy_programming_latency_seconds` | Histogram | none | `controllers/policyendpoints_controller.go` |
+| `awsnodeagent_cluster_policy_programming_latency_seconds` | Histogram | none | `controllers/clusterpolicyendpoints_controller.go` |
+
+controller-runtime also exposes `process_resident_memory_bytes`,
+`process_cpu_seconds_total`, and `go_goroutines` on the same endpoint. Confirm
+these at runtime and use them to cross-check the kubelet stats, not as a primary
+gate.
+
+**What we assert, and when.** Each row is one `SOAK_ASSERT_METRICS` name:
+
+| Assert name | Signal | Rule | Fires when | Default |
+|---|---|---|---|---|
+| `sdk-errors` | `awsnodeagent_aws_ebpfsdk_error_count` | delta over run == 0 | any eBPF SDK error during the soak | off |
+| `programming-latency` | `awsnodeagent_policy_programming_latency_seconds` | p99 from histogram buckets ≤ `--soak-programming-latency-limit` (10s) | the latency histogram regressed | off (X-6 says suspect) |
+| `drop-sanity` | `network_policy_drop_count_total{direction=ingress}` | must **rise** while a deny probe reads BLOCKED | drops stay flat while policy claims to block, so either the metric or enforcement is broken | off |
+| `restarts` | pod `restartCount` (nodeagent) | delta over run == 0 | the agent was OOM-killed, crashed, or hit the watchdog | **on** (always available) |
+| `cpu` | kubelet `container_cpu_usage_total` | mean-cores growth (post-warmup baseline vs peak) ≤ `--soak-cpu-growth-factor` × baseline (default 2) | CPU crept up on a steady workload | off (record-only) |
+| `memory` | kubelet working-set (§2c) | growth ≤ 50 MiB | memory leaked | **on** (already a gate) |
+| `goroutines` | `go_goroutines` | end ≤ baseline × `--soak-goroutine-growth-factor` (default 2) | goroutines leaked | off |
+
+Notes:
+- `restarts` and `memory` default **on** because their signals need no metrics
+  endpoint. The rest default **off**, so a cluster that does not scrape `:8162`
+  still runs green on the parts it can observe.
+- CPU is a **growth** check, not an absolute-core threshold. NPA ships with no CPU
+  limit, so its cadvisor core usage scales with whatever the node's shared pool
+  offers. An absolute `≤ N cores` gate would pass or flake on hardware alone, not
+  on NPA behavior. Growth (baseline vs peak on a steady workload) instead catches
+  the real regression: NPA burning more CPU over time for the same work.
+- The soak does not pin the node instance type. It records each node's
+  instance-type and allocatable CPU in the trend log so a reader can tell whether
+  two runs' CPU numbers are comparable. Cross-run CPU comparison is only valid when
+  the recorded type matches; the growth check stays valid regardless, since it
+  compares a run against its own baseline.
+- If `SOAK_ASSERT_METRICS` names a metric whose source is unavailable, that is a
+  setup error, not a silent skip. The operator asked to gate on it, so the run
+  fails at setup rather than pretending the check passed.
+- The histogram p99 comes from the bucket boundaries (the `_bucket`, `_count`, and
+  `_sum` series), using the same math as `histogram_quantile`.
+- All collected values (asserted or not) are logged on the trend cadence (§4b
+  `TrendSample`) so a run always leaves a metrics progression for post-mortem,
+  independent of whether anything gated on it.
+
+Violation kinds this adds to §5: `MetricAssertion` (business-logic metric gate
+failed) and `AgentRestart` (restart-count delta > 0). Memory already has
+`MemoryGrowth`.
 
 ---
 
-## 3. CloudWatch setup (per-run)
+## 3. Thresholds and setup
 
-1. Cluster's node role / IRSA allows the CloudWatch agent to put metrics + logs
-   (`CloudWatchAgentServerPolicy`).
-2. Install: `aws eks create-addon --addon-name amazon-cloudwatch-observability`
-   (or Helm). Enhanced observability is what emits the per-container performance
-   log events §2c relies on.
-3. **Fail fast**: verify `/aws/containerinsights/<cluster>/performance` is
-   receiving `ContainerName=aws-eks-nodeagent` events before the soak starts —
-   otherwise we'd run the whole window blind on memory.
-4. Post-run, fold the Logs Insights results (§2c) into the verdict.
+### 3a. How the growth thresholds are derived (not the ORR's flat numbers)
+
+The ORR X-2 text gives round numbers (>50 MiB growth, >10s latency) with no
+derivation, and at the soak's actual scale (1-3 nodes, small policy count) they are
+too loose to catch the failure they exist for. NPA's baseline working set is tens
+of MiB, so a flat 50 MiB budget is a >100% allowance: a real slow leak of ~5 MiB/hr
+(20 MiB over 4h) passes. That is the exact leak the soak is meant to catch.
+
+So the memory, CPU, and goroutine gates are **relative to the run's own
+post-warmup baseline**, not absolute:
+
+- Baseline = mean of samples taken after the warm-up window (first ~10 min or
+  `D/24`), not a single first reading.
+- Gate on **slope** (per-hour growth above baseline) or **peak growth beyond
+  N sigma** of the steady-state samples, whichever the implementation finds more
+  stable. The flat 50 MiB stays only as a coarse absolute backstop, not the primary
+  signal.
+- Programming latency is gated on **drift within the run**, never an absolute. The
+  >10s figure is an X-3 perf-baseline number and does not belong in a soak gate
+  (§5a).
+
+Node instance type is recorded, not pinned (§2f note), so absolute CPU is only
+comparable across runs on the same type. The growth gates stay valid regardless,
+since each compares a run against itself.
+
+### 3b. Cluster setup (per-run)
+
+1. Network policy enforcement is on (`--enable-network-policy=true`) and the NP
+   controller is emitting PolicyEndpoints. **Fail fast at setup** if a freshly
+   applied deny policy produces no PolicyEndpoint, otherwise the whole run
+   default-allows and reports a meaningless green.
+2. For #462 log-signature detection, the agent runs with
+   `--enable-policy-event-logs=true`. Setup verifies Flow Info lines are actually
+   being emitted before trusting a clean scan (§2b).
+3. CloudWatch observability is **optional** (§2c). If the add-on is present the
+   trend is also persisted off-cluster; v1 does not require it.
 
 ---
 
@@ -190,57 +343,74 @@ still exercises a proportional slice of every activity — at least one agent ki
 several hot-updates, multiple churn and sampling cycles — instead of a smoke that
 silently skips the rare events. Rates can still be overridden individually by flag.
 
-| # | Driver | Default cadence (D = soak-duration) | Exercises |
-|---|---|---|---|
-| **1** | **Conntrack-race driver (#462)** — see §4a | continuous; short-lived outbound conns, fixed source port, ~10–50/s | the regression target |
-| 2 | Sustained mixed traffic | continuous TCP+UDP allow/deny probes from long-lived clients | steady-state enforcement |
-| 3 | Pod churn | continuous, 5–10 pods/min (rate, not count → scales with D) | attach/detach, BPF prog lifecycle |
-| 4 | Policy hot-update | every `D/20`, min 1 min, max 5 min | reconcile path, no transient mis-enforce |
-| 5 | Agent kill | every `D/4` (≈hourly at 4h; ≥1 kill even for a 20-min smoke), staggered across nodes | BPF recovery, conntrack-map preservation, re-attach |
-| 6 | Namespace churn | every `D/8` | selector re-eval, cleanup |
-| 7 | Cross-node traffic | continuous (subset of #2) | multi-node correctness |
+The **Status** column tracks plan vs. as-built, since the two have diverged during
+implementation. "Built" means implemented and offline-verified; "broken" means
+implemented but a review found it non-functional (see the implementation critique);
+"planned" means designed, not yet coded.
+
+| # | Driver | Default cadence (D = soak-duration) | Exercises | Status |
+|---|---|---|---|---|
+| 1 | Agent kill | every `D/4` (≈hourly at 4h; ≥1 kill even for a 20-min smoke), staggered across nodes | BPF recovery, conntrack-map preservation, re-attach | built |
+| 2 | Pod / namespace churn | continuous, 5–10 pods/min (rate, not count, so it scales with D); namespace churn every `D/8` | attach/detach, BPF prog lifecycle, selector re-eval, cleanup | built |
+| 3 | Policy hot-update | every `D/20`, min 1 min, max 5 min | reconcile path; must not drop an established or a newly initiated allowed flow | built (new-flow probe planned) |
+| 4 | Ingress enforcement probes | probe sweep every `D/120` (floor 15s) | false-allow and false-deny on ingress | built (deny only; allow probe planned) |
+| 5 | **Egress enforcement probes** | same sweep cadence | false-allow and false-deny on egress (separate eBPF prog/map/direction) | **planned (Tier 1 gap)** |
+| 6 | **Strict-mode lane** | a parallel workload set under `strict` enforcing mode | strict-mode enforcement holds over the window | **planned (Tier 2 gap)** |
+| 7 | Cross-node traffic | continuous (subset of the probes) | multi-node correctness | planned (pods currently pin to one node) |
+| 8 | #462 continuous guard | mild port-reuse driver | reintroduced conntrack-race trips a long run | broken (see §4a; regex + timing + detector defects) |
+
+Aggressive #462 repro and fix-validation is a **separate targeted timing test**,
+not a soak driver (§4a).
 
 Probe sweeps (§2a) run every `D/120` (≈2 min at 4h, floor 15 s) so every
 transition is sampled. BPF/mem/conntrack trend samples (§2c/2d) every `D/48`
 (≈5 min at 4h, floor 1 min). See §4b for the full derivation and the guarantees
 that hold at any duration.
 
-### 4a. Conntrack-cleanup-race scenario (#462 / V2221143078) — the core repro
+### 4a. Conntrack-cleanup-race repro (#462 / V2221143078) — a separate targeted test
 
-From issue #462, the race needs **all** of these simultaneously, so the scenario
-must construct exactly this:
+This is **not a soak driver.** #462 is a timing race, and a 4h soak samples it once.
+The repro and fix-validation live in a fast, repeatable test that reruns the window
+many times; the soak carries only the mild continuous guard (driver #8 in §4).
 
-1. **Target pod has an Ingress NetworkPolicy** that does *not* explicitly allow the
-   return traffic, so the pod relies on NPA's conntrack map to permit responses.
-   (A pod with no ingress policy defaults to allow and never hits the bug.)
-2. **Frequent short-lived outbound connections with heavy source-port reuse**, so
-   the same 5-tuple (src ip/port, dst ip/port, proto) recurs. Mechanism (k8s
-   `test/e2e/network/conntrack.go` idiom): loop `nc`/`curl` pinned to a **fixed
-   source port** at a **small interval** so the ephemeral port is reused every few
-   hundred ms — e.g. `for i in $(seq 1 N); do nc -w1 -p $SRCPORT $DST $PORT; done`
-   or `curl --local-port $SRCPORT`. Cycle across a small set of fixed ports
-   (e.g. 60000/61000/62000, as Cilium `service_helpers.go` does) to raise the odds
-   of landing in the delete window on several flows at once.
-3. **Timing alignment with the reconcile cadence.** The bug surfaces when a kernel
-   entry has aged out (`nf_conntrack_tcp_timeout_time_wait`, default 120 s) but the
-   NPA local map (reconciled every ~5 min) still holds it, and a reused-port
-   connection reinstalls the 5-tuple *during* the cleanup window. So the run must
-   last well beyond several reconcile cycles, and the connection interval must be
-   short relative to TIME_WAIT. To **shorten** repro time we can (a) lower
-   `nf_conntrack_tcp_timeout_time_wait` on the test nodes, and/or (b) drive churn
-   hard enough that many stale entries accumulate per reconcile (the issue comments
-   note longer reconcile intervals + high churn make it more likely). Both are
-   knobs the scenario exposes; defaults reproduce the customer's shape, "aggressive"
-   mode compresses it.
+**How the race actually works** (from `pkg/ebpf/conntrack/conntrack_client.go`).
+NPA's cleanup snapshots the kernel conntrack table, then walks its own local eBPF
+map and deletes any entry **absent from that kernel snapshot**. So a local entry is
+a deletion candidate only once its 5-tuple has **aged out of the kernel table**
+(past `nf_conntrack_tcp_timeout_time_wait`, default 120 s). The bug fires when a
+reused-port connection reinstalls that exact 5-tuple *during* the delete pass: NPA
+deletes an entry the kernel just recreated, and the return packet is denied.
+
+**Why fast reuse is wrong** (this was a real defect in the first design). Reusing
+the same 5-tuple every few hundred ms keeps the kernel entry perpetually alive, so
+it is never a deletion candidate and the race can never occur. The repro needs the
+opposite: reuse each tuple with a gap **larger** than the kernel timeout, so the
+entry ages out of the kernel, becomes a delete candidate, and is then reused. For
+TCP a fixed `--local-port` also cannot rebind while the prior 4-tuple sits in
+TIME_WAIT, so the k8s idiom (`test/e2e/network/conntrack.go`) pins the source port
+with **UDP** to avoid it.
+
+**Recipe:**
+
+1. The protected pod is the one making the **outbound** connection and carrying an
+   ingress-deny policy, so its return traffic relies on NPA's conntrack map. (Getting
+   this backwards, deny on the destination, blocks the forward SYN and the race
+   never arms.)
+2. Lower `nf_conntrack_tcp_timeout_time_wait` on the test nodes to a few seconds so
+   entries age out of the kernel quickly.
+3. Reuse each fixed source port with a gap **greater** than that lowered timeout
+   (so the entry ages out between reuses), cycling a small port set to arm several
+   flows at once. Prefer UDP fixed-source-port to sidestep TCP TIME_WAIT rebind.
+4. Run long enough to cross several cleanup passes.
+
+**Positive control (mandatory).** The test must reproduce #462 at least once in
+aggressive mode before any green result is trusted. Without a proven repro, a clean
+run is indistinguishable from a broken detector.
 
 **Detection** = §2b (Delete→DENY log signature, correlated by reversed 5-tuple) +
-§2a (the long-lived return-traffic connection must never break). A confirmed
-signature match or a return-traffic drop is a hard fail.
-
-This scenario also serves as the **fix-validation harness**: when the long-term
-fix lands (issue proposes a `last_used` timestamp on eBPF conntrack entries so
-cleanup skips entries reused after deletion started), this run in "aggressive" mode
-is what proves the fix holds.
+§2a (the return-traffic connection must not break). Either a matched signature or a
+return-traffic drop is a hard fail. Serves as the fix-validation harness for the
+proposed `last_used`-timestamp fix.
 
 ### 4b. Duration-derived cadences
 
@@ -284,24 +454,58 @@ measured after baseline is established and before final-state assertions begin.
 
 ## 5. Pass / fail criteria
 
+Rows are grouped by tier, matching §1.
+
+**Tier 1 gates:**
+
 | Criterion | Source | Threshold |
 |---|---|---|
-| No false-positive / false-negative enforcement | §2a probes | any persistent wrong result → **FAIL** |
-| **No conntrack-cleanup-race denial (#462)** | §2b log signature + §2a return-traffic | any matched Delete→DENY pair, or any return-traffic drop → **FAIL** |
-| No long-lived-connection disruption | §2a restart-counter | any client `RestartCount` increment → **FAIL** |
-| No BPF prog/map leak | §2d dump | count returns to baseline after drain; no upward trend → else **FAIL** |
-| Conntrack table bounded under churn | §2d | no unbounded growth, no freeze → else **FAIL** |
-| Memory growth bounded | §2c CloudWatch | NPA container working-set growth **> 50 MiB** (post-warmup) → **FAIL** |
-| Programming latency | §2a propagation (primary), §2e histogram (advisory) | observed apply→correct-probe **> 10 s** → **FAIL** |
-| Agent recovers across kills | §2d + §2a | after each kill (§4b, every `D/4`): map preserved, progs re-attached, probes correct → else **FAIL** |
+| No BPF prog/map leak | §2d dump | count returns to baseline after drain, no upward trend, else **FAIL** |
+| No long-lived-connection disruption | §2a restart-counter | any client connection break (RestartCount increment) → **FAIL** |
+| No unexpected agent restart | pod `restartCount` (nodeagent) | restart-count delta over run **> 0** → **FAIL** |
+| Enforcement correct, ingress + egress | §2a probes (both directions) | any persistent false-allow or false-deny → **FAIL** |
+| Recovery correct across repeated kills | §2d + §2a | after each kill (§4b, every `D/4`): map preserved, progs re-attached, probes correct, else **FAIL** |
+| Memory / CPU / goroutine growth bounded | §2c kubelet stats + §2f | growth over baseline exceeds the §3a-derived bound → **FAIL** |
 
-CPU is recorded/charted (context for X-3) but not a hard gate in v1.
+**Tier 2 gates:**
+
+| Criterion | Source | Threshold |
+|---|---|---|
+| Strict-mode enforcement holds | §2a probes on a strict-mode lane | any allowed flow dropped or denied flow allowed → **FAIL** |
+| Hot-update: no transient new-flow drop | §2a new-flow probe mid-reconcile | a newly initiated allowed flow dropped during reconcile → **FAIL** |
+| #462 continuous regression guard | §2b log signature + §2a return-traffic | any matched Delete→DENY pair, or any return-traffic drop → **FAIL** (aggressive repro is a separate test, §4a) |
+
+**Advisory (recorded, charted, not gated unless opted in):**
+
+| Signal | Source | Note |
+|---|---|---|
+| Conntrack table growth | §2d | trend for post-mortem; capacity/near-full is X-1, not this gate |
+| Programming latency | §2a propagation (primary), §2e histogram (advisory) | drift within the run, not an absolute; the >10s absolute is an X-3 number |
+| Business-logic metrics | §2f `:8162` scrape | opt-in per metric via `SOAK_ASSERT_METRICS`; X-6 flags several as unreliable |
+
+### 5a. Scope boundary (what this soak does NOT own)
+
+The soak's lane is accumulation and drift at fixed small scale. These belong to
+other ORR items and must not creep into the soak's gates:
+
+- **Absolute programming latency and CPU/memory at scale** (latency at 1K/5K
+  PolicyEndpoints, CPU/mem at 500 pods + 50 policies) belong to **X-3** (perf
+  baseline). The soak gates on drift within its own fixed-scale run, never on an
+  absolute number. This is why the old ">10s latency" and flat ">50 MiB" gates are
+  gone from Tier 1.
+- **Scale ceilings** (policy count, conntrack cache near full, eBPF map size,
+  DNS-proxy throughput) belong to **X-1**. The soak's conntrack-growth check is a
+  leak/drift signal, not a capacity probe; it does not exercise the cache near full.
+- **Metric-implementation correctness** belongs to **X-6**. The soak consumes
+  metrics advisory-only and must not become a de-facto metric-correctness test.
+- **#462 aggressive repro and fix-validation** is its own fast, repeatable timing
+  test (§4a). The soak carries only the mild continuous guard.
 
 ---
 
 ## 6. Why probes/BPF/logs primary, metrics secondary
 
-ORR item **X-5** documents that several NPA metrics are implemented incorrectly
+ORR item **X-6** documents that several NPA metrics are implemented incorrectly
 (`BulkRefreshMapEntries` latency, `policy_teardown_latency_ms`,
 `policy_programming_latency_seconds` + cluster variant, `updateEbpfMap-egress`
 latency, uninstrumented `RecoverAllBpfProgramsAndMaps`). Gating a 4h soak on those
@@ -326,7 +530,7 @@ would produce false verdicts. So:
 | `Consistently` during policy swap + verdict cross-check | Cilium `test/k8s/net_policies.go` | §4 hot-update assertion style |
 | Background long traffic + control-plane churn | Cilium `test/k8s/chaos.go` (`netperf` background, restart mid-stream) | §4 agent-kill-during-traffic |
 | `TCP_CRR` connection-churn generator | Cilium `perf/benchmarks/netperf` | high-rate new-connection-per-txn load option |
-| Per-container CPU/mem gatherer + `ResourceConstraint` gate | perf-tests `clusterloader2` `ContainerResourceGatherer` / `ResourceUsageSummary` | in-cluster fallback to CloudWatch (§2c) |
+| Per-container CPU/mem gatherer + `ResourceConstraint` gate | perf-tests `clusterloader2` `ContainerResourceGatherer` / `ResourceUsageSummary` | the per-container growth model behind §2c kubelet stats |
 | Policy-churn at QPS via `rate.Limiter` | perf-tests `network-policy-enforcement-latency.go` | §4 hot-update rate control |
 | Background tcpdump "0 packets" no-leak assert | Cilium `connectivity/sniff/sniffer.go` (Assert vs Sanity modes) | optional: assert no packet that policy should drop appears on the wire |
 
@@ -337,20 +541,53 @@ conntrack assertion necessary, which is net-new here.
 
 ---
 
-## 8. Open questions / decisions for review
+## 8. Backlog and open questions
 
-1. **CloudWatch pull mechanism** — SDK inside the Ginkgo suite vs. post-run query
-   step (leaning post-step, keeps the suite free of AWS-SDK/credential coupling).
-2. **Node count** — cross-node (scenario 7) needs ≥2; default 2, allow 3 via flag.
-3. **Run env** — no NPA pre-release pipeline yet (AI-7 / AI-A9). v1 targets manual
-   on a long-lived cluster + a CI smoke; wire into the AI-7 Hydra pipeline once it
-   exists.
-4. **#462 repro tuning** — do we mutate node sysctls (`nf_conntrack_tcp_timeout_time_wait`)
-   to compress repro time, or only drive churn rate? Affects whether the soak needs
-   privileged node access beyond the BPF-check pod.
-5. **Auto-mode** (deferred) — DNS proxy load, ANP/FQDN egress, systemd watchdog;
-   needs systemd-unit probes + Bottlerocket/Tachyon env. Separate doc.
-6. **AZ impairment** (deferred) — X-2 also asks for it; needs FIS fault injection.
+Two reviews shaped this plan: an implementation critique (does the code do what the
+plan says) and a goals/dimensions audit (are we testing the right things). The
+backlog below folds in both, ordered by priority.
+
+**Must-fix before the harness can gate anything** (from the implementation critique;
+each verified against source):
+
+1. **#462 log-signature detector matches the wrong format.** The parser matches the
+   IPv6 Flow Info line (colon-delimited); the real IPv4 line is
+   `Proto %s Verdict %s Direction %s, Tier %s` (no colons, trailing comma). On IPv4,
+   the v1 scope, it matches nothing. Fix the regex, add a fixture from a real IPv4
+   log, and add a setup check that Flow Info lines are actually emitted.
+2. **#462 driver timing prevents the race** (§4a). Fast reuse keeps the kernel entry
+   alive; the race needs reuse *slower* than the (lowered) kernel timeout. Rebuild
+   the driver per §4a and add the mandatory positive control.
+3. **Behavioral #462 detector can never fire.** The driver loop swallows every drop
+   and never exits, and the pod is `RestartPolicyNever`, so RestartCount cannot move.
+   Make it a liveness-bound client that exits on break, or gate on a real drop count.
+4. **Nodeagent restart gate is not implemented.** §1/§5 make it Tier-1 and it needs
+   no metrics endpoint, but only the driver pod's RestartCount is checked today.
+5. **Log rotation loses evidence + agent-kill masks the leak.** The end-of-run
+   single `cat` misses rotated segments (stream during the run instead), and the
+   `D/4` kill caps the memory-leak horizon at one kill interval (measure per-process
+   lifetime or exclude the last interval from the memory gate).
+
+**Dimension gaps to add** (from the goals audit, by risk):
+
+6. **Egress-policy probes** (Tier 1). Half the enforcement surface, currently unprobed.
+7. **Strict-mode lane** (Tier 2). Highest-risk missing dimension.
+8. **Hot-update new-flow correctness** (Tier 2). Close the retry-to-expected gap (§2a).
+9. **IPv6 / dual-stack** and **multi-NIC secondary-ENI recovery** (v1.x, tracked).
+10. **Auto-mode: ANP/FQDN + DNS-proxy endurance + watchdog pressure** (v2). ORR X-2
+    names this in scope, so it is tracked, not dropped; needs systemd-unit probes and
+    a Bottlerocket/Tachyon env.
+
+**Open decisions:**
+
+11. **Node count.** Cross-node probes need at least 2 nodes; default 2, allow 3 via flag.
+12. **Run env.** No NPA pre-release pipeline yet (AI-7 / AI-A9). v1 targets manual on
+    a long-lived cluster plus a CI smoke, then wires into the AI-7 Hydra gate once it exists.
+13. **#462 node access.** Lowering `nf_conntrack_tcp_timeout_time_wait` needs
+    privileged node access beyond the BPF-check pod. Confirm the test env allows it.
+14. **AZ impairment** (deferred). X-2 also asks for it; needs FIS fault injection.
+15. **ORR X-numbering.** The metric-correctness AI is X-6 in `npa-orr-quip.md` but
+    X-5 in the live Quip. This doc uses X-6; confirm which is authoritative.
 
 ---
 

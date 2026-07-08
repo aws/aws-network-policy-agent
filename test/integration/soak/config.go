@@ -50,6 +50,12 @@ type Config struct {
 	// customer's exact shape for a faster, denser reproduction.
 	Aggressive bool
 
+	// Enable462Guard controls whether the #462 port-reuse driver and log scan are
+	// deployed. Default false for Tier 1: the detection code has known defects
+	// (ctrace regex matches IPv6 not IPv4; driver timing prevents the race; the
+	// behavioral detector cannot fire). Tier 2 work re-enables after fixing those.
+	Enable462Guard bool
+
 	// schedule and driver are derived, validated values. They are unexported so
 	// callers go through Schedule and PortReuse, which cannot return an
 	// unvalidated configuration.
@@ -74,7 +80,8 @@ type raw struct {
 	probeInterval        time.Duration
 	sampleInterval       time.Duration
 
-	reuseInterval time.Duration
+	reuseInterval  time.Duration
+	enable462Guard bool
 }
 
 // globalRaw is bound by init and resolved by Load after flag.Parse.
@@ -117,6 +124,9 @@ func init() {
 
 	flag.DurationVar(&globalRaw.reuseInterval, "soak-reuse-interval", 0,
 		"override #462 port-reuse connection interval (default 200ms, or 50ms when --soak-aggressive)")
+	flag.BoolVar(&globalRaw.enable462Guard, "soak-enable-462-guard", false,
+		"enable the #462 conntrack-race continuous guard (default off for Tier 1; the "+
+			"detection code has known defects that produce false greens)")
 }
 
 // ctraceDefaultWindow duplicates ctrace.DefaultWindow as a flag default to avoid a
@@ -125,15 +135,21 @@ func init() {
 const ctraceDefaultWindow = 5 * time.Second
 
 // Load assembles globalRaw into a validated Config. It must be called after flags
-// are parsed (Ginkgo parses them before the suite runs). It returns an error so
-// the suite can fail fast and clearly on an unworkable configuration rather than
-// starting a multi-hour run that cannot achieve its purpose.
-func Load() (*Config, error) {
+// are parsed (Ginkgo parses them before the suite runs). harnessTimeout is the
+// deadline the test runner will actually enforce (Ginkgo's suite timeout); the
+// schedule rejects a duration that cannot finish inside it, so a 4h soak is never
+// silently truncated by Ginkgo's 1h default. Pass 0 when no deadline applies.
+//
+// It returns an error so the suite can fail fast and clearly on an unworkable
+// configuration rather than starting a multi-hour run that cannot achieve its
+// purpose.
+func Load(harnessTimeout time.Duration) (*Config, error) {
 	r := globalRaw
 
 	sched, err := schedule.New(schedule.Options{
 		Total:             r.duration,
 		ReconcileInterval: r.reconcileInterval,
+		Timeout:           harnessTimeout,
 		Overrides:         overridesFrom(r),
 	})
 	if err != nil {
@@ -156,6 +172,7 @@ func Load() (*Config, error) {
 		ProgrammingLatencyLimit: r.progLatencyLimit,
 		RaceWindow:              r.raceWindow,
 		Aggressive:              r.aggressive,
+		Enable462Guard:          r.enable462Guard,
 		schedule:                sched,
 		driver: driver.PortReuseConfig{
 			// TargetHost/TargetPort are filled in by the suite once the protected

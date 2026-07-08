@@ -130,6 +130,58 @@ func TestNew_ShortButValidSmokeRun(t *testing.T) {
 	assert.GreaterOrEqual(t, s.ReconcileCycles(), minReconcileCycles)
 }
 
+func TestNew_RejectsDurationBeyondTimeout(t *testing.T) {
+	// A 4h soak with a 1h harness timeout (Ginkgo's default) must be rejected, or
+	// the run is silently truncated before the end-of-run gates evaluate.
+	_, err := New(Options{
+		Total:   4 * time.Hour,
+		Timeout: 1 * time.Hour,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTooShort)
+	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestNew_AcceptsDurationWithinTimeout(t *testing.T) {
+	// 4h + 15m slack fits inside a 5h timeout.
+	s, err := New(Options{
+		Total:   4 * time.Hour,
+		Timeout: 5 * time.Hour,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4*time.Hour, s.Total())
+}
+
+func TestNew_ZeroTimeoutSkipsTheCheck(t *testing.T) {
+	// Unit tests and callers not under a deadline leave Timeout zero; the fit check
+	// must not fire then.
+	_, err := New(Options{Total: 4 * time.Hour})
+	require.NoError(t, err)
+}
+
+func TestSettleWindow(t *testing.T) {
+	// 4h: max(2*5m, 4h/8) = max(10m, 30m) = 30m.
+	s, err := New(Options{Total: 4 * time.Hour})
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, s.SettleWindow())
+
+	// 20m: max(2*5m, 20m/8) = max(10m, 2.5m) = 10m.
+	s, err = New(Options{Total: 20 * time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, s.SettleWindow())
+}
+
+func TestNew_RejectsKillInsideSettleWindow(t *testing.T) {
+	// Override the kill interval so the only kill lands inside the final settle
+	// window: no recovery is observed, so the run is meaningless and rejected.
+	_, err := New(Options{
+		Total:     4 * time.Hour,
+		Overrides: map[Cadence]time.Duration{AgentKill: 3*time.Hour + 50*time.Minute},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "settle window")
+}
+
 func TestValidate_ErrorNamesEveryFailingInvariant(t *testing.T) {
 	// The error must enumerate each problem so an operator can see exactly why a
 	// duration was rejected, not just that it was.

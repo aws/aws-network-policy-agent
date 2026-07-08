@@ -34,6 +34,7 @@ const (
 	MemoryGrowth                            // NPA container memory grew past budget
 	ProgrammingLatency                      // policy took too long to take effect
 	RecoveryFailure                         // agent did not recover after a kill
+	AgentRestart                            // the aws-eks-nodeagent container restarted (OOM/crash/watchdog)
 )
 
 func (k ViolationKind) String() string {
@@ -54,6 +55,8 @@ func (k ViolationKind) String() string {
 		return "programming-latency"
 	case RecoveryFailure:
 		return "recovery-failure"
+	case AgentRestart:
+		return "agent-restart"
 	default:
 		return fmt.Sprintf("violation(%d)", int(k))
 	}

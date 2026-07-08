@@ -105,6 +105,18 @@ type Options struct {
 	// run spans enough reconcile cycles for the #462 cleanup race to be
 	// reachable. Defaults to DefaultReconcileInterval when zero.
 	ReconcileInterval time.Duration
+
+	// Timeout is the deadline the test harness will actually enforce (Ginkgo's
+	// suite/spec timeout plus go test's binary timeout). Validate rejects a Total
+	// that, with setup/teardown slack, cannot finish inside it, so a 4h soak can
+	// never be silently truncated by Ginkgo's 1h default. Zero means "unknown, do
+	// not check" for callers (e.g. unit tests) that do not run under a deadline.
+	Timeout time.Duration
+
+	// SetupSlack is the wall-clock the run needs outside Total for setup, teardown,
+	// and end-of-run assertions. Validate requires Total+SetupSlack <= Timeout.
+	// Defaults to DefaultSetupSlack when zero.
+	SetupSlack time.Duration
 }
 
 const (
@@ -119,6 +131,11 @@ const (
 	// minReconcileCycles is how many agent cleanup cycles the run must span for
 	// the cleanup-vs-reuse race window (GitHub #462) to actually occur.
 	minReconcileCycles = 2
+
+	// DefaultSetupSlack is the wall-clock reserved outside Total for setup,
+	// teardown, and end-of-run assertions. Container pulls, DaemonSet rollouts, and
+	// per-node BPF dumps at the end can take several minutes on a multi-node run.
+	DefaultSetupSlack = 15 * time.Minute
 )
 
 // Schedule is the resolved set of cadences for one soak run. It is immutable once
@@ -127,6 +144,8 @@ const (
 type Schedule struct {
 	total             time.Duration
 	reconcileInterval time.Duration
+	timeout           time.Duration
+	setupSlack        time.Duration
 	intervals         map[Cadence]time.Duration
 }
 
@@ -143,10 +162,16 @@ func New(opts Options) (*Schedule, error) {
 	if reconcile <= 0 {
 		reconcile = DefaultReconcileInterval
 	}
+	slack := opts.SetupSlack
+	if slack <= 0 {
+		slack = DefaultSetupSlack
+	}
 
 	s := &Schedule{
 		total:             total,
 		reconcileInterval: reconcile,
+		timeout:           opts.Timeout,
+		setupSlack:        slack,
 		intervals:         make(map[Cadence]time.Duration, len(rules)),
 	}
 	for cadence, r := range rules {
@@ -203,6 +228,18 @@ func (s *Schedule) ReconcileCycles() int {
 	return int(s.total / s.reconcileInterval)
 }
 
+// SettleWindow is the quiet period at the end of the run during which no agent
+// kill is scheduled, so recovery and the end-of-run leak/memory checks observe a
+// steady agent rather than one mid-restart. It is two reconcile cycles (or D/8 if
+// that is larger), matching the recovery guarantee in DESIGN §4b.
+func (s *Schedule) SettleWindow() time.Duration {
+	window := 2 * s.reconcileInterval
+	if eighth := s.total / 8; eighth > window {
+		window = eighth
+	}
+	return window
+}
+
 // ErrTooShort is returned by Validate (and therefore New) when the duration cannot
 // satisfy the minimum-event invariants. Callers can test for it with errors.Is.
 var ErrTooShort = errors.New("soak duration too short to exercise every activity")
@@ -227,6 +264,27 @@ func (s *Schedule) Validate() error {
 			"run spans %d reconcile cycle(s), need >= %d for the #462 cleanup race "+
 				"(duration %s / reconcile %s)",
 			cycles, minReconcileCycles, s.total, s.reconcileInterval))
+	}
+
+	// The run must fit inside the harness deadline, or Ginkgo's 1h default (or go
+	// test's 10m) aborts it before the end-of-run gates ever evaluate. Only checked
+	// when a Timeout was supplied; unit tests leave it zero.
+	if s.timeout > 0 && s.total+s.setupSlack > s.timeout {
+		problems = append(problems, fmt.Sprintf(
+			"duration %s + setup slack %s exceeds harness timeout %s; the run would be "+
+				"truncated before end-of-run gates evaluate (raise --ginkgo.timeout and "+
+				"-timeout, or lower --soak-duration)",
+			s.total, s.setupSlack, s.timeout))
+	}
+
+	// At least one agent kill must land before the settle window so its recovery is
+	// actually observed and the end-of-run checks do not fire mid-restart (M-2).
+	if kill := s.Interval(AgentKill); kill > s.total-s.SettleWindow() {
+		problems = append(problems, fmt.Sprintf(
+			"first agent kill at %s falls inside the final settle window (last %s of "+
+				"the run), so no kill's recovery is observed; shorten --soak-kill-interval "+
+				"or lengthen --soak-duration",
+			kill, s.SettleWindow()))
 	}
 
 	if len(problems) == 0 {

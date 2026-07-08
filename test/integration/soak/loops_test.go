@@ -28,20 +28,28 @@ type activityLoops struct {
 	prober   *v1.Pod // unrestricted pod the probe sweep connects from
 	baseline baseline
 	memory   *memoryMonitor
+	restarts *restartMonitor
 
-	wg sync.WaitGroup
+	deadline time.Time // end of the run, set in start; used to suppress kills in the settle window
+	wg       sync.WaitGroup
 }
 
 func newActivityLoops(rec *Recorder, cfg *Config, sched *schedule.Schedule,
-	nodes []v1.Node, target, prober *v1.Pod, base baseline, mem *memoryMonitor) *activityLoops {
+	nodes []v1.Node, target, prober *v1.Pod, base baseline, mem *memoryMonitor,
+	restarts *restartMonitor) *activityLoops {
 	return &activityLoops{
 		rec: rec, cfg: cfg, sched: sched, nodes: nodes,
-		target: target, prober: prober, baseline: base, memory: mem,
+		target: target, prober: prober, baseline: base, memory: mem, restarts: restarts,
 	}
 }
 
 // start launches every activity loop. Each returns when runCtx is cancelled.
 func (a *activityLoops) start(runCtx context.Context) {
+	// Record the run deadline so agentKill can suppress kills in the final settle
+	// window, leaving the agent steady for the end-of-run recovery and leak gates.
+	if dl, ok := runCtx.Deadline(); ok {
+		a.deadline = dl
+	}
 	a.run(runCtx, "probe-sweep", a.sched.Interval(schedule.ProbeSweep), a.probeSweep)
 	a.run(runCtx, "agent-kill", a.sched.Interval(schedule.AgentKill), a.agentKill)
 	a.run(runCtx, "policy-update", a.sched.Interval(schedule.PolicyHotUpdate), a.policyHotUpdate)
@@ -103,7 +111,21 @@ func (a *activityLoops) probeSweep(runCtx context.Context) {
 // the agent restarts, enforcement must still hold. A node is chosen per tick so a
 // multi-node run exercises kills across the fleet, not just one node.
 func (a *activityLoops) agentKill(runCtx context.Context) {
+	// Suppress kills inside the final settle window so the agent is steady when the
+	// end-of-run recovery, leak, and restart gates sample it. Without this a kill at
+	// t≈deadline would leave a node mid-restart and mask a leak or a real restart.
+	if !a.deadline.IsZero() && time.Until(a.deadline) < a.sched.SettleWindow() {
+		GinkgoWriter.Printf("agent-kill: within settle window, skipping\n")
+		return
+	}
+
 	node := a.nodes[a.killIndex()%len(a.nodes)]
+
+	// Tell the restart monitor this recreation is expected, so it is not counted as
+	// the agent dying on its own.
+	if a.restarts != nil {
+		a.restarts.NoteKill(node.Name)
+	}
 
 	if err := a.deleteAgentPodOn(runCtx, node.Name); err != nil {
 		GinkgoWriter.Printf("agent-kill: delete failed on %s: %v\n", node.Name, err)
@@ -159,7 +181,7 @@ func (a *activityLoops) deleteAgentPodOn(runCtx context.Context, nodeName string
 // policy object changes and triggers a reprogram without ever opening the server.
 func (a *activityLoops) policyHotUpdate(runCtx context.Context) {
 	pol := &network.NetworkPolicy{}
-	key := client.ObjectKey{Namespace: namespace, Name: "soak-server-deny"}
+	key := client.ObjectKey{Namespace: namespace, Name: denyPolicyName}
 	if err := fw.K8sClient.Get(runCtx, key, pol); err != nil {
 		GinkgoWriter.Printf("policy-update: get failed: %v\n", err)
 		return
@@ -220,8 +242,20 @@ func (a *activityLoops) namespaceChurn(runCtx context.Context) {
 // analysis; the memory samples feed the per-node growth trackers that the
 // end-of-run check judges against the >50 MiB budget.
 func (a *activityLoops) trendSample(runCtx context.Context) {
+	// Sample the restart monitor first: it is a cheap k8s API read and is the
+	// signal that must not miss an in-place restart between kills.
+	if a.restarts != nil {
+		a.restarts.sample(a.nodes)
+	}
+
 	for _, node := range a.nodes {
-		state := dumpBPFState(node.Name)
+		// Non-asserting: a transient bpf-check failure must not fail the 4h run
+		// from a driver goroutine (assertions off the main goroutine are unsafe).
+		state, err := tryDumpBPFState(node.Name)
+		if err != nil {
+			GinkgoWriter.Printf("trend: bpf dump on %s failed: %v\n", node.Name, err)
+			continue
+		}
 		GinkgoWriter.Printf("trend node=%s progs=%d maps=%d t=%s\n",
 			node.Name, len(state.ProgIDs), len(state.MapIDs), time.Now().Format(time.RFC3339))
 
