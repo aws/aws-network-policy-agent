@@ -135,9 +135,7 @@ func main() {
 		}
 
 		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH}
-		if ctrlConfig.EnablePolicyEventLogs {
-			readyzPaths = append(readyzPaths, ebpf.POLICY_EVENTS_MAP_PIN_PATH)
-		}
+		readyzPaths = append(readyzPaths, ebpf.POLICY_EVENTS_MAP_PIN_PATH)
 		if err := mgr.AddReadyzCheck("bpf-maps", ebpf.NewGlobalMapsReadinessCheck(readyzPaths)); err != nil {
 			log.Errorf("unable to set up bpf-maps readiness check %v", err)
 			os.Exit(1)
