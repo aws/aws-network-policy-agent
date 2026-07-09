@@ -222,32 +222,33 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
 }
 
 func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
-	uniquePorts := make(map[string]v1alpha1.Port)
+	type portKey struct {
+		protocol string
+		port     int
+		endPort  int
+	}
+	uniquePorts := make(map[portKey]v1alpha1.Port)
 	var result []v1alpha1.Port
-	var key string
 
 	for _, p := range ports {
 
-		portKey := 0
-		endPortKey := 0
+		pk := portKey{}
 
 		if p.Port != nil {
-			portKey = int(*p.Port)
+			pk.port = int(*p.Port)
 		}
 
 		if p.EndPort != nil {
-			endPortKey = int(*p.EndPort)
+			pk.endPort = int(*p.EndPort)
 		}
-		if p.Protocol == nil {
-			key = fmt.Sprintf("%s-%d-%d", "", portKey, endPortKey)
-		} else {
-			key = fmt.Sprintf("%s-%d-%d", *p.Protocol, portKey, endPortKey)
+		if p.Protocol != nil {
+			pk.protocol = string(*p.Protocol)
 		}
 
-		if _, ok := uniquePorts[key]; ok {
+		if _, ok := uniquePorts[pk]; ok {
 			continue
 		} else {
-			uniquePorts[key] = p
+			uniquePorts[pk] = p
 		}
 	}
 
