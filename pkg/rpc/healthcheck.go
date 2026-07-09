@@ -25,7 +25,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-const grpcCheckTimeout = 10 * time.Second
+const grpcCheckTimeout = 5 * time.Second
 
 // GRPCSocketHealthChecker issues gRPC Health/Check RPCs against the NPA Unix
 // socket. It holds a single long-lived gRPC client reused across probe
