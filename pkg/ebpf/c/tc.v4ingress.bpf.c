@@ -89,6 +89,8 @@ struct conntrack_key {
 
 struct conntrack_value {
 	__u8 val; // CT value representing pod states
+	__u8 _pad[7];
+	__u64 last_seen;
 };
 
 struct data_t {
@@ -222,6 +224,7 @@ static __always_inline int evaluateNamespacePolicyByLookUp(struct keystruct trie
 static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntrack_key flow_key, __u8 pod_state_val, struct data_t *evt, int pod_state) {
 
 		struct conntrack_value flow_val = {};
+		flow_val.last_seen = bpf_ktime_get_ns();
 
 		__u32 admin_tier_priority;
 		__u8 baseline_tier_action;
@@ -429,6 +432,7 @@ int handle_ingress(struct __sk_buff *skb)
 		if (flow_val != NULL) {
 			// If the pod state matches, allow the packet
 			if (flow_val->val == ct_pod_state_val) {
+				flow_val->last_seen = bpf_ktime_get_ns();
 				return BPF_OK;
 			}
 
@@ -456,6 +460,7 @@ int handle_ingress(struct __sk_buff *skb)
 		reverse_flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
 
 		if (reverse_flow_val != NULL) {
+			reverse_flow_val->last_seen = bpf_ktime_get_ns();
 			return BPF_OK;
 		}
 
