@@ -57,8 +57,7 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, denyPolicy)).To(Succeed())
 
 		By("verifying enforcement becomes active (server BLOCKED) — proves policy really enforces")
-		// Eventually, not a single probe: NPA programming can exceed a fixed settle
-		// under load. A persistent CONNECTED here means enforcement never took hold.
+		// Eventually, not a single probe: NPA programming can exceed a fixed settle under load.
 		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },
 			90*time.Second, probeInterval).Should(Equal("BLOCKED"),
 			"deny policy never took effect; is network policy enabled and the controller producing PolicyEndpoints?")
@@ -79,13 +78,11 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		peakProgs := baselineProgs
 		for time.Now().Before(deadline) {
 			time.Sleep(probeInterval)
-			// Enforcement must remain correct throughout the churn window.
 			Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 				fmt.Sprintf("enforcement regressed to CONNECTED during churn at sweep %d", sweeps))
 			sweeps++
-			// Track whether churn actually caused NPA to program more BPF than the
-			// baseline. Without an observed rise, the end<=baseline leak check below
-			// is vacuous (it can't tell "no leak" from "churn never programmed").
+			// Track the peak so the end<=baseline leak check below is not vacuous: without
+			// an observed rise it can't tell "no leak" from "churn never programmed".
 			if p, _ := bpfCounts(nodeName); p > peakProgs {
 				peakProgs = p
 			}
@@ -103,9 +100,8 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		By("stopping churn and waiting for BPF state to drain back to baseline")
 		Expect(fw.K8sClient.Delete(ctx, churnJob)).To(Succeed())
 		churnJob = nil
-		// Poll rather than a fixed sleep: teardown latency varies, and a fixed wait
-		// either flakes (too short) or wastes time (too long). The leak is a
-		// SUSTAINED excess, so give it a bounded window to settle to baseline.
+		// Poll rather than a fixed sleep: teardown latency varies, and a leak is a
+		// sustained excess, so give it a bounded window to settle to baseline.
 		var endProgs, endMaps int
 		Eventually(func() int {
 			endProgs, endMaps = bpfCounts(nodeName)
@@ -118,17 +114,11 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 			"BPF map count did not return to baseline after churn drained (leak)")
 
 		By("proving the server is still alive and enforcement was the reason for BLOCKED")
-		// Dropping the deny policy must restore reachability. If it does not, every
-		// BLOCKED above may have been a dead/evicted server rather than enforcement:
-		// this is the check that makes the enforcement assertions meaningful.
-		//
-		// Delete via the client directly (tolerating NotFound) rather than the
-		// framework's DeleteNetworkPolicy, whose poll returns the terminal NotFound
-		// as an error on successful deletion.
-		//
-		// Observed on a live cluster: removing a policy and re-allowing traffic can
-		// take NPA over a minute to reprogram, especially right after a churn window,
-		// so this window is generous (3m). It proves liveness, not teardown latency.
+		// Dropping the deny policy must restore reachability; otherwise the BLOCKED
+		// results above could be a dead server, not enforcement. Delete via the client
+		// (tolerating NotFound) since DeleteNetworkPolicy treats the terminal NotFound
+		// as an error. The 3m window is generous: NPA can take over a minute to
+		// reprogram after a churn window. It proves liveness, not teardown latency.
 		Expect(client.IgnoreNotFound(fw.K8sClient.Delete(ctx, denyPolicy))).To(Succeed())
 		denyPolicy = nil
 		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },

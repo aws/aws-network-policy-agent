@@ -17,16 +17,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// buildNginxPod is the policy target: a real listening port to probe against. It
-// carries a small resource request so it is not the first eviction victim when the
-// churn pods pile onto the same node during a long run (a dead server would make
-// every BLOCKED probe pass for the wrong reason).
+// buildNginxPod is the policy target. The resource request keeps it from being the
+// first eviction victim under churn; a dead server would make BLOCKED probes pass
+// for the wrong reason.
 func buildNginxPod(app string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace, Labels: map[string]string{"app": app}},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{{
-				Name: "nginx", Image: "public.ecr.aws/nginx/nginx:latest",
+				Name: "nginx", Image: nginxImage,
 				Ports: []v1.ContainerPort{{ContainerPort: 80}},
 				Resources: v1.ResourceRequirements{
 					Requests: v1.ResourceList{
@@ -40,8 +39,6 @@ func buildNginxPod(app string) *v1.Pod {
 }
 
 // buildClientPod is a long-lived pod the probe execs a python TCP connect from.
-// python3-slim is used because it ships a usable socket module and is already used
-// by the restart integration suite in this repo.
 func buildClientPod(app, nodeName string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace, Labels: map[string]string{"app": app}},
@@ -55,8 +52,8 @@ func buildClientPod(app, nodeName string) *v1.Pod {
 	}
 }
 
-// buildIngressDeny denies all ingress to pods matching app=label (PolicyTypeIngress
-// with no rules), forcing NPA to program per-pod BPF and enforce.
+// buildIngressDeny denies all ingress to pods matching app=label, forcing NPA to
+// program per-pod BPF and enforce.
 func buildIngressDeny(name, label string) *network.NetworkPolicy {
 	return manifest.NewNetworkPolicyBuilder().
 		Namespace(namespace).
@@ -122,13 +119,9 @@ func churnRanSuccessfully() bool {
 	return cj.Status.LastSuccessfulTime != nil
 }
 
-// execConnect runs a short python TCP connect from a pod and returns "CONNECTED"
-// or "BLOCKED". The python script always exits 0 and prints the verdict, so a
-// non-nil error from ExecInPod is a transport/exec problem (apiserver hiccup,
-// throttling, SPDY reset), not an enforcement result. Over a multi-sweep soak
-// those transients are near-certain, so we retry them a few times rather than
-// failing the whole run on one; a persistent exec failure still fails loudly.
-// Same probe approach as the restart integration suite, with soak-grade retries.
+// execConnect returns "CONNECTED" or "BLOCKED". The script always exits 0, so a
+// non-nil ExecInPod error is a transport hiccup, not a verdict; over a long soak
+// these are near-certain, so we retry a few times before failing loudly.
 func execConnect(podName, ip string, port int) string {
 	script := fmt.Sprintf(`import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
