@@ -572,7 +572,9 @@ type ConntrackKey struct {
 }
 
 type ConntrackVal struct {
-	Value uint8
+	Value    uint8
+	_        [7]byte // padding to match BPF struct layout
+	LastSeen uint64
 }
 
 func ConvConntrackV6ToByte(key ConntrackKeyV6) []byte {

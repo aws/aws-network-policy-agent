@@ -226,6 +226,7 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
+					fmt.Println("Last Seen (ns) - ", iterValue.LastSeen)
 					fmt.Println("*******************************")
 				}
 
@@ -392,6 +393,7 @@ func MapWalkv6(mapID int) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
+					fmt.Println("Last Seen (ns) - ", iterValue.LastSeen)
 					fmt.Println("*******************************")
 				}
 
