@@ -1,10 +1,3 @@
-// Package npsoak is a minimal soak test for the Network Policy Agent: it holds a
-// deny policy in place while pods churn for a configurable window, and repeatedly
-// verifies enforcement still holds and BPF state does not leak.
-//
-// It is intentionally small and self-contained. The larger soak harness (agent
-// kills, memory/CPU/goroutine gates, #462 repro, metrics) lives elsewhere; this
-// suite is the tactical proof that NPA enforces correctly under sustained churn.
 package npsoak
 
 import (
