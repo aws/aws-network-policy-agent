@@ -49,7 +49,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -134,18 +133,40 @@ func main() {
 			log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
 			os.Exit(1)
 		}
+
+		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH, ebpf.POLICY_EVENTS_MAP_PIN_PATH}
+		if err := mgr.AddReadyzCheck("bpf-maps", ebpf.NewGlobalMapsReadinessCheck(readyzPaths)); err != nil {
+			log.Errorf("unable to set up bpf-maps readiness check %v", err)
+			os.Exit(1)
+		}
+
+		if err := mgr.AddReadyzCheck("bpf-fs", ebpf.NewBpfFsReadinessCheck(ebpf.BPF_FS_ROOT)); err != nil {
+			log.Errorf("unable to set up bpf-fs readiness check %v", err)
+			os.Exit(1)
+		}
 	} else {
 		log.Info("Network Policy is disabled, skip the controller registration")
 	}
 
 	//+kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Errorf("unable to set up health check %v", err)
+	// The gRPC server runs whether or not network policy is enabled, so its
+	// health checks are registered unconditionally. The checker is created once
+	// and shared between the liveness and readiness probes.
+	grpcHealthChecker, err := rpc.NewGRPCSocketHealthChecker(npaSocketPath)
+	if err != nil {
+		log.Errorf("unable to set up gRPC socket health checker %v", err)
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Errorf("unable to set up ready check %v", err)
+	defer grpcHealthChecker.Close()
+
+	if err := mgr.AddHealthzCheck("grpc-socket", grpcHealthChecker.Check); err != nil {
+		log.Errorf("unable to set up gRPC socket health check %v", err)
+		os.Exit(1)
+	}
+
+	if err := mgr.AddReadyzCheck("grpc-socket", grpcHealthChecker.Check); err != nil {
+		log.Errorf("unable to set up grpc-socket readiness check %v", err)
 		os.Exit(1)
 	}
 
