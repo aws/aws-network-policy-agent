@@ -151,8 +151,7 @@ finally:
 	return "BLOCKED" // unreachable; Expect above fails the spec
 }
 
-// bpfCounts returns the number of loaded BPF programs and per-pod maps on a node,
-// via the on-node aws-eks-na-cli, reusing the framework's parser.
+// bpfCounts returns the number of loaded BPF programs and per-pod maps on a node.
 func bpfCounts(nodeName string) (progs, maps int) {
 	checkPod := utils.BuildBPFCheckPod(namespace, nodeName)
 	created, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, podReadyTimeout)
