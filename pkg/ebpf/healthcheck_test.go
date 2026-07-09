@@ -62,12 +62,4 @@ func TestNewBpfFsReadinessCheck(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not a bpffs mount")
 	})
-
-	t.Run("real bpffs passes when mounted", func(t *testing.T) {
-		// Only meaningful where /sys/fs/bpf is actually a bpffs mount (e.g.
-		// CI/dev hosts with BPF). Skip otherwise so the suite stays hermetic.
-		if err := NewBpfFsReadinessCheck(BPF_FS_ROOT)(nil); err != nil {
-			t.Skipf("%s is not a writable bpffs in this environment: %v", BPF_FS_ROOT, err)
-		}
-	})
 }

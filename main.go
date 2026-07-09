@@ -134,8 +134,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH}
-		readyzPaths = append(readyzPaths, ebpf.POLICY_EVENTS_MAP_PIN_PATH)
+		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH, ebpf.POLICY_EVENTS_MAP_PIN_PATH}
 		if err := mgr.AddReadyzCheck("bpf-maps", ebpf.NewGlobalMapsReadinessCheck(readyzPaths)); err != nil {
 			log.Errorf("unable to set up bpf-maps readiness check %v", err)
 			os.Exit(1)
@@ -152,13 +151,21 @@ func main() {
 	//+kubebuilder:scaffold:builder
 
 	// The gRPC server runs whether or not network policy is enabled, so its
-	// health checks are registered unconditionally.
-	if err := mgr.AddHealthzCheck("grpc-socket", rpc.NewGRPCSocketHealthCheck(npaSocketPath)); err != nil {
+	// health checks are registered unconditionally. The checker is created once
+	// and shared between the liveness and readiness probes.
+	grpcHealthChecker, err := rpc.NewGRPCSocketHealthChecker(npaSocketPath)
+	if err != nil {
+		log.Errorf("unable to set up gRPC socket health checker %v", err)
+		os.Exit(1)
+	}
+	defer grpcHealthChecker.Close()
+
+	if err := mgr.AddHealthzCheck("grpc-socket", grpcHealthChecker.Check); err != nil {
 		log.Errorf("unable to set up gRPC socket health check %v", err)
 		os.Exit(1)
 	}
 
-	if err := mgr.AddReadyzCheck("grpc-socket", rpc.NewGRPCSocketHealthCheck(npaSocketPath)); err != nil {
+	if err := mgr.AddReadyzCheck("grpc-socket", grpcHealthChecker.Check); err != nil {
 		log.Errorf("unable to set up grpc-socket readiness check %v", err)
 		os.Exit(1)
 	}

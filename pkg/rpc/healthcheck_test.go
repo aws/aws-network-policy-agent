@@ -49,35 +49,41 @@ func startTestHealthServer(t *testing.T, socketPath string, status healthpb.Heal
 	}
 }
 
-func TestNewGRPCSocketHealthCheck_Serving(t *testing.T) {
+func TestGRPCSocketHealthChecker_Serving(t *testing.T) {
 	socketPath := "/tmp/test-healthcheck-serving.sock"
 	_ = os.Remove(socketPath)
 	stop := startTestHealthServer(t, socketPath, healthpb.HealthCheckResponse_SERVING)
 	defer stop()
 
-	check := NewGRPCSocketHealthCheck(socketPath)
-	assert.NoError(t, check(nil))
+	checker, err := NewGRPCSocketHealthChecker(socketPath)
+	require.NoError(t, err)
+	defer checker.Close()
+	assert.NoError(t, checker.Check(nil))
 }
 
-func TestNewGRPCSocketHealthCheck_NotServing(t *testing.T) {
+func TestGRPCSocketHealthChecker_NotServing(t *testing.T) {
 	socketPath := "/tmp/test-healthcheck-notserving.sock"
 	_ = os.Remove(socketPath)
 	stop := startTestHealthServer(t, socketPath, healthpb.HealthCheckResponse_NOT_SERVING)
 	defer stop()
 
-	check := NewGRPCSocketHealthCheck(socketPath)
-	err := check(nil)
+	checker, err := NewGRPCSocketHealthChecker(socketPath)
+	require.NoError(t, err)
+	defer checker.Close()
+	err = checker.Check(nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "non-serving status")
 }
 
-func TestNewGRPCSocketHealthCheck_MissingSocket(t *testing.T) {
+func TestGRPCSocketHealthChecker_MissingSocket(t *testing.T) {
 	socketPath := "/tmp/test-healthcheck-missing.sock"
 	// Ensure nothing is listening at this path.
 	_ = os.Remove(socketPath)
 
-	check := NewGRPCSocketHealthCheck(socketPath)
-	err := check(nil)
+	checker, err := NewGRPCSocketHealthChecker(socketPath)
+	require.NoError(t, err)
+	defer checker.Close()
+	err = checker.Check(nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "grpc health check failed")
 }
