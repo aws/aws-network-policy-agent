@@ -328,8 +328,14 @@ clean: # Clean temporary files and build artifacts from the project
 	@rm -f -- aws-eks-na-cli-v6
 	@rm -f -- coverage.txt
 
-build-test-binaries: # Builds the test suite binaries
+build-test-binaries: # Builds the test suite binaries (excludes soak tests; see build-soak-test-binaries)
 	mkdir -p ${MAKEFILE_PATH}test/build
 	cd ${MAKEFILE_PATH} && \
-	find ${MAKEFILE_PATH}test -name '*suite_test.go' -type f  | xargs dirname  | xargs ginkgo build
-	find ${MAKEFILE_PATH}test -name "*.test" -print0 | xargs -0 -I {} mv {} ${MAKEFILE_PATH}test/build
+	find ${MAKEFILE_PATH}test -path '*/soak/*' -prune -o -name '*suite_test.go' -type f -print | xargs dirname | xargs ginkgo build
+	find ${MAKEFILE_PATH}test -path '*/soak/*' -prune -o -name "*.test" -type f -print0 | xargs -0 -I {} mv {} ${MAKEFILE_PATH}test/build
+
+build-soak-test-binaries: # Builds long-running soak test suites (opt-in, NOT part of the integration cadence)
+	mkdir -p ${MAKEFILE_PATH}test/build
+	cd ${MAKEFILE_PATH} && \
+	find ${MAKEFILE_PATH}test/integration/soak -name '*suite_test.go' -type f | xargs dirname | xargs ginkgo build --tags soak
+	find ${MAKEFILE_PATH}test/integration/soak -name "*.test" -type f -print0 | xargs -0 -I {} mv {} ${MAKEFILE_PATH}test/build
