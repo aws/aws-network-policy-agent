@@ -1,4 +1,4 @@
-package npsoak
+package soak
 
 import (
 	"fmt"
