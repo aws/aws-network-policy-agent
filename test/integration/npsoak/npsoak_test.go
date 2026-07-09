@@ -101,17 +101,15 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		Expect(fw.K8sClient.Delete(ctx, churnJob)).To(Succeed())
 		churnJob = nil
 		// Poll rather than a fixed sleep: teardown latency varies, and a leak is a
-		// sustained excess, so give it a bounded window to settle to baseline.
-		var endProgs, endMaps int
-		Eventually(func() int {
-			endProgs, endMaps = bpfCounts(nodeName)
+		// sustained excess, so give it a bounded window for both progs and maps to
+		// settle to baseline (they can drain at slightly different times).
+		Eventually(func() bool {
+			endProgs, endMaps := bpfCounts(nodeName)
 			GinkgoWriter.Printf("drain: progs=%d maps=%d (baseline progs=%d maps=%d)\n",
 				endProgs, endMaps, baselineProgs, baselineMaps)
-			return endProgs
-		}, 4*time.Minute, 20*time.Second).Should(BeNumerically("<=", baselineProgs),
-			"BPF program count did not return to baseline after churn drained (leak)")
-		Expect(endMaps).To(BeNumerically("<=", baselineMaps),
-			"BPF map count did not return to baseline after churn drained (leak)")
+			return endProgs <= baselineProgs && endMaps <= baselineMaps
+		}, 4*time.Minute, 20*time.Second).Should(BeTrue(),
+			"BPF program/map count did not return to baseline after churn drained (leak)")
 
 		By("proving the server is still alive and enforcement was the reason for BLOCKED")
 		// Dropping the deny policy must restore reachability; otherwise the BLOCKED
