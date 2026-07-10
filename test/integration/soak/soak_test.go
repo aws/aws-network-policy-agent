@@ -112,11 +112,9 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 			"BPF program/map count did not return to baseline after churn drained (leak)")
 
 		By("proving the server is still alive and enforcement was the reason for BLOCKED")
-		// Dropping the deny policy must restore reachability; otherwise the BLOCKED
-		// results above could be a dead server, not enforcement. Delete via the client
-		// (tolerating NotFound) since DeleteNetworkPolicy treats the terminal NotFound
-		// as an error. The 3m window is generous: NPA can take over a minute to
-		// reprogram after a churn window. It proves liveness, not teardown latency.
+		// Restored reachability confirms the BLOCKED results above were enforcement,
+		// not a dead server. Delete via the client (tolerating NotFound) since
+		// DeleteNetworkPolicy reports the terminal NotFound as an error.
 		Expect(client.IgnoreNotFound(fw.K8sClient.Delete(ctx, denyPolicy))).To(Succeed())
 		denyPolicy = nil
 		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },
