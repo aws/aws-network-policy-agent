@@ -77,10 +77,8 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 		ObjectMeta: metav1.ObjectMeta{Name: "np-soak-churn", Namespace: namespace},
 		Spec: batchv1.CronJobSpec{
 			Schedule: "*/1 * * * *",
-			// Forbid overlapping runs: if a run takes >1min on a busy cluster the
-			// default (Allow) would stack jobs, amplifying churn beyond what the
-			// soak expects and making drain-to-baseline fail due to outstanding
-			// jobs rather than a real leak.
+			// Forbid overlapping runs so an overrunning job can't stack and amplify
+			// churn, which would fail drain-to-baseline on outstanding jobs, not a leak.
 			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
 			SuccessfulJobsHistoryLimit: &successHistory,
 			FailedJobsHistoryLimit:     &failHistory,
@@ -124,17 +122,10 @@ func churnRanSuccessfully() bool {
 	return cj.Status.LastSuccessfulTime != nil
 }
 
-// execConnect returns "CONNECTED" or "BLOCKED". The script prints exactly one
-// verdict token and exits 0, so a healthy probe yields output that is exactly
-// "CONNECTED" or "BLOCKED". Anything else is a broken probe, not a verdict:
-//   - a non-nil ExecInPod error (transport hiccup), or
-//   - output that carries stderr or lacks a clean verdict token. ExecInPod appends
-//     "\nSTDERR: ..." to stdout WITHOUT returning an error, so a python failure
-//     (e.g. a missing interpreter) would otherwise be silently read as BLOCKED and
-//     pass the deny window for the wrong reason.
-//
-// Both are treated as probe-infrastructure errors: retry a few times (near-certain
-// over a long soak), then fail loudly rather than return a bogus verdict.
+// execConnect returns "CONNECTED" or "BLOCKED". Only those exact tokens count as a
+// verdict; anything else is a broken probe (ExecInPod appends stderr to stdout
+// without erroring, so a failed script must not be read as BLOCKED) and is retried,
+// then failed rather than returned as a bogus verdict.
 func execConnect(podName, ip string, port int) string {
 	script := fmt.Sprintf(`import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
@@ -156,8 +147,6 @@ finally:
 			case "BLOCKED":
 				return "BLOCKED"
 			default:
-				// Zero exit but no clean verdict (stderr appended, python error,
-				// unexpected output): a broken probe, not an enforcement result.
 				err = fmt.Errorf("unexpected probe output (not a clean verdict): %q", out)
 			}
 		}
