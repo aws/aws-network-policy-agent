@@ -109,8 +109,11 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 
 	deployClient := func(clientName string) *v1.Pod {
 		cfg := ipFamilyConfigForIP(serverIP)
+		// A denied port is silently dropped, so its `nc -w1` blocks 1s before
+		// printing CLOSE- while the allowed port prints instantly. The It block
+		// must read only after this whole probe phase completes.
 		script := fmt.Sprintf(
-			`sleep 30;
+			`sleep 10;
 	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
 	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
 	nc -z -w2 %s %d && echo "OPEN-EXT" || echo "CLOSE-EXT";
@@ -172,7 +175,8 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		})
 
 		It("should allow on server prefix and 3306 port, deny on rest server-prefix ports, allow all on rest of endpoints", func() {
-			time.Sleep(30 * time.Second)
+			// > client sleep(10) + probe phase, so all probe results are logged first.
+			time.Sleep(15 * time.Second)
 
 			// fetch the logs
 			logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
