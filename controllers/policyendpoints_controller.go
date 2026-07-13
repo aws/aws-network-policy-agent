@@ -535,6 +535,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	var targetPods, podsToBeCleanedUp, currentPods []npatypes.Pod
 	var targetPodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
+	allPodIdentifiers := make(map[string]bool)
 
 	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
 	log().Infof("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
@@ -569,12 +570,20 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			}
 		}
 		log().Infof("Processing PE Name %s", policyEndpointResourceName)
-		currentTargetPods, currentPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
+		currentTargetPods, currentPodIdentifiers, currentAllPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
 		log().Infof("Adding to current targetPods Total pods: %d", len(currentTargetPods))
 		targetPods = append(targetPods, currentTargetPods...)
 		for podIdentifier := range currentPodIdentifiers {
 			podIdentifiers[podIdentifier] = true
-			targetPodIdentifiers = append(targetPodIdentifiers, podIdentifier)
+		}
+		// Track every pod identifier selected by this Network Policy, local or not.
+		// podIdentifierToPolicyEndpointMap holds entries for non-local pods too, so
+		// stale detection must cover them or those entries are never cleaned up.
+		for podIdentifier := range currentAllPodIdentifiers {
+			if !allPodIdentifiers[podIdentifier] {
+				allPodIdentifiers[podIdentifier] = true
+				targetPodIdentifiers = append(targetPodIdentifiers, podIdentifier)
+			}
 		}
 	}
 
@@ -590,9 +599,13 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			log().Infof("No more target pods so deleting the entry in PE selector map for Name %s", policyEndpointResource)
 			r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 		}
-		for _, podIdentifier := range stalePodIdentifiers {
-			r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpointResource)
-		}
+	}
+
+	// Purge this parent NP's PolicyEndpoints from stale pod identifiers by parent NP
+	// name rather than by parentPEList, so PE resources that were deleted or renamed
+	// (and hence no longer appear in parentPEList) are removed as well.
+	for _, podIdentifier := range stalePodIdentifiers {
+		r.deleteParentNPFromPodIdentifierMap(ctx, podIdentifier, parentNP)
 	}
 
 	// Update active podIdentifiers selected by the current Network Policy
@@ -609,11 +622,14 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 
 // Derives list of local pods the policy endpoint resource selects.
 // Function returns list of target pods along with their unique identifiers. It also
-// captures list of (any) existing pods against which this policy is no longer active.
+// returns the identifiers of every pod the policy endpoint selects (local or not),
+// since those are all registered in podIdentifierToPolicyEndpointMap and the caller
+// needs the full set for stale entry cleanup.
 func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]npatypes.Pod, map[string]bool) {
+	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]npatypes.Pod, map[string]bool, map[string]bool) {
 	var targetPods []npatypes.Pod
 	podIdentifiers := make(map[string]bool)
+	allPodIdentifiers := make(map[string]bool)
 
 	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
 	// by the Host IP value.
@@ -630,9 +646,10 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 			podIdentifiers[podIdentifier] = true
 			log().Infof("Found a matching Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
 		}
+		allPodIdentifiers[podIdentifier] = true
 		r.updatePodIdentifierToPEMap(ctx, podIdentifier, parentPEList)
 	}
-	return targetPods, podIdentifiers
+	return targetPods, podIdentifiers, allPodIdentifiers
 }
 
 func (r *PolicyEndpointsReconciler) getPodListToBeCleanedUp(oldPodSet []npatypes.Pod,
@@ -708,6 +725,28 @@ func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Contex
 		}
 	}
 	return stalePodIdentifiers
+}
+
+// Removes every PolicyEndpoint belonging to the given parent Network Policy from the
+// pod identifier's tracked PE list, deleting the map entry once the list is empty.
+func (r *PolicyEndpointsReconciler) deleteParentNPFromPodIdentifierMap(ctx context.Context, podIdentifier string,
+	parentNP string) {
+	r.podIdentifierToPolicyEndpointMapMutex.Lock()
+	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
+	var currentPEList []string
+	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		for _, policyEndpointName := range policyEndpointList.([]string) {
+			if utils.GetParentNPNameFromPEName(policyEndpointName) == parentNP {
+				continue
+			}
+			currentPEList = append(currentPEList, policyEndpointName)
+		}
+		if len(currentPEList) == 0 {
+			r.podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
+		} else {
+			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentPEList)
+		}
+	}
 }
 
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
