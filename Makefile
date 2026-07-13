@@ -105,9 +105,20 @@ GO_ENV_EBPF += GOARCH=$(GO_ARCH)
 GO_ENV_EBPF += CGO_CFLAGS=$(CUSTOM_CGO_CFLAGS)
 GO_ENV_EBPF += CGO_LDFLAGS=$(CUSTOM_CGO_LDFLAGS)
 
+# Version metadata injection
+GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+EBPF_SDK_VERSION ?= $(shell go list -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null || echo "unknown")
+# Freeze values so all binaries built in this make invocation get identical metadata
+GIT_VERSION := $(GIT_VERSION)
+BUILD_DATE := $(BUILD_DATE)
+EBPF_SDK_VERSION := $(EBPF_SDK_VERSION)
+VERSION_PKG := github.com/aws/aws-network-policy-agent/pkg/version
+VERSION_LDFLAGS := -X $(VERSION_PKG).GitVersion=$(GIT_VERSION) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).EbpfSDKVersion=$(EBPF_SDK_VERSION)
+
 # Build using the host's Go toolchain.
 BUILD_MODE ?= -buildmode=pie
-build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) -extldflags "-static"'
+build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) $(VERSION_LDFLAGS) -extldflags "-static"'
 build-linux: ## Build the controllerusing the host's Go toolchain.
 	$(GO_ENV_EBPF) go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -tags netgo,ebpf,core -a -o controller main.go
 	go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -o aws-eks-na-cli ./cmd/cli
