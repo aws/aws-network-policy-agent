@@ -39,6 +39,8 @@ func buildNginxPod(app string) *v1.Pod {
 }
 
 // buildClientPod is a long-lived pod the probe execs a python TCP connect from.
+// It carries a small resource request so sustained same-node churn does not evict
+// it (an evicted client would fail probes for reasons unrelated to enforcement).
 func buildClientPod(app, nodeName string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace, Labels: map[string]string{"app": app}},
@@ -46,7 +48,13 @@ func buildClientPod(app, nodeName string) *v1.Pod {
 			NodeName: nodeName,
 			Containers: []v1.Container{{
 				Name: "client", Image: "public.ecr.aws/docker/library/python:3.11-slim",
-				Command: []string{"sleep", "infinity"},
+				Command: []string{"sleep", "86400"},
+				Resources: v1.ResourceRequirements{
+					Requests: v1.ResourceList{
+						v1.ResourceCPU:    resource.MustParse("10m"),
+						v1.ResourceMemory: resource.MustParse("32Mi"),
+					},
+				},
 			}},
 		},
 	}
@@ -168,8 +176,15 @@ func bpfCounts(nodeName string) (progs, maps int) {
 	out, err := fw.PodManager.ExecInPod(namespace, created.Name,
 		[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
 	Expect(err).ToNot(HaveOccurred(), "failed to dump bpf state")
+	// A non-empty check is not enough: ExecInPod folds stderr into the returned
+	// string ("STDERR: ..."), so a stderr-only dump would pass an empty check, parse
+	// to zero counts, and silently green the drain leak check (0 <= baseline). Assert
+	// the dump actually contains program data. The deny policy is active whenever
+	// bpfCounts runs, so the server always has at least one program.
+	Expect(out).To(ContainSubstring("PinPath:"), "bpf state dump has no program data on "+nodeName)
 
 	state, err := utils.ParseLoadedEBPFData(out)
 	Expect(err).ToNot(HaveOccurred(), "failed to parse loaded-ebpfdata")
+	Expect(state.ProgIDs).ToNot(BeEmpty(), "parsed zero BPF programs on "+nodeName)
 	return len(state.ProgIDs), len(state.MapIDs)
 }

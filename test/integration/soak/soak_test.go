@@ -20,6 +20,9 @@ const (
 	serverPort      = 80
 	podReadyTimeout = 2 * time.Minute
 	probeInterval   = 30 * time.Second
+	// bpfSampleInterval is coarser than probeInterval: each bpfCounts spins up a
+	// privileged pod, so sampling too often would pollute the BPF count it measures.
+	bpfSampleInterval = 2 * time.Minute
 )
 
 var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered, func() {
@@ -76,18 +79,30 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		deadline := time.Now().Add(soakDuration)
 		sweeps, churnConfirmed := 0, false
 		peakProgs := baselineProgs
+		// bpfCounts spins up a privileged pod, so sampling it every 30s alongside the
+		// probe would add scheduling load; sample on a coarser cadence. But do not
+		// rely on wall-clock luck to catch the churn peak: the reliable moment is
+		// right after a churn Job first completes, when its pods are still in their
+		// TTL window and NPA still has them programmed (it detaches on delete, not on
+		// completion). So force one sample there, and take periodic ones after.
+		sampleBPF := func() {
+			if p, _ := bpfCounts(nodeName); p > peakProgs {
+				peakProgs = p
+			}
+		}
+		nextBPFSample := time.Now().Add(bpfSampleInterval)
 		for time.Now().Before(deadline) {
 			time.Sleep(probeInterval)
 			Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 				fmt.Sprintf("enforcement regressed to CONNECTED during churn at sweep %d", sweeps))
 			sweeps++
-			// Track the peak so the end<=baseline leak check below is not vacuous: without
-			// an observed rise it can't tell "no leak" from "churn never programmed".
-			if p, _ := bpfCounts(nodeName); p > peakProgs {
-				peakProgs = p
-			}
 			if !churnConfirmed && churnRanSuccessfully() {
 				churnConfirmed = true
+				sampleBPF() // churn just landed: pods are programmed right now
+			}
+			if time.Now().After(nextBPFSample) {
+				sampleBPF()
+				nextBPFSample = time.Now().Add(bpfSampleInterval)
 			}
 		}
 		Expect(sweeps).To(BeNumerically(">=", 1), "soak window too short to run a probe sweep")
