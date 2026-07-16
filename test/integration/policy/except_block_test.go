@@ -171,6 +171,7 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		})
 
 		It("should allow on server prefix and 3306 port, deny on rest server-prefix ports, allow all on rest of endpoints", func() {
+<<<<<<< HEAD
 			cfg := ipFamilyConfigForIP(serverIP)
 
 			// Deny converging first proves enforcement is active.
@@ -202,6 +203,15 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 				}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
 					"deny on excepted port %d did not persist through the allow probes", blockPort)
 			})
+=======
+			Eventually(func() error {
+				logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
+				if err != nil {
+					return err
+				}
+				return processIPBlockLogs(logs, allowPort, blockPort)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+>>>>>>> b341d8a (perf: add trie for cidr lookup)
 		})
 	})
 
