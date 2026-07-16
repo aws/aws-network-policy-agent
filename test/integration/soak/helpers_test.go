@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
@@ -17,23 +18,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// buildNginxPod is the policy target. The resource request keeps it from being the
-// first eviction victim under churn; a dead server would make BLOCKED probes pass
-// for the wrong reason.
-func buildNginxPod(app string) *v1.Pod {
-	return &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace, Labels: map[string]string{"app": app}},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{{
-				Name: "nginx", Image: nginxImage,
-				Ports: []v1.ContainerPort{{ContainerPort: 80}},
-				Resources: v1.ResourceRequirements{
-					Requests: v1.ResourceList{
-						v1.ResourceCPU:    resource.MustParse("10m"),
-						v1.ResourceMemory: resource.MustParse("32Mi"),
-					},
+// buildNginxDeployment is the policy target, wrapped in a 1-replica Deployment
+// rather than a bare Pod. Two reasons:
+//   - Ownership: EKS network policy is documented to apply only to pods with an
+//     ownerReference (part of a Deployment/ReplicaSet), so a bare-Pod target rests
+//     on undocumented behavior; a Deployment keeps the core assertion inside support.
+//   - Distinct pod identifier: NPA derives a pod's identity by stripping the last
+//     "-<segment>" of its name (GetPodIdentifier). A bare pod named "np-soak-server"
+//     collapses to identifier "np-soak" — colliding with a bare "np-soak-client".
+//     A Deployment pod is "np-soak-server-<rs>-<pod>", yielding a distinct
+//     "np-soak-server-<rs>" identifier, so enforcement can't be confused with a
+//     similarly-named neighbor.
+//
+// The resource request keeps it from being the first eviction victim under churn;
+// a dead server would make BLOCKED probes pass for the wrong reason.
+func buildNginxDeployment(app string) *appsv1.Deployment {
+	replicas := int32(1)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": app}},
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": app}},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{
+						Name: "nginx", Image: nginxImage,
+						Ports: []v1.ContainerPort{{ContainerPort: 80}},
+						Resources: v1.ResourceRequirements{
+							Requests: v1.ResourceList{
+								v1.ResourceCPU:    resource.MustParse("10m"),
+								v1.ResourceMemory: resource.MustParse("32Mi"),
+							},
+						},
+					}},
 				},
-			}},
+			},
 		},
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
@@ -27,33 +28,46 @@ const (
 
 var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered, func() {
 	var (
-		server      *v1.Pod
-		clientPod   *v1.Pod
-		denyPolicy  *network.NetworkPolicy
-		churnPolicy *network.NetworkPolicy
-		churnJob    *batchv1.CronJob
-		nodeName    string
+		serverDeploy *appsv1.Deployment
+		serverIP     string
+		clientPod    *v1.Pod
+		denyPolicy   *network.NetworkPolicy
+		churnPolicy  *network.NetworkPolicy
+		churnJob     *batchv1.CronJob
+		nodeName     string
 	)
 
 	BeforeAll(func() {
-		By("deploying an nginx server and a client on the same node")
-		server = buildNginxPod(serverApp)
-		var err error
-		server, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, server, podReadyTimeout)
+		By("deploying an nginx server (Deployment) and a client on the same node")
+		// The server is a 1-replica Deployment, not a bare Pod: EKS network policy is
+		// documented to apply only to owner-referenced pods, and NPA's per-pod identity
+		// (last "-<segment>" stripped) would collide between bare pods sharing a prefix.
+		serverDeploy = buildNginxDeployment(serverApp)
+		_, err := fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, serverDeploy)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(server.Status.PodIP).ToNot(BeEmpty())
-		nodeName = server.Spec.NodeName
+
+		// Resolve the Deployment's single pod for its IP, node, and exec target.
+		serverPods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", serverApp)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(serverPods).To(HaveLen(1), "expected exactly one server pod")
+		serverIP = serverPods[0].Status.PodIP
+		Expect(serverIP).ToNot(BeEmpty())
+		nodeName = serverPods[0].Spec.NodeName
 
 		clientPod = buildClientPod(clientApp, nodeName)
 		clientPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, podReadyTimeout)
 		Expect(err).ToNot(HaveOccurred())
 
 		By("verifying the server is reachable before any policy is applied")
-		Expect(execConnect(clientPod.Name, server.Status.PodIP, serverPort)).To(Equal("CONNECTED"))
+		// Eventually, not a single probe: readiness guarantees the pod is Running, not
+		// that nginx is accepting connections yet, so the first probe can race the
+		// listener coming up. Symmetric with the enforcement check.
+		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },
+			90*time.Second, probeInterval).Should(Equal("CONNECTED"),
+			"server never became reachable before any policy was applied")
 	})
 
 	It("enforces a deny policy that holds while pods churn, without leaking BPF state", func() {
-		serverIP := server.Status.PodIP
 
 		By("applying an ingress-deny policy to the server")
 		denyPolicy = buildIngressDeny("np-soak-deny", serverApp)
@@ -126,6 +140,15 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		}, 4*time.Minute, 20*time.Second).Should(BeTrue(),
 			"BPF program/map count did not return to baseline after churn drained (leak)")
 
+		By("confirming enforcement still holds after churn drained")
+		// The drain check uses `endProgs <= baseline`, so a server whose own BPF
+		// program was wrongly detached mid-run (enforcement lost) would come in BELOW
+		// baseline and still pass the leak check — and the CONNECTED check below would
+		// then expect exactly that regression. Probe once here, while the deny policy
+		// is still applied, to catch a silent enforcement loss the count comparison can't.
+		Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
+			"enforcement regressed after churn drained: server reachable while deny policy still applied")
+
 		By("proving the server is still alive and enforcement was the reason for BLOCKED")
 		// Restored reachability confirms the BLOCKED results above were enforcement,
 		// not a dead server. Delete via the client (tolerating NotFound) since
@@ -147,10 +170,11 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, np)
 			}
 		}
-		for _, p := range []*v1.Pod{clientPod, server} {
-			if p != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, p)
-			}
+		if clientPod != nil {
+			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+		}
+		if serverDeploy != nil {
+			fw.DeploymentManager.DeleteAndWaitUntilDeploymentDeleted(ctx, serverDeploy)
 		}
 	})
 })
