@@ -227,8 +227,8 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 		port     int
 		endPort  int
 	}
-	uniquePorts := make(map[portKey]v1alpha1.Port)
-	var result []v1alpha1.Port
+	uniquePorts := make(map[portKey]v1alpha1.Port, len(ports))
+	result := make([]v1alpha1.Port, 0, len(ports))
 
 	for _, p := range ports {
 
