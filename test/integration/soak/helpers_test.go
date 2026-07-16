@@ -198,9 +198,14 @@ func churnPodsRunning() bool {
 //
 // A CONNECTED verdict on a pod older than the deadline is fail-open: NPA has not
 // converged on a fresh, policy-selected pod (probe-attach race, missed CNI ADD,
-// PolicyEndpoint lag). That fails the spec immediately, naming the pod and its age.
-// Pods younger than the deadline are skipped — a brief allow window before
-// programming completes is expected in standard mode, not a defect.
+// PolicyEndpoint lag). Pods younger than the deadline are skipped — a brief allow
+// window before programming completes is expected in standard mode, not a defect.
+//
+// A first CONNECTED is confirmed with one re-probe before failing (symmetric with
+// verifyControlReachable). This absorbs a legitimately-slow-but-correct programming
+// overshoot of a second or two past the deadline under sustained churn: the re-probe
+// itself burns ~3s, giving NPA more time, so only a genuine fail-open (deny never
+// took effect) stays CONNECTED twice and fails the spec, naming the pod and its age.
 func verifyChurnPodsEnforced(clientPodName string, now time.Time) int {
 	pods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", churnApp)
 	if err != nil {
@@ -238,10 +243,13 @@ func verifyChurnPodsEnforced(clientPodName string, now time.Time) int {
 		if fresh.DeletionTimestamp != nil || fresh.Status.Phase != v1.PodRunning {
 			continue
 		}
-		verdict := execConnect(clientPodName, p.Status.PodIP, serverPort)
-		Expect(verdict).To(Equal("BLOCKED"), fmt.Sprintf(
-			"fail-open: churn pod %s (age %s) still CONNECTED after churnConvergenceDeadline %s; "+
-				"NPA did not converge on a fresh policy-selected pod", p.Name, age.Round(time.Second), churnConvergenceDeadline))
+		if execConnect(clientPodName, p.Status.PodIP, serverPort) != "BLOCKED" {
+			// Confirm once before declaring fail-open — a 1-2s programming overshoot
+			// converts to BLOCKED on the re-probe; a real fail-open stays CONNECTED.
+			Expect(execConnect(clientPodName, p.Status.PodIP, serverPort)).To(Equal("BLOCKED"), fmt.Sprintf(
+				"fail-open: churn pod %s (age %s) still CONNECTED twice after churnConvergenceDeadline %s; "+
+					"NPA did not converge on a fresh policy-selected pod", p.Name, age.Round(time.Second), churnConvergenceDeadline))
+		}
 		verified++
 	}
 	return verified

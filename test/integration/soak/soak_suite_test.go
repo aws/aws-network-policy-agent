@@ -19,8 +19,9 @@ var (
 	soakDuration time.Duration
 
 	// Images default to public ECR; override for air-gapped or rate-limited runs.
-	// nginxImage is the policy-target server; churnImage is reused for both the churn
-	// pods and the probe client (bash /dev/tcp needs no extra runtime).
+	// nginxImage is the listener image for the policy-target server, the negative
+	// control, and the churn pods. churnImage is the probe client only (bash /dev/tcp
+	// needs no extra runtime, so the client reuses this minimal image).
 	nginxImage string
 	churnImage string
 )
@@ -29,9 +30,9 @@ func init() {
 	flag.DurationVar(&soakDuration, "np-soak-duration", 20*time.Minute,
 		"how long to churn pods while re-verifying network policy enforcement (min 3m)")
 	flag.StringVar(&nginxImage, "np-soak-nginx-image", "public.ecr.aws/nginx/nginx:latest",
-		"nginx image used for the policy-target server pod")
+		"nginx listener image for the server, negative control, and churn pods")
 	flag.StringVar(&churnImage, "np-soak-churn-image", "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
-		"image for the churn pods and the probe client (needs bash with /dev/tcp)")
+		"image for the probe client only (needs bash with /dev/tcp)")
 }
 
 func TestNetworkPolicySoak(t *testing.T) {
