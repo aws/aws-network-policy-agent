@@ -58,17 +58,21 @@ func buildNginxDeployment(app string) *appsv1.Deployment {
 	}
 }
 
-// buildClientPod is a long-lived pod the probe execs a python TCP connect from.
-// It carries a small resource request so sustained same-node churn does not evict
-// it (an evicted client would fail probes for reasons unrelated to enforcement).
+// buildClientPod is a long-lived pod the probe execs a bash /dev/tcp connect from.
+// It reuses the churn image (amazonlinux:2023-minimal) rather than pulling a python
+// runtime just to open one socket — bash's /dev/tcp does the same with no extra
+// dependency, and it drops one hardcoded public-ECR image. `sleep infinity` (GNU
+// coreutils is present) keeps it up for arbitrarily long soaks; the small resource
+// request keeps it off the eviction shortlist under sustained same-node churn (an
+// evicted client would fail probes for reasons unrelated to enforcement).
 func buildClientPod(app, nodeName string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace, Labels: map[string]string{"app": app}},
 		Spec: v1.PodSpec{
 			NodeName: nodeName,
 			Containers: []v1.Container{{
-				Name: "client", Image: "public.ecr.aws/docker/library/python:3.11-slim",
-				Command: []string{"sleep", "86400"},
+				Name: "client", Image: churnImage,
+				Command: []string{"sleep", "infinity"},
 				Resources: v1.ResourceRequirements{
 					Requests: v1.ResourceList{
 						v1.ResourceCPU:    resource.MustParse("10m"),
@@ -123,7 +127,7 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 							RestartPolicy: v1.RestartPolicyNever,
 							Containers: []v1.Container{{
 								Name:    "churn",
-								Image:   "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
+								Image:   churnImage,
 								Command: []string{"sleep", "10"},
 								Resources: v1.ResourceRequirements{
 									Requests: v1.ResourceList{
@@ -152,22 +156,23 @@ func churnRanSuccessfully() bool {
 
 // execConnect returns "CONNECTED" or "BLOCKED". Only those exact tokens count as a
 // verdict; anything else is a broken probe (ExecInPod appends stderr to stdout
-// without erroring, so a failed script must not be read as BLOCKED) and is retried,
+// without erroring, so a failed probe must not be read as BLOCKED) and is retried,
 // then failed rather than returned as a bogus verdict.
+//
+// The probe is a bash /dev/tcp connect (no python runtime needed, so the client can
+// reuse the minimal churn image). The `2>/dev/null` is load-bearing: bash writes
+// "connect: Connection refused/timed out" to stderr on a denied connection, and
+// ExecInPod folds stderr into stdout — without the redirect a legitimate BLOCKED
+// would arrive as "BLOCKED\nSTDERR: bash: connect: ...", miss the exact-token match,
+// and be misclassified as a probe error. With it, output is exactly one token.
 func execConnect(podName, ip string, port int) string {
-	script := fmt.Sprintf(`import socket
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-s.settimeout(3)
-try:
- s.connect(('%s',%d));print('CONNECTED')
-except Exception:
- print('BLOCKED')
-finally:
- s.close()`, ip, port)
+	script := fmt.Sprintf(
+		`timeout 3 bash -c 'exec 3<>/dev/tcp/%s/%d' 2>/dev/null && echo CONNECTED || echo BLOCKED`,
+		ip, port)
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		out, err := fw.PodManager.ExecInPod(namespace, podName, []string{"python3", "-c", script})
+		out, err := fw.PodManager.ExecInPod(namespace, podName, []string{"bash", "-c", script})
 		if err == nil {
 			switch strings.TrimSpace(out) {
 			case "CONNECTED":
