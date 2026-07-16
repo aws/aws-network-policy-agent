@@ -172,12 +172,13 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		})
 
 		It("should allow on server prefix and 3306 port, deny on rest server-prefix ports, allow all on rest of endpoints", func() {
-			time.Sleep(30 * time.Second)
-
-			// fetch the logs
-			logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(processIPBlockLogs(logs, allowPort, blockPort)).To(Succeed())
+			Eventually(func() error {
+				logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
+				if err != nil {
+					return err
+				}
+				return processIPBlockLogs(logs, allowPort, blockPort)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
 
