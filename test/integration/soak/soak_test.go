@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	serverApp = "np-soak-server"
-	clientApp = "np-soak-client"
-	churnApp  = "np-soak-churn"
+	serverApp  = "np-soak-server"
+	clientApp  = "np-soak-client"
+	churnApp   = "np-soak-churn"
+	controlApp = "np-soak-open"
 
 	serverPort      = 80
 	podReadyTimeout = 2 * time.Minute
@@ -24,17 +25,32 @@ const (
 	// bpfSampleInterval is coarser than probeInterval: each bpfCounts spins up a
 	// privileged pod, so sampling too often would pollute the BPF count it measures.
 	bpfSampleInterval = 2 * time.Minute
+
+	// churnConvergenceDeadline encodes an enforcement-latency SLO: in standard
+	// (non-strict) mode a brand-new policy-selected pod may briefly accept traffic
+	// before NPA finishes programming it, so the fail-open assertion is "no churn
+	// pod is still CONNECTED once its age exceeds this deadline" — NOT "never
+	// CONNECTED". Tightening this constant tightens the programming-latency the soak
+	// gate will catch regressions against.
+	churnConvergenceDeadline = 10 * time.Second
+
+	// churnVerifiedPerWindow is the floor of successful churn-pod deny verifications
+	// required per this much soak time, so the fail-open check can't pass vacuously
+	// (e.g. if churn pods never lived long enough to be probed).
+	churnVerifiedPerWindow = 5 * time.Minute
 )
 
 var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered, func() {
 	var (
-		serverDeploy *appsv1.Deployment
-		serverIP     string
-		clientPod    *v1.Pod
-		denyPolicy   *network.NetworkPolicy
-		churnPolicy  *network.NetworkPolicy
-		churnJob     *batchv1.CronJob
-		nodeName     string
+		serverDeploy  *appsv1.Deployment
+		controlDeploy *appsv1.Deployment
+		serverIP      string
+		controlIP     string
+		clientPod     *v1.Pod
+		denyPolicy    *network.NetworkPolicy
+		churnPolicy   *network.NetworkPolicy
+		churnJob      *batchv1.CronJob
+		nodeName      string
 	)
 
 	BeforeAll(func() {
@@ -57,6 +73,21 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		clientPod = buildClientPod(clientApp, nodeName)
 		clientPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, podReadyTimeout)
 		Expect(err).ToNot(HaveOccurred())
+
+		By("deploying a negative-control nginx (no policy selects it) on the same node")
+		// Selected by no policy, so it must stay CONNECTED for the whole run. It is the
+		// over-enforcement detector (false-DENY), the real-time attribution oracle
+		// (server BLOCKED + control CONNECTED = enforcement healthy), and — since it
+		// runs the same nginx image as the churn pods — the listener canary that proves
+		// a BLOCKED churn verdict means "enforced", not "listener never came up".
+		controlDeploy = buildNginxDeploymentOnNode(controlApp, nodeName)
+		_, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, controlDeploy)
+		Expect(err).ToNot(HaveOccurred())
+		controlPods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", controlApp)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(controlPods).To(HaveLen(1), "expected exactly one control pod")
+		controlIP = controlPods[0].Status.PodIP
+		Expect(controlIP).ToNot(BeEmpty())
 
 		By("verifying the server is reachable before any policy is applied")
 		// Eventually, not a single probe: readiness guarantees the pod is Running, not
@@ -92,6 +123,7 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		By(fmt.Sprintf("re-verifying enforcement holds every %s for %s", probeInterval, soakDuration))
 		deadline := time.Now().Add(soakDuration)
 		sweeps, churnConfirmed := 0, false
+		churnVerified := 0
 		peakProgs := baselineProgs
 		// bpfCounts spins up a privileged pod, so sampling it every 30s alongside the
 		// probe would add scheduling load; sample on a coarser cadence. But do not
@@ -107,24 +139,43 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		nextBPFSample := time.Now().Add(bpfSampleInterval)
 		for time.Now().Before(deadline) {
 			time.Sleep(probeInterval)
+			now := time.Now()
+
+			// Per-sweep invariant table (target / selected-by-policy / expected):
+			//   server  | yes (ingress deny) | BLOCKED   -> else enforcement regressed
+			//   control | no                 | CONNECTED -> else over-enforcement
+			//   churn (age > deadline) | yes | BLOCKED   -> else fail-open on new pod
 			Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 				fmt.Sprintf("enforcement regressed to CONNECTED during churn at sweep %d", sweeps))
+			verifyControlReachable(clientPod.Name, controlIP)
+			churnVerified += verifyChurnPodsEnforced(clientPod.Name, now)
 			sweeps++
-			if !churnConfirmed && churnRanSuccessfully() {
+
+			if !churnConfirmed && churnPodsRunning() {
 				churnConfirmed = true
-				sampleBPF() // churn just landed: pods are programmed right now
+				sampleBPF() // churn just landed: pods are Running/programmed right now
 			}
-			if time.Now().After(nextBPFSample) {
+			if now.After(nextBPFSample) {
 				sampleBPF()
-				nextBPFSample = time.Now().Add(bpfSampleInterval)
+				nextBPFSample = now.Add(bpfSampleInterval)
 			}
 		}
 		Expect(sweeps).To(BeNumerically(">=", 1), "soak window too short to run a probe sweep")
 		Expect(churnConfirmed).To(BeTrue(),
-			"no churn pod ran successfully; the leak check would be vacuous")
+			"no churn pod was ever observed Running; churn never landed and the leak check would be vacuous")
 		Expect(peakProgs).To(BeNumerically(">", baselineProgs),
 			"churn never raised the BPF program count above baseline, so the leak check "+
 				"would be vacuous; churn pods may be too short-lived for NPA to program them")
+		// Non-vacuity for the fail-open detector: require enough past-deadline churn
+		// pods to have been probed, else the "no churn pod stayed CONNECTED" result is
+		// meaningless (churn pods may never have lived long enough to probe).
+		minChurnVerified := int(soakDuration / churnVerifiedPerWindow)
+		if minChurnVerified < 1 {
+			minChurnVerified = 1
+		}
+		Expect(churnVerified).To(BeNumerically(">=", minChurnVerified), fmt.Sprintf(
+			"only %d churn pods were probed past the convergence deadline (want >= %d); the "+
+				"fail-open check is vacuous — churn pods may not be living long enough", churnVerified, minChurnVerified))
 
 		By("stopping churn and waiting for BPF state to drain back to baseline")
 		Expect(fw.K8sClient.Delete(ctx, churnJob)).To(Succeed())
@@ -149,16 +200,17 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 			"enforcement regressed after churn drained: server reachable while deny policy still applied")
 
-		By("proving the server is still alive and enforcement was the reason for BLOCKED")
-		// Restored reachability confirms the BLOCKED results above were enforcement,
-		// not a dead server. Delete via the client (tolerating NotFound) since
-		// DeleteNetworkPolicy reports the terminal NotFound as an error.
+		By("removing the deny policy and confirming the server unprograms back to reachable")
+		// Exercises the unprogram path: after the deny is removed the server must go
+		// CONNECTED again. The per-sweep control probe already ruled out "server (or
+		// node) died mid-run" in real time, so a failure here isolates to the unprogram
+		// path rather than the old ambiguous "server may have died" guess.
 		Expect(client.IgnoreNotFound(fw.K8sClient.Delete(ctx, denyPolicy))).To(Succeed())
 		denyPolicy = nil
 		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },
 			3*time.Minute, probeInterval).Should(Equal("CONNECTED"),
-			"server unreachable even after removing the deny policy; the BLOCKED results "+
-				"above cannot be attributed to enforcement (server may have died mid-run)")
+			"server did not become reachable after removing the deny policy; NPA may not have "+
+				"unprogrammed the ingress-deny (control stayed reachable throughout, so the node is healthy)")
 	})
 
 	AfterAll(func() {
@@ -173,8 +225,10 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		if clientPod != nil {
 			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
 		}
-		if serverDeploy != nil {
-			fw.DeploymentManager.DeleteAndWaitUntilDeploymentDeleted(ctx, serverDeploy)
+		for _, d := range []*appsv1.Deployment{serverDeploy, controlDeploy} {
+			if d != nil {
+				fw.DeploymentManager.DeleteAndWaitUntilDeploymentDeleted(ctx, d)
+			}
 		}
 	})
 })

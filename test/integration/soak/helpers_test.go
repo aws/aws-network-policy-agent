@@ -33,6 +33,13 @@ import (
 // The resource request keeps it from being the first eviction victim under churn;
 // a dead server would make BLOCKED probes pass for the wrong reason.
 func buildNginxDeployment(app string) *appsv1.Deployment {
+	return buildNginxDeploymentOnNode(app, "")
+}
+
+// buildNginxDeploymentOnNode is buildNginxDeployment pinned to a node (empty nodeName
+// = let the scheduler place it). The negative control pins to the server's node so
+// its unselected-traffic guarantee is exercised on the same node under churn.
+func buildNginxDeploymentOnNode(app, nodeName string) *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: namespace},
@@ -42,6 +49,7 @@ func buildNginxDeployment(app string) *appsv1.Deployment {
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": app}},
 				Spec: v1.PodSpec{
+					NodeName: nodeName,
 					Containers: []v1.Container{{
 						Name: "nginx", Image: nginxImage,
 						Ports: []v1.ContainerPort{{ContainerPort: 80}},
@@ -97,10 +105,24 @@ func buildIngressDeny(name, label string) *network.NetworkPolicy {
 
 // buildChurnCronJob spawns short-lived, policy-selected pods every minute on the
 // target node, so NPA repeatedly programs and tears down per-pod BPF state.
+//
+// Churn pods run nginx (a real listener), NOT sleep. This is load-bearing for the
+// fail-open probe: a no-listener pod answers a TCP connect with an instant RST, so
+// probing it reads BLOCKED whether or not NPA has programmed it — an unprogrammed,
+// fail-open pod would look identical to an enforced one and the check would be
+// vacuous. With a listener, CONNECTED is unambiguous evidence of fail-open and
+// BLOCKED means the deny is enforced (drop → timeout, or RST once the ingress-deny
+// program is attached).
+//
+// Lifetime is bounded to ~45s via activeDeadlineSeconds so the pod lives long
+// enough to be probed after churnConvergenceDeadline, while still completing inside
+// the 1-minute schedule under Forbid. Parallelism is 5 (down from 10) to keep a run
+// finishing within the window now that each pod runs longer.
 func buildChurnCronJob(nodeName string) *batchv1.CronJob {
-	parallelism := int32(10)
-	completions := int32(10)
+	parallelism := int32(5)
+	completions := int32(5)
 	backoffLimit := int32(0)
+	activeDeadline := int64(45)
 	ttl := int32(30)
 	successHistory := int32(0)
 	failHistory := int32(1)
@@ -116,9 +138,12 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 			FailedJobsHistoryLimit:     &failHistory,
 			JobTemplate: batchv1.JobTemplateSpec{
 				Spec: batchv1.JobSpec{
-					Parallelism:             &parallelism,
-					Completions:             &completions,
-					BackoffLimit:            &backoffLimit,
+					Parallelism:  &parallelism,
+					Completions:  &completions,
+					BackoffLimit: &backoffLimit,
+					// nginx never exits on its own, so bound the pod's life here; the Job
+					// completes when activeDeadlineSeconds elapses, then TTL cleans it up.
+					ActiveDeadlineSeconds:   &activeDeadline,
 					TTLSecondsAfterFinished: &ttl,
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": churnApp}},
@@ -126,13 +151,13 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 							NodeName:      nodeName,
 							RestartPolicy: v1.RestartPolicyNever,
 							Containers: []v1.Container{{
-								Name:    "churn",
-								Image:   churnImage,
-								Command: []string{"sleep", "10"},
+								Name:  "churn",
+								Image: nginxImage,
+								Ports: []v1.ContainerPort{{ContainerPort: 80}},
 								Resources: v1.ResourceRequirements{
 									Requests: v1.ResourceList{
-										v1.ResourceCPU:    resource.MustParse("1m"),
-										v1.ResourceMemory: resource.MustParse("4Mi"),
+										v1.ResourceCPU:    resource.MustParse("5m"),
+										v1.ResourceMemory: resource.MustParse("16Mi"),
 									},
 								},
 							}},
@@ -144,14 +169,82 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 	}
 }
 
-// churnRanSuccessfully reports whether the churn CronJob has had at least one
-// successful run, proving pods were actually created (and NPA programmed them).
-func churnRanSuccessfully() bool {
-	cj := &batchv1.CronJob{}
-	if err := fw.K8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: churnApp}, cj); err != nil {
+// churnPodsRunning reports whether at least one churn pod is currently Running with
+// an IP, proving churn actually landed on the node (and, since the churn deny policy
+// is already applied, that NPA has a fresh pod to program right now).
+//
+// We do NOT use CronJob.Status.LastSuccessfulTime: churn pods run nginx bounded by
+// activeDeadlineSeconds, so the Job terminates as Failed (reason DeadlineExceeded),
+// never Complete — LastSuccessfulTime would stay nil forever even though churn ran
+// perfectly. Observing a Running pod is both correct and the right trigger for the
+// forced BPF peak sample (the pod is programmed while Running, not after it exits).
+func churnPodsRunning() bool {
+	pods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", churnApp)
+	if err != nil {
 		return false
 	}
-	return cj.Status.LastSuccessfulTime != nil
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase == v1.PodRunning && p.Status.PodIP != "" && p.DeletionTimestamp == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyChurnPodsEnforced probes every Running churn pod (nginx listener) that is
+// past churnConvergenceDeadline and confirms the churn deny policy is enforced on it.
+// It returns the number of past-deadline pods verified BLOCKED this sweep.
+//
+// A CONNECTED verdict on a pod older than the deadline is fail-open: NPA has not
+// converged on a fresh, policy-selected pod (probe-attach race, missed CNI ADD,
+// PolicyEndpoint lag). That fails the spec immediately, naming the pod and its age.
+// Pods younger than the deadline are skipped — a brief allow window before
+// programming completes is expected in standard mode, not a defect.
+func verifyChurnPodsEnforced(clientPodName string, now time.Time) int {
+	pods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", churnApp)
+	if err != nil {
+		// A transient list blip is not a verdict; skip this sweep rather than aborting
+		// a long soak (mirrors execConnect's retry-not-fail stance on probe infra).
+		GinkgoWriter.Printf("verifyChurnPodsEnforced: list error, skipping sweep: %v\n", err)
+		return 0
+	}
+
+	verified := 0
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase != v1.PodRunning || p.Status.PodIP == "" || p.DeletionTimestamp != nil {
+			continue
+		}
+		// Age from the pod's start time (fall back to creation) so we only probe pods
+		// that have had at least churnConvergenceDeadline to be programmed.
+		started := p.CreationTimestamp.Time
+		if p.Status.StartTime != nil {
+			started = p.Status.StartTime.Time
+		}
+		age := now.Sub(started)
+		if age < churnConvergenceDeadline {
+			continue
+		}
+		// Re-read immediately before probing: the list can be up to ~15s stale by the
+		// time we reach a late pod (each enforced probe burns the full 3s timeout), and
+		// a pod hitting its activeDeadlineSeconds mid-loop begins terminating — NPA
+		// detaches on the delete event while nginx may still serve during grace, which
+		// would read CONNECTED and look like a false fail-open. Skip once it's leaving.
+		fresh := &v1.Pod{}
+		if err := fw.K8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: p.Name}, fresh); err != nil {
+			continue // gone / unreadable — not a verdict
+		}
+		if fresh.DeletionTimestamp != nil || fresh.Status.Phase != v1.PodRunning {
+			continue
+		}
+		verdict := execConnect(clientPodName, p.Status.PodIP, serverPort)
+		Expect(verdict).To(Equal("BLOCKED"), fmt.Sprintf(
+			"fail-open: churn pod %s (age %s) still CONNECTED after churnConvergenceDeadline %s; "+
+				"NPA did not converge on a fresh policy-selected pod", p.Name, age.Round(time.Second), churnConvergenceDeadline))
+		verified++
+	}
+	return verified
 }
 
 // execConnect returns "CONNECTED" or "BLOCKED". Only those exact tokens count as a
@@ -189,6 +282,25 @@ func execConnect(podName, ip string, port int) string {
 	}
 	Expect(lastErr).ToNot(HaveOccurred(), "execConnect failed after retries (probe infra, not a verdict)")
 	return "BLOCKED" // unreachable; Expect above fails the spec
+}
+
+// verifyControlReachable probes the negative-control pod, which NO policy selects,
+// so it must stay CONNECTED. A BLOCKED control is the over-enforcement signal: NPA
+// is wrongly dropping unselected traffic (conntrack cleanup race, catch-all applied
+// to the wrong pod identifier, map corruption) — a false-DENY class the deny-side
+// probes are structurally blind to.
+//
+// One BLOCKED is confirmed with an immediate re-probe before failing: a single lost
+// SYN is normally absorbed by the 3s connect timeout's kernel retries, but this
+// guards a long run against a one-off node blip. Two consecutive BLOCKED fails.
+func verifyControlReachable(clientPodName, controlIP string) {
+	if execConnect(clientPodName, controlIP, serverPort) == "CONNECTED" {
+		return
+	}
+	Expect(execConnect(clientPodName, controlIP, serverPort)).To(Equal("CONNECTED"),
+		"over-enforcement: control pod (selected by no policy) is BLOCKED twice in a row; "+
+			"NPA is dropping traffic it should not — server BLOCKED + control BLOCKED points at a "+
+			"node-level or over-enforcement problem, not correct enforcement")
 }
 
 // bpfCounts returns the number of loaded BPF programs and per-pod maps on a node.

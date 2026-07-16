@@ -39,15 +39,15 @@ func TestNetworkPolicySoak(t *testing.T) {
 	RunSpecs(t, "Network Policy Soak Suite")
 }
 
-// minSoakDuration is the floor below which the */1 churn CronJob may not record a
-// successful run before the window closes, failing the churn guard rather than on
-// a real defect.
+// minSoakDuration is the floor below which the */1 churn CronJob may not land a
+// Running, past-deadline pod before the window closes, failing the churn / fail-open
+// non-vacuity guards rather than on a real defect.
 const minSoakDuration = 3 * time.Minute
 
 var _ = BeforeSuite(func() {
 	Expect(soakDuration).To(BeNumerically(">=", minSoakDuration),
-		"--np-soak-duration must be >= %s so the churn CronJob can record a successful "+
-			"run; shorter windows fail on the churn guard, not on a real defect", minSoakDuration)
+		"--np-soak-duration must be >= %s so the churn CronJob can land a probeable pod; "+
+			"shorter windows fail on the churn non-vacuity guards, not on a real defect", minSoakDuration)
 
 	fw = framework.New(framework.GlobalOptions)
 	ctx = context.Background()
