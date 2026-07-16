@@ -82,7 +82,7 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 	failHistory := int32(1)
 
 	return &batchv1.CronJob{
-		ObjectMeta: metav1.ObjectMeta{Name: "np-soak-churn", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: churnApp, Namespace: namespace},
 		Spec: batchv1.CronJobSpec{
 			Schedule: "*/1 * * * *",
 			// Forbid overlapping runs so an overrunning job can't stack and amplify
@@ -124,7 +124,7 @@ func buildChurnCronJob(nodeName string) *batchv1.CronJob {
 // successful run, proving pods were actually created (and NPA programmed them).
 func churnRanSuccessfully() bool {
 	cj := &batchv1.CronJob{}
-	if err := fw.K8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "np-soak-churn"}, cj); err != nil {
+	if err := fw.K8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: churnApp}, cj); err != nil {
 		return false
 	}
 	return cj.Status.LastSuccessfulTime != nil
