@@ -79,7 +79,7 @@ func buildClientPod(app, nodeName string) *v1.Pod {
 		Spec: v1.PodSpec{
 			NodeName: nodeName,
 			Containers: []v1.Container{{
-				Name: "client", Image: churnImage,
+				Name: "client", Image: clientImage,
 				Command: []string{"sleep", "infinity"},
 				Resources: v1.ResourceRequirements{
 					Requests: v1.ResourceList{
@@ -231,6 +231,13 @@ func verifyChurnPodsEnforced(clientPodName string, now time.Time) int {
 		if age < churnConvergenceDeadline {
 			continue
 		}
+		// Upper bound: a pod near its activeDeadlineSeconds can be deleted mid-probe
+		// (NPA detaches, nginx serves through grace -> CONNECTED twice = false
+		// fail-open). The fresh re-read below guards entry, not the probe's duration,
+		// so skip pods too old for the probe pair to finish inside their lifetime.
+		if age > churnProbeMaxAge {
+			continue
+		}
 		// Re-read immediately before probing: the list can be up to ~15s stale by the
 		// time we reach a late pod (each enforced probe burns the full 3s timeout), and
 		// a pod hitting its activeDeadlineSeconds mid-loop begins terminating — NPA
@@ -290,6 +297,33 @@ func execConnect(podName, ip string, port int) string {
 	}
 	Expect(lastErr).ToNot(HaveOccurred(), "execConnect failed after retries (probe infra, not a verdict)")
 	return "BLOCKED" // unreachable; Expect above fails the spec
+}
+
+// currentPodIP re-resolves the Running pod IP behind a 1-replica Deployment's app
+// label, falling back to lastIP when the list fails or no Running pod is found (a
+// transient state is not a verdict; the probe layer does its own retries).
+//
+// Why this exists: Deployments replace pods on eviction or node pressure, and both
+// single-pod probes are blind to that. The server's deny probe against a stale IP
+// times out and reads BLOCKED — silently turning the enforcement sweep vacuous and
+// then false-failing the end-of-run unprogram check — and the control probe against
+// a stale IP reads BLOCKED twice and false-fails as over-enforcement. Replacements
+// stay on the pinned node, so adopting the new IP preserves what each probe asserts.
+func currentPodIP(app, lastIP string) string {
+	pods, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", app)
+	if err != nil {
+		return lastIP
+	}
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase == v1.PodRunning && p.Status.PodIP != "" && p.DeletionTimestamp == nil {
+			if p.Status.PodIP != lastIP {
+				GinkgoWriter.Printf("currentPodIP: %s pod replaced, IP %s -> %s\n", app, lastIP, p.Status.PodIP)
+			}
+			return p.Status.PodIP
+		}
+	}
+	return lastIP
 }
 
 // verifyControlReachable probes the negative-control pod, which NO policy selects,

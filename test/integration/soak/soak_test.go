@@ -34,6 +34,18 @@ const (
 	// gate will catch regressions against.
 	churnConvergenceDeadline = 10 * time.Second
 
+	// churnProbeMaxAge caps how old a churn pod may be and still be probed. A pod
+	// approaching its activeDeadlineSeconds (45s) can be deleted DURING the probe:
+	// NPA detaches on the delete event while nginx keeps serving through termination
+	// grace, so a probe pair (~3s each) spanning the deadline reads CONNECTED twice
+	// and would fail the spec as fail-open on a pod that was correctly enforced its
+	// whole life. Cohorts of 5 are probed sequentially with each BLOCKED probe
+	// burning its full 3s timeout, so a sweep reaching the cohort at age ~30s probes
+	// the last pod at ~42-45s — inside that band. Capping at activeDeadline minus
+	// two probe timeouts plus slack keeps every probe pair strictly inside the pod's
+	// lifetime; the probeable window (10s-35s) still comfortably spans the 30s sweep.
+	churnProbeMaxAge = 35 * time.Second
+
 	// churnVerifiedPerWindow is the floor of successful churn-pod deny verifications
 	// required per this much soak time, so the fail-open check can't pass vacuously
 	// (e.g. if churn pods never lived long enough to be probed).
@@ -145,6 +157,11 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 			//   server  | yes (ingress deny) | BLOCKED   -> else enforcement regressed
 			//   control | no                 | CONNECTED -> else over-enforcement
 			//   churn (age > deadline) | yes | BLOCKED   -> else fail-open on new pod
+			//
+			// Re-resolve the server/control IPs first: a Deployment replacement
+			// mid-soak otherwise leaves both probes on a stale IP (see currentPodIP).
+			serverIP = currentPodIP(serverApp, serverIP)
+			controlIP = currentPodIP(controlApp, controlIP)
 			Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 				fmt.Sprintf("enforcement regressed to CONNECTED during churn at sweep %d", sweeps))
 			verifyControlReachable(clientPod.Name, controlIP)
@@ -197,6 +214,8 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		// baseline and still pass the leak check — and the CONNECTED check below would
 		// then expect exactly that regression. Probe once here, while the deny policy
 		// is still applied, to catch a silent enforcement loss the count comparison can't.
+		// (Drain polling can take minutes; refresh the IP in case the pod was replaced.)
+		serverIP = currentPodIP(serverApp, serverIP)
 		Expect(execConnect(clientPod.Name, serverIP, serverPort)).To(Equal("BLOCKED"),
 			"enforcement regressed after churn drained: server reachable while deny policy still applied")
 
@@ -207,7 +226,13 @@ var _ = Describe("Network Policy enforcement under sustained pod churn", Ordered
 		// path rather than the old ambiguous "server may have died" guess.
 		Expect(client.IgnoreNotFound(fw.K8sClient.Delete(ctx, denyPolicy))).To(Succeed())
 		denyPolicy = nil
-		Eventually(func() string { return execConnect(clientPod.Name, serverIP, serverPort) },
+		Eventually(func() string {
+			// Refresh per poll: this check runs up to 3 minutes after the sweep loop
+			// stopped maintaining serverIP, so a replacement here would otherwise
+			// false-fail the unprogram check against a stale IP.
+			serverIP = currentPodIP(serverApp, serverIP)
+			return execConnect(clientPod.Name, serverIP, serverPort)
+		},
 			3*time.Minute, probeInterval).Should(Equal("CONNECTED"),
 			"server did not become reachable after removing the deny policy; NPA may not have "+
 				"unprogrammed the ingress-deny (control stayed reachable throughout, so the node is healthy)")
