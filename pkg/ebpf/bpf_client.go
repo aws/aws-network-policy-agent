@@ -976,10 +976,27 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 		return nil, -1, err
 	}
 
+	// Validate the loaded program before returning it. A successful LoadBpfFile
+	// must yield a program with a valid FD and its associated maps linked.
 	pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
-	progFD := progInfo[pinPath].Program.ProgFD
+	bpfData, ok := progInfo[pinPath]
+	if !ok {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-NoPinPath").Inc()
+		return nil, -1, fmt.Errorf("no program data found at pinPath %s for pod %s direction %s", pinPath, podIdentifier, direction)
+	}
 
-	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s", direction, progFD, pinPath)
+	progFD := bpfData.Program.ProgFD
+	if progFD == 0 {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-InvalidFD").Inc()
+		return nil, -1, fmt.Errorf("program loaded with invalid FD 0 for pod %s direction %s", podIdentifier, direction)
+	}
+
+	if len(bpfData.Maps) == 0 {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-NoMaps").Inc()
+		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
+	}
+
+	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
 
 	return progInfo, progFD, nil
 }
