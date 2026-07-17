@@ -216,6 +216,10 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 	})
 })
 
+// probeError distinguishes an exec failure from an OPEN/CLOSE verdict, so it shows
+// explicitly in assertion output instead of as an empty string.
+const probeError = "PROBE_ERROR"
+
 // tcpProbe execs `nc -z` in the client pod. Returns "OPEN" or "CLOSE".
 // stderr is suppressed so ExecInPod returns only the deterministic stdout.
 func tcpProbe(namespace, podName, host string, port int) string {
@@ -226,6 +230,7 @@ func tcpProbe(namespace, podName, host string, port int) string {
 	out, err := fw.PodManager.ExecInPod(namespace, podName, cmd)
 	if err != nil {
 		GinkgoWriter.Printf("tcpProbe %s:%d exec error: %v\n", host, port, err)
+		return probeError
 	}
 	return strings.TrimSpace(out)
 }
