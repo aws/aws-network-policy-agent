@@ -53,12 +53,15 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
   docker-build:
-    if: github.event_name == 'pull_request'
+    # always() so a failed matrix build FAILS this job instead of skipping it;
+    # GitHub treats a skipped required check as passing.
+    if: always() && github.event_name == 'pull_request'
     needs: docker-build-arch
     name: Build Docker images
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All docker images built successfully across architectures"
+      - name: Verify per-arch builds succeeded
+        run: test "${{ needs.docker-build-arch.result }}" = "success"
   docker-build-arch:
     if: github.event_name == 'pull_request'
     name: Build Docker images (${{ matrix.arch }})
