@@ -100,7 +100,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			"UpdatePodStateEbpfMaps should be called to reset pod state to DEFAULT_ALLOW")
 	})
 
-	t.Run("no eBPF calls when there are no stale identifiers", func(t *testing.T) {
+	t.Run("active pod identifiers keep rules applied when there are no stale identifiers", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 

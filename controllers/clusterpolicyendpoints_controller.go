@@ -178,16 +178,24 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	// rules from other policies that must stay applied. Re-deriving returns the
 	// remaining policies' rules (or empty slices if none remain, in which case
 	// updateClusterPolicyBPFMaps resets the pod state to DEFAULT_ALLOW).
+	var staleCleanupErr error
 	for _, podIdentifier := range stalePodIdentifiers {
 		utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, resourceName)
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, resourceName, false)
 		if err != nil {
 			log().Errorf("failed to derive remaining cluster policy rules for stale podIdentifier %s: %v", podIdentifier, err)
+			staleCleanupErr = errors.Join(staleCleanupErr, err)
 			continue
 		}
 		if err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules); err != nil {
 			log().Errorf("failed to update cluster policy BPF maps for stale podIdentifier %s: %v", podIdentifier, err)
+			staleCleanupErr = errors.Join(staleCleanupErr, err)
 		}
+	}
+	// Return any stale-cleanup error so controller-runtime requeues; otherwise a
+	// failed clear would silently leave stale deny entries in the eBPF maps.
+	if staleCleanupErr != nil {
+		return staleCleanupErr
 	}
 
 	// Handle cleanup of pods
