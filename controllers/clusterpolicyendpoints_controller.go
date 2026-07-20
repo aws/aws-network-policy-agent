@@ -170,14 +170,23 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 
 	targetPods, targetPodIdentifiers, podsToBeCleanedUp, stalePodIdentifiers := r.deriveTargetPodsForParentCNP(ctx, parentCNP, resourceName)
 
-	// For stale pod identifiers: remove from lookup map AND clear their eBPF maps.
-	// Must delete from map first so cleanup won't re-derive rules from this CPE,
-	// then explicitly clear eBPF entries since cleanupClusterPolicyPod skips pods
-	// not in the lookup map.
+	// For stale pod identifiers: remove this CPE from the lookup map, then
+	// re-program the eBPF maps with whatever rules remain for the identifier.
+	// Must delete from the map first so the re-derive below excludes this CPE's
+	// rules. We cannot simply clear the maps (nil, nil): a single podIdentifier
+	// can be selected by multiple ClusterPolicyEndpoints, so it may still have
+	// rules from other policies that must stay applied. Re-deriving returns the
+	// remaining policies' rules (or empty slices if none remain, in which case
+	// updateClusterPolicyBPFMaps resets the pod state to DEFAULT_ALLOW).
 	for _, podIdentifier := range stalePodIdentifiers {
 		utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, resourceName)
-		if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
-			log().Errorf("failed to clear cluster policy BPF maps for stale podIdentifier %s: %v", podIdentifier, err)
+		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, resourceName, false)
+		if err != nil {
+			log().Errorf("failed to derive remaining cluster policy rules for stale podIdentifier %s: %v", podIdentifier, err)
+			continue
+		}
+		if err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules); err != nil {
+			log().Errorf("failed to update cluster policy BPF maps for stale podIdentifier %s: %v", podIdentifier, err)
 		}
 	}
 
