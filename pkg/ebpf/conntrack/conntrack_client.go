@@ -190,9 +190,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				// Per-entry detail is emitted at debug level only. At the default (info)
-				// verbosity this used to dominate the log volume (one line per stale entry
-				// per cleanup cycle), so we summarize the count below instead.
+				// Per-entry detail at debug; the info summary below reports the count.
 				log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
 				deletedEntries++
@@ -354,9 +352,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				// Per-entry detail is emitted at debug level only. At the default (info)
-				// verbosity this used to dominate the log volume (one line per stale entry
-				// per cleanup cycle), so we summarize the count below instead.
+				// Per-entry detail at debug; the info summary below reports the count.
 				log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
