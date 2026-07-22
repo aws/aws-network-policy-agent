@@ -141,16 +141,20 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
 	for exceptCidr := range exceptCidrs {
-		if _, ok := cidrsMap[exceptCidr]; !ok {
+		canonicalExcept := exceptCidr
+		if _, ipNet, err := net.ParseCIDR(exceptCidr); err == nil {
+			canonicalExcept = ipNet.String()
+		}
+		if _, ok := cidrsMap[canonicalExcept]; !ok {
 			exceptFirewall := EbpfFirewallRules{
-				IPCidr: v1alpha1.NetworkAddress(exceptCidr),
+				IPCidr: v1alpha1.NetworkAddress(canonicalExcept),
 				Except: []v1alpha1.NetworkAddress{},
 				L4Info: []v1alpha1.Port{},
 			}
 			addDenyAllL4Entry(&exceptFirewall)
-			cidrsMap[exceptCidr] = exceptFirewall
+			cidrsMap[canonicalExcept] = exceptFirewall
 		}
-		log().Debugf("Parsed Except CIDR: %s", exceptCidr)
+		log().Debugf("Parsed Except CIDR: %s (canonical: %s)", exceptCidr, canonicalExcept)
 	}
 
 	for key, value := range cidrsMap {
@@ -336,7 +340,10 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 func (f *FirewallRuleProcessor) normalizeCIDR(cidr string) string {
 	if !strings.Contains(cidr, "/") {
-		return cidr + f.hostMask
+		cidr = cidr + f.hostMask
+	}
+	if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+		return ipNet.String()
 	}
 	return cidr
 }
@@ -358,7 +365,7 @@ func (f *FirewallRuleProcessor) shouldSkipRule(cidr string) bool {
 }
 
 func (f *FirewallRuleProcessor) sortByCIDRLength(rules []EbpfFirewallRules) {
-	sort.Slice(rules, func(i, j int) bool {
+	sort.SliceStable(rules, func(i, j int) bool {
 		cidrI := f.normalizeCIDR(string(rules[i].IPCidr))
 		cidrJ := f.normalizeCIDR(string(rules[j].IPCidr))
 
