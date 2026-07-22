@@ -2,7 +2,6 @@ package conntrack
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"unsafe"
 
@@ -177,6 +176,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			}
 		}
 		// Check if the local cache and kernel cache is in sync
+		deletedEntries := 0
+		trackedEntries := len(c.localConntrackV4Cache)
 		for localConntrackEntry, _ := range c.localConntrackV4Cache {
 			newKey := utils.ConntrackKey{}
 			newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Source_ip))
@@ -190,14 +191,14 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-				log().Infof("Conntrack cleanup Delete - %s", key)
+				// Per-entry detail at debug; the info summary below reports the count.
+				log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
-
+				deletedEntries++
 			}
 		}
 		//c.localConntrackV4Cache = make(map[utils.ConntrackKey]bool)
-		log().Info("Done cleanup of conntrack map")
+		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked", deletedEntries, trackedEntries)
 		c.hydratelocalConntrack = true
 	}
 	return
@@ -343,6 +344,8 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 
 		}
 		// Check if the local cache and kernel cache is in sync
+		deletedEntries := 0
+		trackedEntries := len(c.localConntrackV6Cache)
 		for localConntrackEntry, _ := range c.localConntrackV6Cache {
 			lookupKey := localConntrackEntry
 			lookupKey.Ifindex = 0 // strip for 5-tuple comparison
@@ -350,15 +353,16 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			if !ok {
 				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
-				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-				log().Infof("Conntrack cleanup Delete - %s", key)
+				// Per-entry detail at debug; the info summary below reports the count.
+				log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
+				deletedEntries++
 			}
 		}
 		//Lets cleanup all entries in cache
 		c.localConntrackV6Cache = make(map[utils.ConntrackKeyV6]bool)
-		log().Info("Done cleanup of conntrack map")
+		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked", deletedEntries, trackedEntries)
 		c.hydratelocalConntrack = true
 	}
 	return
