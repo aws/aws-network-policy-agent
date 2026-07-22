@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -190,6 +192,108 @@ func sizeOfSyncMap(m *sync.Map) int {
 		return true
 	})
 	return count
+}
+
+// TestPolicyEndpointNonLocalPodIdentifierChurn is a regression test for the
+// podIdentifierToPolicyEndpointMap memory leak. A NetworkPolicy selects pods
+// across the cluster; on any given node only some are local. Non-local pods are
+// registered into podIdentifierToPolicyEndpointMap cluster-wide. If those pods
+// churn with names that stay unique after stripping the final dash-segment
+// (e.g. a fresh Job per task with a UUID in the name), each produces a distinct
+// podIdentifier. Before the fix, networkPolicyToPodIdentifierMap only tracked
+// local identifiers, so churned non-local identifiers were never diffed out and
+// podIdentifierToPolicyEndpointMap grew without bound. This test churns the
+// non-local pods and asserts both maps stay bounded, while the live local pod
+// and the live non-local sibling are retained (preserving the strict-mode
+// fast-path lookup).
+func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
+	namespace := "my-namespace"
+	nodeIp := "1.1.1.1"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// A local pod that always stays alive (keeps the PE reconciling and its
+	// identifier permanently active).
+	localPod := policyendpoint.PodEndpoint{
+		HostIP:    policyendpoint.NetworkAddress(nodeIp),
+		PodIP:     "10.1.1.1",
+		Name:      "deployment1rs-1",
+		Namespace: namespace,
+	}
+	// A non-local sibling that also stays alive (its identifier must be retained
+	// so the strict-mode fast path can still find it).
+	stableRemotePod := policyendpoint.PodEndpoint{
+		HostIP:    "2.2.2.2",
+		PodIP:     "10.2.2.2",
+		Name:      "deployment2rs-1",
+		Namespace: namespace,
+	}
+
+	localIdentifier := utils.GetPodIdentifier(localPod.Name, localPod.Namespace)
+	stableRemoteIdentifier := utils.GetPodIdentifier(stableRemotePod.Name, stableRemotePod.Namespace)
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+
+	// currentPE holds the PE the mock returns; each churn round rewrites its
+	// PodSelectorEndpoints to swap in a freshly-named non-local Job pod.
+	var currentPE policyendpoint.PolicyEndpoint
+
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*pe = currentPE
+			return nil
+		},
+	).AnyTimes()
+
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
+			return nil
+		},
+	).AnyTimes()
+
+	churnRounds := 50
+	for i := 0; i < churnRounds; i++ {
+		// Each round: a brand-new non-local Job pod whose identifier is unique
+		// (name stays unique after stripping the final dash-segment).
+		churnPod := policyendpoint.PodEndpoint{
+			HostIP:    "3.3.3.3",
+			PodIP:     "10.3.3.3",
+			Name:      fmt.Sprintf("task-uuid%d-abcd", i),
+			Namespace: namespace,
+		}
+		currentPE = getPolicyEndpoint("allow-all-egress", namespace,
+			[]policyendpoint.PodEndpoint{localPod, stableRemotePod, churnPod})
+
+		_, err := r.Reconcile(context.TODO(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      currentPE.GetName(),
+				Namespace: currentPE.GetNamespace(),
+			},
+		})
+		assert.Nil(t, err)
+	}
+
+	// podIdentifierToPolicyEndpointMap must NOT accumulate one entry per churned
+	// Job. Only the live identifiers should remain: local + stable remote + the
+	// single most-recent churn pod.
+	assert.Equal(t, 3, sizeOfSyncMap(&r.podIdentifierToPolicyEndpointMap),
+		"podIdentifierToPolicyEndpointMap leaked churned non-local identifiers")
+
+	// The live local and live non-local sibling identifiers must be retained.
+	_, ok := r.podIdentifierToPolicyEndpointMap.Load(localIdentifier)
+	assert.True(t, ok, "local identifier should be retained")
+	_, ok = r.podIdentifierToPolicyEndpointMap.Load(stableRemoteIdentifier)
+	assert.True(t, ok, "stable non-local sibling identifier should be retained (strict-mode fast path)")
+
+	// networkPolicyToPodIdentifierMap now tracks the cluster-wide set; it must be
+	// a single NP entry holding exactly the 3 live identifiers, not churn history.
+	val, ok := r.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+	assert.True(t, ok)
+	assert.Equal(t, 3, len(val.([]string)),
+		"networkPolicyToPodIdentifierMap should track only currently-selected identifiers")
 }
 
 func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
@@ -789,7 +893,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotActivePods, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
+			gotActivePods, _, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
 				&tt.policyendpoint, tt.parentPEList)
 			assert.Equal(t, tt.want.activePods, gotActivePods)
 		})
