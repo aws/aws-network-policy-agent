@@ -177,6 +177,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		}
 		// Check if the local cache and kernel cache is in sync
 		deletedEntries := 0
+		trackedEntries := len(c.localConntrackV4Cache)
 		for localConntrackEntry, _ := range c.localConntrackV4Cache {
 			newKey := utils.ConntrackKey{}
 			newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Source_ip))
@@ -197,7 +198,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			}
 		}
 		//c.localConntrackV4Cache = make(map[utils.ConntrackKey]bool)
-		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked (per-entry detail at debug level)", deletedEntries, len(c.localConntrackV4Cache))
+		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked", deletedEntries, trackedEntries)
 		c.hydratelocalConntrack = true
 	}
 	return
@@ -361,7 +362,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		}
 		//Lets cleanup all entries in cache
 		c.localConntrackV6Cache = make(map[utils.ConntrackKeyV6]bool)
-		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked (per-entry detail at debug level)", deletedEntries, trackedEntries)
+		log().Infof("Done cleanup of conntrack map: deleted %d stale entries out of %d tracked", deletedEntries, trackedEntries)
 		c.hydratelocalConntrack = true
 	}
 	return
