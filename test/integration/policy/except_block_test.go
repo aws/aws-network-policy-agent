@@ -16,6 +16,12 @@ import (
 	network "k8s.io/api/networking/v1"
 )
 
+const (
+	enforcementTimeout = 90 * time.Second // wait for policy to be programmed into the datapath
+	probeTimeout       = 30 * time.Second // allow probes once enforcement is active
+	probeInterval      = 3 * time.Second
+)
+
 func printNetworkPolicyYAML(np *network.NetworkPolicy) {
 	bytes, err := yaml.Marshal(np)
 	if err != nil {
@@ -25,13 +31,42 @@ func printNetworkPolicyYAML(np *network.NetworkPolicy) {
 	fmt.Printf("Applied NetworkPolicy YAML:\n%s\n", string(bytes))
 }
 
-// getPrefix computes the network prefix for the given IP and mask length.
-func getPrefix(ipStr string, maskLen int) (string, error) {
-	ip := net.ParseIP(ipStr).To4()
-	if ip == nil {
-		return "", fmt.Errorf("invalid IPv4 address: %s", ipStr)
+type ipFamilyConfig struct {
+	maskLen    int
+	catchAll   string
+	extProbeIP string
+}
+
+// ipFamilyConfigForIP derives the except-block settings from the server pod IP.
+// EKS clusters are single-stack, so the pod IP's family is the cluster's family.
+func ipFamilyConfigForIP(ip string) ipFamilyConfig {
+	if net.ParseIP(ip).To4() == nil {
+		return ipFamilyConfig{
+			maskLen:    64,
+			catchAll:   "::/0",
+			extProbeIP: "2001:4860:4860::8888",
+		}
 	}
-	mask := net.CIDRMask(maskLen, 32)
+	return ipFamilyConfig{
+		maskLen:    16,
+		catchAll:   "0.0.0.0/0",
+		extProbeIP: "8.8.8.8",
+	}
+}
+
+// getPrefix computes the network prefix for the given IP and mask length,
+// masking against the address's native bit width (32 for IPv4, 128 for IPv6).
+func getPrefix(ipStr string, maskLen int) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+	bits := 128
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+		bits = 32
+	}
+	mask := net.CIDRMask(maskLen, bits)
 	network := ip.Mask(mask)
 	return fmt.Sprintf("%s/%d", network.String(), maskLen), nil
 }
@@ -54,9 +89,9 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		By("Deploying a sample TCP server on ports 3306 & 3307", func() {
 			err := fw.NamespaceManager.CreateNamespace(ctx, serverNamespace)
 			Expect(err).ToNot(HaveOccurred())
-			// listening on two ports
+			// Per-port re-listen loop: busybox nc -l exits after one connection.
 			cmd := fmt.Sprintf(
-				"while true; do nc -l -p %d & nc -l -p %d & wait; done",
+				"while true; do nc -l -p %d; done & while true; do nc -l -p %d; done & wait",
 				allowPort, blockPort,
 			)
 			srv := manifest.NewBusyBoxContainerBuilder().
@@ -78,21 +113,12 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		})
 	})
 
+	// deployClient creates an idle pod we exec probes into via Eventually.
 	deployClient := func(clientName string) *v1.Pod {
-		script := fmt.Sprintf(
-			`sleep 30;
-	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
-	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
-	nc -z -w2 8.8.8.8 53 && echo "OPEN-EXT" || echo "CLOSE-EXT";
-	sleep 1000 `,
-			serverIP, allowPort, allowPort, allowPort,
-			serverIP, blockPort, blockPort, blockPort,
-		)
-
 		ctnr := manifest.NewBusyBoxContainerBuilder().
 			ImageRepository(fw.Options.TestImageRegistry).
 			Command([]string{"/bin/sh", "-c"}).
-			Args([]string{script}).
+			Args([]string{"sleep 1000000"}).
 			Build()
 
 		clientPod = manifest.NewDefaultPodBuilder().
@@ -107,22 +133,22 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		return pod
 	}
 
-	Context("CIDR and Except overlap: /16 allow on 3306 + catch-all except /16", func() {
+	Context("CIDR and Except overlap: server-prefix allow on 3306 + catch-all except server-prefix", func() {
 		BeforeEach(func() {
-			By("Applying network policy with /16 allow and except rule")
+			By("Applying network policy with server-prefix allow and except rule")
 			err := fw.NamespaceManager.CreateNamespace(ctx, clientNamespace)
 			Expect(err).ToNot(HaveOccurred())
-			// Compute the /16 prefix for the server IP
-			p16, err := getPrefix(serverIP, 16)
+			cfg := ipFamilyConfigForIP(serverIP)
+			prefix, err := getPrefix(serverIP, cfg.maskLen)
 			Expect(err).ToNot(HaveOccurred())
 
 			firstRule := manifest.NewEgressRuleBuilder().
-				AddPeer(nil, nil, p16).
+				AddPeer(nil, nil, prefix).
 				AddPort(allowPort, v1.ProtocolTCP).
 				Build()
 
 			secondRule := manifest.NewEgressRuleBuilder().
-				AddPeer(nil, nil, "0.0.0.0/0", p16).
+				AddPeer(nil, nil, cfg.catchAll, prefix).
 				Build()
 
 			policy = manifest.NewNetworkPolicyBuilder().
@@ -140,50 +166,71 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 			clientPod = deployClient(clientName)
 		})
 
-		It("should allow on /16 and 3306 port, deny on rest /16 ports, allow all on rest of endpoints", func() {
-			time.Sleep(30 * time.Second)
+		It("should allow on server prefix and 3306 port, deny on rest server-prefix ports, allow all on rest of endpoints", func() {
+			cfg := ipFamilyConfigForIP(serverIP)
 
-			// fetch the logs
-			logs, err := fw.PodManager.PodLogs(clientNamespace, clientName)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(processIPBlockLogs(logs, allowPort, blockPort)).To(Succeed())
+			// Deny converging first proves enforcement is active.
+			By(fmt.Sprintf("denying egress to the server on excepted port %d", blockPort), func() {
+				Eventually(func() string {
+					return tcpProbe(clientNamespace, clientName, serverIP, blockPort)
+				}, enforcementTimeout, probeInterval).Should(Equal("CLOSE"),
+					"expected deny to server on excepted port %d", blockPort)
+			})
+
+			By(fmt.Sprintf("allowing egress to the server on allowed port %d", allowPort), func() {
+				Eventually(func() string {
+					return tcpProbe(clientNamespace, clientName, serverIP, allowPort)
+				}, probeTimeout, probeInterval).Should(Equal("OPEN"),
+					"expected allow to server on port %d", allowPort)
+			})
+
+			By("allowing egress to endpoints outside the excepted prefix", func() {
+				Eventually(func() string {
+					return tcpProbe(clientNamespace, clientName, cfg.extProbeIP, 53)
+				}, probeTimeout, probeInterval).Should(Equal("OPEN"),
+					"expected allow to external endpoint outside the excepted prefix")
+			})
+
+			// Consistently (not Eventually) ensures the deny didn't flap.
+			By(fmt.Sprintf("confirming deny on excepted port %d still holds", blockPort), func() {
+				Consistently(func() string {
+					return tcpProbe(clientNamespace, clientName, serverIP, blockPort)
+				}, 10*time.Second, probeInterval).Should(Equal("CLOSE"),
+					"deny on excepted port %d did not persist through the allow probes", blockPort)
+			})
 		})
 	})
 
 	AfterEach(func() {
-		fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
-		fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
-		fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, policy)
+		if clientPod != nil {
+			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+		}
+		if serverPod != nil {
+			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
+		}
+		if policy != nil {
+			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, policy)
+		}
 		fw.NamespaceManager.DeleteAndWaitTillNamespaceDeleted(ctx, serverNamespace)
 		fw.NamespaceManager.DeleteAndWaitTillNamespaceDeleted(ctx, clientNamespace)
 	})
 })
 
-func processIPBlockLogs(podlogs string, allowPort, blockPort int) error {
-	lines := strings.Split(strings.TrimSpace(podlogs), "\n")
-	gotAllowPort := false
-	gotBlockPort := false
-	gotAllowExt := false
+// probeError distinguishes an exec failure from an OPEN/CLOSE verdict, so it shows
+// explicitly in assertion output instead of as an empty string.
+const probeError = "PROBE_ERROR"
 
-	for _, l := range lines {
-		switch l {
-		case fmt.Sprintf("OPEN-%d", allowPort):
-			gotAllowPort = true
-		case fmt.Sprintf("CLOSE-%d", blockPort):
-			gotBlockPort = true
-		case "OPEN-EXT":
-			gotAllowExt = true
-		}
+// tcpProbe execs `nc -z` in the client pod. Returns "OPEN" or "CLOSE".
+// stderr is suppressed so ExecInPod returns only the deterministic stdout.
+func tcpProbe(namespace, podName, host string, port int) string {
+	cmd := []string{
+		"/bin/sh", "-c",
+		fmt.Sprintf(`nc -z -w2 %s %d 2>/dev/null && echo "OPEN" || echo "CLOSE"`, host, port),
 	}
-
-	if !gotAllowPort {
-		return fmt.Errorf("Expected allow to server on port %d but got deny", allowPort)
+	out, err := fw.PodManager.ExecInPod(namespace, podName, cmd)
+	if err != nil {
+		GinkgoWriter.Printf("tcpProbe %s:%d exec error: %v\n", host, port, err)
+		return probeError
 	}
-	if !gotBlockPort {
-		return fmt.Errorf("Expected deny to server on port %d but got allow", blockPort)
-	}
-	if !gotAllowExt {
-		return fmt.Errorf("Expected allow on all other to external endpoints but got deny")
-	}
-	return nil
+	return strings.TrimSpace(out)
 }
