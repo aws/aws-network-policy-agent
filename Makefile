@@ -5,6 +5,8 @@ VERSION ?= $(shell git describe --tags --always --dirty || echo "unknown")
 IMAGE_NAME ?= $(IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 GOLANG_VERSION ?= $(shell cat .go-version)
 GOLANG_IMAGE ?= public.ecr.aws/eks-distro-build-tooling/golang:$(GOLANG_VERSION)-gcc-al23
+# BASE_IMAGE is the base layer image for the aws-network-policy-agent container.
+BASE_IMAGE ?= public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-glibc:latest-al23
 # TEST_IMAGE is the testing environment container image.
 TEST_IMAGE = aws-network-policy-agent-test
 TEST_IMAGE_NAME = $(TEST_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
@@ -103,9 +105,20 @@ GO_ENV_EBPF += GOARCH=$(GO_ARCH)
 GO_ENV_EBPF += CGO_CFLAGS=$(CUSTOM_CGO_CFLAGS)
 GO_ENV_EBPF += CGO_LDFLAGS=$(CUSTOM_CGO_LDFLAGS)
 
+# Version metadata injection
+GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+EBPF_SDK_VERSION ?= $(shell go list -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null || echo "unknown")
+# Freeze values so all binaries built in this make invocation get identical metadata
+GIT_VERSION := $(GIT_VERSION)
+BUILD_DATE := $(BUILD_DATE)
+EBPF_SDK_VERSION := $(EBPF_SDK_VERSION)
+VERSION_PKG := github.com/aws/aws-network-policy-agent/pkg/version
+VERSION_LDFLAGS := -X $(VERSION_PKG).GitVersion=$(GIT_VERSION) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).EbpfSDKVersion=$(EBPF_SDK_VERSION)
+
 # Build using the host's Go toolchain.
 BUILD_MODE ?= -buildmode=pie
-build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) -extldflags "-static"'
+build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) $(VERSION_LDFLAGS) -extldflags "-static"'
 build-linux: ## Build the controllerusing the host's Go toolchain.
 	$(GO_ENV_EBPF) go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -tags netgo,ebpf,core -a -o controller main.go
 	go build $(VENDOR_OVERRIDE_FLAG) $(BUILD_FLAGS) -o aws-eks-na-cli ./cmd/cli
@@ -159,7 +172,7 @@ build-bpf: ## Build BPF.
 #docker-build: test ## Build docker image with the manager.
 #	docker build -t ${IMAGE_NAME} .
 docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
-	docker build -t ${IMAGE_NAME} --build-arg golang_image="$(GOLANG_IMAGE)" .
+	docker build -t ${IMAGE_NAME} --build-arg golang_image="$(GOLANG_IMAGE)" --build-arg base_image="$(BASE_IMAGE)" .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -200,6 +213,7 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 		--cache-from=type=gha \
 		--cache-to=type=gha,mode=max \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg base_image="$(BASE_IMAGE)" \
 		.
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
@@ -215,6 +229,7 @@ multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker imag
 		--cache-to=type=gha,mode=max \
 		-t $(IMAGE):$(VERSION) \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg base_image="$(BASE_IMAGE)" \
 		--push \
 		.
 
