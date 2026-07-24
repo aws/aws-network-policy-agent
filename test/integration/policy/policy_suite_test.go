@@ -15,7 +15,7 @@ var (
 	namespace = "policy"
 )
 
-func TestStrictModeNetworkPolicy(t *testing.T) {
+func TestNetworkPolicy(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Network Policy Test Suite")
 }
