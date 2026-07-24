@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,11 +218,13 @@ func (d *defaultManager) ExecInPod(namespace string, podName string, command []s
 
 // TCPProbe execs `nc -z` in the pod and returns "OPEN" or "CLOSE" for a connection to
 // host:port. A denied connection is silently dropped (no RST), so nc blocks its full
-// timeout before reporting CLOSE.
+// timeout before reporting CLOSE. host and port are passed as positional shell
+// arguments so they are never interpreted as shell syntax.
 func (d *defaultManager) TCPProbe(namespace string, podName string, host string, port int) (string, error) {
 	cmd := []string{
 		"/bin/sh", "-c",
-		fmt.Sprintf(`nc -z -w2 %s %d 2>/dev/null && echo "OPEN" || echo "CLOSE"`, host, port),
+		`nc -z -w2 "$1" "$2" 2>/dev/null && echo "OPEN" || echo "CLOSE"`,
+		"sh", host, strconv.Itoa(port),
 	}
 	out, err := d.ExecInPod(namespace, podName, cmd)
 	if err != nil {

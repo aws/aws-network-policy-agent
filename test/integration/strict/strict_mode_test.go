@@ -134,18 +134,20 @@ var _ = Describe("Strict Mode Test Cases", func() {
 				secondPod = podNameForReplica(namespace, clientName, firstPod)
 			})
 
-			// Second replica shares the pod identifier's programmed maps, so it is allowed immediately.
-			By("verifying the second replica reaches the server", func() {
-				Eventually(func() (string, error) {
-					return fw.PodManager.TCPProbe(namespace, secondPod, serverPodIP, serverPort)
-				}, utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
-					"second replica should reach the server via the shared policy maps")
+			// The second replica shares the pod identifier's already-programmed maps, so it should
+			// be allowed without a cold-start deny. Consistently from the first poll asserts that
+			// instantaneous property: a replica that wrongly cold-started would probe CLOSE early.
+			// (We do not assert the first replica's initial deny window; catching it depends on
+			// racing the probe against datapath programming, which is the flake this rewrite removes.)
+			By("verifying the second replica reaches the server without a cold-start deny", func() {
+				Consistently(stableProbe(namespace, secondPod, serverPodIP, serverPort),
+					utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
+					"second replica should reach the server immediately via the shared policy maps")
 			})
 
-			By("verifying connectivity is stable for both replicas", func() {
-				Consistently(func() (string, error) {
-					return fw.PodManager.TCPProbe(namespace, secondPod, serverPodIP, serverPort)
-				}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
+			By("verifying connectivity is stable for the first replica", func() {
+				Consistently(stableProbe(namespace, firstPod, serverPodIP, serverPort),
+					utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
 					"allow should not flap once the policy is enforced")
 			})
 		})
@@ -223,4 +225,31 @@ func podNameForReplica(ns, name, excludeName string) string {
 		return false
 	}, utils.ProbeTimeout, utils.ProbeInterval).Should(BeTrue(), "expected a client replica with app=%s", name)
 	return podName
+}
+
+// stableProbe returns a Consistently poll function that treats a transient exec error as
+// the last observed verdict rather than a failure. Consistently aborts on the first non-nil
+// error, so an isolated kubelet/API exec hiccup would otherwise flake the stability check.
+// The first verdict is seeded eagerly (tolerating a few early exec errors) so the initial
+// poll never fails purely because exec was briefly unavailable.
+func stableProbe(ns, podName, host string, port int) func() string {
+	var last string
+	Eventually(func() error {
+		verdict, err := fw.PodManager.TCPProbe(ns, podName, host, port)
+		if err != nil {
+			return err
+		}
+		last = verdict
+		return nil
+	}, utils.ProbeTimeout, utils.ProbeInterval).Should(Succeed(), "probe exec never succeeded for pod %s", podName)
+
+	return func() string {
+		verdict, err := fw.PodManager.TCPProbe(ns, podName, host, port)
+		if err != nil {
+			GinkgoWriter.Printf("stableProbe %s:%d exec error (using last verdict %q): %v\n", host, port, last, err)
+			return last
+		}
+		last = verdict
+		return verdict
+	}
 }
