@@ -3,23 +3,17 @@ package policy
 import (
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"sigs.k8s.io/yaml"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
-)
-
-const (
-	enforcementTimeout = 90 * time.Second // wait for policy to be programmed into the datapath
-	probeTimeout       = 30 * time.Second // allow probes once enforcement is active
-	probeInterval      = 3 * time.Second
 )
 
 func printNetworkPolicyYAML(np *network.NetworkPolicy) {
@@ -171,31 +165,31 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 
 			// Deny converging first proves enforcement is active.
 			By(fmt.Sprintf("denying egress to the server on excepted port %d", blockPort), func() {
-				Eventually(func() string {
-					return tcpProbe(clientNamespace, clientName, serverIP, blockPort)
-				}, enforcementTimeout, probeInterval).Should(Equal("CLOSE"),
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(clientNamespace, clientName, serverIP, blockPort)
+				}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
 					"expected deny to server on excepted port %d", blockPort)
 			})
 
 			By(fmt.Sprintf("allowing egress to the server on allowed port %d", allowPort), func() {
-				Eventually(func() string {
-					return tcpProbe(clientNamespace, clientName, serverIP, allowPort)
-				}, probeTimeout, probeInterval).Should(Equal("OPEN"),
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(clientNamespace, clientName, serverIP, allowPort)
+				}, utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
 					"expected allow to server on port %d", allowPort)
 			})
 
 			By("allowing egress to endpoints outside the excepted prefix", func() {
-				Eventually(func() string {
-					return tcpProbe(clientNamespace, clientName, cfg.extProbeIP, 53)
-				}, probeTimeout, probeInterval).Should(Equal("OPEN"),
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(clientNamespace, clientName, cfg.extProbeIP, 53)
+				}, utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
 					"expected allow to external endpoint outside the excepted prefix")
 			})
 
 			// Consistently (not Eventually) ensures the deny didn't flap.
 			By(fmt.Sprintf("confirming deny on excepted port %d still holds", blockPort), func() {
-				Consistently(func() string {
-					return tcpProbe(clientNamespace, clientName, serverIP, blockPort)
-				}, 10*time.Second, probeInterval).Should(Equal("CLOSE"),
+				Consistently(func() (string, error) {
+					return fw.PodManager.TCPProbe(clientNamespace, clientName, serverIP, blockPort)
+				}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
 					"deny on excepted port %d did not persist through the allow probes", blockPort)
 			})
 		})
@@ -215,22 +209,3 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		fw.NamespaceManager.DeleteAndWaitTillNamespaceDeleted(ctx, clientNamespace)
 	})
 })
-
-// probeError distinguishes an exec failure from an OPEN/CLOSE verdict, so it shows
-// explicitly in assertion output instead of as an empty string.
-const probeError = "PROBE_ERROR"
-
-// tcpProbe execs `nc -z` in the client pod. Returns "OPEN" or "CLOSE".
-// stderr is suppressed so ExecInPod returns only the deterministic stdout.
-func tcpProbe(namespace, podName, host string, port int) string {
-	cmd := []string{
-		"/bin/sh", "-c",
-		fmt.Sprintf(`nc -z -w2 %s %d 2>/dev/null && echo "OPEN" || echo "CLOSE"`, host, port),
-	}
-	out, err := fw.PodManager.ExecInPod(namespace, podName, cmd)
-	if err != nil {
-		GinkgoWriter.Printf("tcpProbe %s:%d exec error: %v\n", host, port, err)
-		return probeError
-	}
-	return strings.TrimSpace(out)
-}

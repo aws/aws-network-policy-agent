@@ -1,11 +1,10 @@
 package strict
 
 import (
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,36 +12,32 @@ import (
 	network "k8s.io/api/networking/v1"
 )
 
+const serverPort = 8080
+
 var _ = Describe("Strict Mode Test Cases", func() {
 	Context("when pod is launched", func() {
 		var clientPod *v1.Pod
 		var podName = "clientpod"
 
 		BeforeEach(func() {
-			By("Creating a pod to which tries to reach to external network", func() {
-				agnhostContainer := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
-					Args([]string{"while true; do wget https://www.google.com --spider -T 1; if [ $? == 0 ]; then echo \"Success\"; else echo \"Fail\"; fi; sleep 1s; done"}).
-					Build()
-
-				clientPod = manifest.NewDefaultPodBuilder().
-					Container(agnhostContainer).
-					Namespace(namespace).
-					Name(podName).
-					Build()
-
-				_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 2*time.Minute)
-				Expect(err).ToNot(HaveOccurred())
+			By("Creating an idle client pod", func() {
+				clientPod = deployIdlePod(podName, namespace)
 			})
 		})
 
 		It("by default should not have connectivity to external network", func() {
-			By("Verify pod does not have external connectivity", func() {
-				time.Sleep(1 * time.Minute)
-				logs, err := fw.PodManager.PodLogs(namespace, podName)
-				Expect(err).ToNot(HaveOccurred())
-				err = processLogs(logs, true, false, false)
-				Expect(err).ToNot(HaveOccurred())
+			host, port := externalProbeTarget(fw.Options.IpFamily)
+			By("verifying egress to the external endpoint is denied", func() {
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(namespace, podName, host, port)
+				}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
+					"strict mode should deny egress from a pod with no network policy")
+			})
+			By("verifying the deny persists", func() {
+				Consistently(func() (string, error) {
+					return fw.PodManager.TCPProbe(namespace, podName, host, port)
+				}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
+					"deny should not flap while no policy allows the traffic")
 			})
 		})
 
@@ -56,8 +51,6 @@ var _ = Describe("Strict Mode Test Cases", func() {
 			serverPod           *v1.Pod
 			clientDeployment    *appsv1.Deployment
 			serverPodIP         string
-			newPod              string
-			firstPod            string
 			serverName          = "serverpod"
 			clientName          = "clientdeploy"
 			serverNetworkPolicy *network.NetworkPolicy
@@ -65,13 +58,11 @@ var _ = Describe("Strict Mode Test Cases", func() {
 		)
 
 		BeforeEach(func() {
-
 			By("Deploying a server pod with allow all ingress network policy", func() {
-
 				ingressPeer := manifest.NewIngressRuleBuilder().
 					AddPeer(nil, nil, "0.0.0.0/0").
 					AddPeer(nil, nil, "::/0").
-					AddPort(8080, v1.ProtocolTCP).
+					AddPort(serverPort, v1.ProtocolTCP).
 					Build()
 
 				serverNetworkPolicy = manifest.NewNetworkPolicyBuilder().
@@ -87,7 +78,7 @@ var _ = Describe("Strict Mode Test Cases", func() {
 				serverContainer := manifest.NewAgnHostContainerBuilder().
 					ImageRepository(fw.Options.TestImageRegistry).
 					Args([]string{"/agnhost netexec"}).
-					AddContainerPort(v1.ContainerPort{ContainerPort: 8080}).
+					AddContainerPort(v1.ContainerPort{ContainerPort: serverPort}).
 					Build()
 
 				serverPod = manifest.NewDefaultPodBuilder().
@@ -102,11 +93,10 @@ var _ = Describe("Strict Mode Test Cases", func() {
 				serverPodIP = pod.Status.PodIP
 			})
 
-			By("Deploying a client deployment and an egress policy to allow communication with server", func() {
-
+			By("Deploying an idle client deployment and an egress policy to allow communication with server", func() {
 				egressPeer := manifest.NewEgressRuleBuilder().
 					AddPeer(nil, map[string]string{"app": serverName}, "").
-					AddPort(8080, v1.ProtocolTCP).
+					AddPort(serverPort, v1.ProtocolTCP).
 					Build()
 
 				clientNetworkPolicy = manifest.NewNetworkPolicyBuilder().
@@ -116,72 +106,47 @@ var _ = Describe("Strict Mode Test Cases", func() {
 					AddEgressRule(egressPeer).
 					Build()
 
-				if fw.Options.IpFamily == "IPv6" {
-					serverPodIP = fmt.Sprintf("[%s]", serverPodIP)
-				}
-
 				err := fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, clientNetworkPolicy)
 				Expect(err).ToNot(HaveOccurred())
 
-				clientContainer := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
-					Command([]string{"/bin/sh", "-c"}).
-					Args([]string{fmt.Sprintf("while true; do wget %s:8080 --spider -T 2; if [ $? == 0 ]; then echo \"Success\"; else echo \"Fail\"; fi; done", serverPodIP)}).
-					Build()
-
-				clientDeployment = manifest.NewDefaultDeploymentBuilder().
-					Name(clientName).
-					Replicas(1).
-					Namespace(namespace).
-					AddLabel("app", clientName).
-					Container(clientContainer).
-					Build()
-
-				_, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, clientDeployment)
-				Expect(err).ToNot(HaveOccurred())
+				clientDeployment = deployIdleDeployment(clientName, namespace, 1)
 			})
 		})
 
-		It("Traffic from first replica of client deployment must be denied initially before succeeding but second replica should be instantaneous", func() {
-			By("Verify traffic probes are denied and then accepted from first replica of client pod", func() {
-				time.Sleep(30 * time.Second)
-				podList, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", clientName)
-				Expect(err).ToNot(HaveOccurred())
+		It("allows egress once the policy is enforced, and a second replica sharing the policy is also allowed", func() {
+			var firstPod, secondPod string
 
-				firstPod = podList[0].Name
-				podLog, err := fw.PodManager.PodLogs(namespace, firstPod)
-				Expect(err).ToNot(HaveOccurred())
-
-				err = processLogs(podLog, false, false, true)
-				Expect(err).ToNot(HaveOccurred())
+			By("resolving the first client replica", func() {
+				firstPod = podNameForReplica(namespace, clientName, "")
 			})
 
-			By("Scaling the client deployment to 2", func() {
+			// First pod cold-starts in strict default-deny; allowed once the egress rule is programmed.
+			By("verifying the first replica eventually reaches the server", func() {
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(namespace, firstPod, serverPodIP, serverPort)
+				}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
+					"first replica should reach the server once the egress policy is programmed")
+			})
+
+			By("scaling the client deployment to 2", func() {
 				err := fw.DeploymentManager.ScaleDeploymentAndWaitTillReady(ctx, namespace, clientName, 2)
 				Expect(err).ToNot(HaveOccurred())
-
-				time.Sleep(10 * time.Second)
-
-				podList, err := fw.PodManager.GetPodsWithLabel(ctx, namespace, "app", clientName)
-				Expect(err).ToNot(HaveOccurred())
-
-				for _, pod := range podList {
-					if pod.Name != firstPod {
-						newPod = pod.Name
-						break
-					}
-				}
-				Expect(newPod).ToNot(BeEmpty())
+				secondPod = podNameForReplica(namespace, clientName, firstPod)
 			})
 
-			By("Verify all traffic probes are accepted from second replica of client pod", func() {
-				time.Sleep(30 * time.Second)
+			// Second replica shares the pod identifier's programmed maps, so it is allowed immediately.
+			By("verifying the second replica reaches the server", func() {
+				Eventually(func() (string, error) {
+					return fw.PodManager.TCPProbe(namespace, secondPod, serverPodIP, serverPort)
+				}, utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
+					"second replica should reach the server via the shared policy maps")
+			})
 
-				podLog, err := fw.PodManager.PodLogs(namespace, newPod)
-				Expect(err).ToNot(HaveOccurred())
-
-				err = processLogs(podLog, false, true, false)
-				Expect(err).ToNot(HaveOccurred())
+			By("verifying connectivity is stable for both replicas", func() {
+				Consistently(func() (string, error) {
+					return fw.PodManager.TCPProbe(namespace, secondPod, serverPodIP, serverPort)
+				}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
+					"allow should not flap once the policy is enforced")
 			})
 		})
 
@@ -194,30 +159,68 @@ var _ = Describe("Strict Mode Test Cases", func() {
 	})
 })
 
-func processLogs(podlogs string, allDeny bool, allAllow bool, mix bool) error {
+// externalProbeTarget returns an off-cluster host and port for the cluster's IP family.
+func externalProbeTarget(ipFamily string) (string, int) {
+	if ipFamily == "IPv6" {
+		return "2001:4860:4860::8888", 53
+	}
+	return "8.8.8.8", 53
+}
 
-	passFlag := false
-	failFlag := false
-	for _, log := range strings.Split(strings.TrimSuffix(podlogs, "\n"), "\n") {
-		if log == "Fail" {
-			if passFlag {
-				return fmt.Errorf("Connection failed after initial success")
-			}
-			failFlag = true
-		} else if log == "Success" {
-			passFlag = true
+// deployIdlePod creates a running busybox pod that sleeps, so probes can be exec'd on demand.
+func deployIdlePod(name, ns string) *v1.Pod {
+	ctnr := manifest.NewBusyBoxContainerBuilder().
+		ImageRepository(fw.Options.TestImageRegistry).
+		Command([]string{"/bin/sh", "-c"}).
+		Args([]string{"sleep 1000000"}).
+		Build()
+
+	pod, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, manifest.NewDefaultPodBuilder().
+		Name(name).
+		Namespace(ns).
+		Container(ctnr).
+		Build(), 2*time.Minute)
+	Expect(err).ToNot(HaveOccurred())
+	return pod
+}
+
+// deployIdleDeployment creates a busybox deployment whose pods sleep, so probes can be exec'd on demand.
+func deployIdleDeployment(name, ns string, replicas int) *appsv1.Deployment {
+	ctnr := manifest.NewBusyBoxContainerBuilder().
+		ImageRepository(fw.Options.TestImageRegistry).
+		Command([]string{"/bin/sh", "-c"}).
+		Args([]string{"sleep 1000000"}).
+		Build()
+
+	deployment := manifest.NewDefaultDeploymentBuilder().
+		Name(name).
+		Replicas(replicas).
+		Namespace(ns).
+		AddLabel("app", name).
+		Container(ctnr).
+		Build()
+
+	dp, err := fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, deployment)
+	Expect(err).ToNot(HaveOccurred())
+	return dp
+}
+
+// podNameForReplica polls for a pod with app=name, skipping excludeName, since scaling
+// does not block until the new pod registers.
+func podNameForReplica(ns, name, excludeName string) string {
+	var podName string
+	Eventually(func() bool {
+		pods, err := fw.PodManager.GetPodsWithLabel(ctx, ns, "app", name)
+		if err != nil {
+			return false
 		}
-	}
-
-	if !passFlag && !failFlag {
-		return fmt.Errorf("Error generating traffic probes")
-	} else if allDeny && passFlag {
-		return fmt.Errorf("Failed as all traffic probes did not get DENY")
-	} else if allAllow && failFlag {
-		return fmt.Errorf("Failed as all traffic probes did not get ACCEPT")
-	} else if mix && !(passFlag && failFlag) {
-		return fmt.Errorf("Failed as traffic probes did not get DENY first and then ACCEPT")
-	}
-
-	return nil
+		for _, pod := range pods {
+			if pod.Name != excludeName {
+				podName = pod.Name
+				return true
+			}
+		}
+		return false
+	}, utils.ProbeTimeout, utils.ProbeInterval).Should(BeTrue(), "expected a client replica with app=%s", name)
+	return podName
 }

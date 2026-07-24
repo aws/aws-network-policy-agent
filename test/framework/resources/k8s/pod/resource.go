@@ -29,6 +29,7 @@ type Manager interface {
 	PodLogs(namespace string, name string) (string, error)
 	ExecInPod(namespace string, podName string, command []string) (string, error)
 	ValidateConnection(namespace string, podName string, url string, ipFamily string) (string, error)
+	TCPProbe(namespace string, podName string, host string, port int) (string, error)
 }
 
 type defaultManager struct {
@@ -212,6 +213,21 @@ func (d *defaultManager) ExecInPod(namespace string, podName string, command []s
 	}
 
 	return strings.TrimSpace(result), nil
+}
+
+// TCPProbe execs `nc -z` in the pod and returns "OPEN" or "CLOSE" for a connection to
+// host:port. A denied connection is silently dropped (no RST), so nc blocks its full
+// timeout before reporting CLOSE.
+func (d *defaultManager) TCPProbe(namespace string, podName string, host string, port int) (string, error) {
+	cmd := []string{
+		"/bin/sh", "-c",
+		fmt.Sprintf(`nc -z -w2 %s %d 2>/dev/null && echo "OPEN" || echo "CLOSE"`, host, port),
+	}
+	out, err := d.ExecInPod(namespace, podName, cmd)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func (d *defaultManager) ValidateConnection(namespace string, podName string, url string, ipFamily string) (string, error) {
