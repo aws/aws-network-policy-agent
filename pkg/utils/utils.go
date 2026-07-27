@@ -572,9 +572,8 @@ type ConntrackKey struct {
 }
 
 type ConntrackVal struct {
-	Value    uint8
-	_        [7]byte // padding to match BPF struct layout
-	LastSeen uint64
+	Value    uint64 // 0 => default-allow, 1 => policies-applied
+	LastSeen uint64 // bpf_ktime_get_ns() of the last datapath hit
 }
 
 func ConvConntrackV6ToByte(key ConntrackKeyV6) []byte {

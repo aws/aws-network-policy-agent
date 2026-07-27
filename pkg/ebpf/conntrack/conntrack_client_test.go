@@ -63,13 +63,15 @@ func TestConntrackKeyV6Shape(t *testing.T) {
 }
 
 // TestConntrackValLayout verifies that ConntrackVal matches the BPF
-// struct conntrack_value layout: 1 byte val + 7 pad + 8 byte last_seen = 16.
+// struct conntrack_value layout: 8 byte val + 8 byte last_seen = 16.
 func TestConntrackValLayout(t *testing.T) {
 	val := utils.ConntrackVal{}
 	assert.Equal(t, uintptr(16), unsafe.Sizeof(val),
 		"ConntrackVal size must be 16 bytes to match BPF struct conntrack_value")
+	assert.Equal(t, uintptr(8), unsafe.Sizeof(val.Value),
+		"Value must be 8 bytes to match __u64 val")
 
-	// LastSeen at offset 8 (after val + 7-byte pad)
+	// LastSeen at offset 8 (after the 8-byte val)
 	lastSeenOffset := unsafe.Offsetof(val.LastSeen)
 	assert.Equal(t, uintptr(8), lastSeenOffset,
 		"ConntrackVal.LastSeen must be at offset 8")
