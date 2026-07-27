@@ -134,11 +134,11 @@ var _ = Describe("Strict Mode Test Cases", func() {
 				secondPod = podNameForReplica(namespace, clientName, firstPod)
 			})
 
-			// The second replica shares the pod identifier's already-programmed maps, so it should
-			// be allowed without a cold-start deny. Consistently from the first poll asserts that
-			// instantaneous property: a replica that wrongly cold-started would probe CLOSE early.
-			// (We do not assert the first replica's initial deny window; catching it depends on
-			// racing the probe against datapath programming, which is the flake this rewrite removes.)
+			// Second replica shares the pod identifier's already-programmed maps, so it must be
+			// allowed from its first packet with no cold-start deny. podNameForReplica returns it
+			// only once Running, so Consistently probes from the start: a replica that wrongly
+			// cold-started would show an early CLOSE. (Eventually here would mask that by waiting
+			// out the deny, breaking the "instantaneous" contract.)
 			By("verifying the second replica reaches the server without a cold-start deny", func() {
 				Consistently(func() (string, error) {
 					return fw.PodManager.TCPProbe(namespace, secondPod, serverPodIP, serverPort)
@@ -209,8 +209,9 @@ func deployIdleDeployment(name, ns string, replicas int) *appsv1.Deployment {
 	return dp
 }
 
-// podNameForReplica polls for a pod with app=name, skipping excludeName, since scaling
-// does not block until the new pod registers.
+// podNameForReplica polls for a Running pod with app=name, skipping excludeName. It gates
+// on Running so callers get an exec-ready pod: a pod is listed by label before its
+// container starts, and exec-ing that early fails with "container not found".
 func podNameForReplica(ns, name, excludeName string) string {
 	var podName string
 	Eventually(func() bool {
@@ -219,12 +220,12 @@ func podNameForReplica(ns, name, excludeName string) string {
 			return false
 		}
 		for _, pod := range pods {
-			if pod.Name != excludeName {
+			if pod.Name != excludeName && pod.Status.Phase == v1.PodRunning {
 				podName = pod.Name
 				return true
 			}
 		}
 		return false
-	}, utils.ProbeTimeout, utils.ProbeInterval).Should(BeTrue(), "expected a client replica with app=%s", name)
+	}, utils.ProbeTimeout, utils.ProbeInterval).Should(BeTrue(), "expected a running client replica with app=%s", name)
 	return podName
 }
