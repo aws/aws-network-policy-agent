@@ -25,13 +25,42 @@ func printNetworkPolicyYAML(np *network.NetworkPolicy) {
 	fmt.Printf("Applied NetworkPolicy YAML:\n%s\n", string(bytes))
 }
 
-// getPrefix computes the network prefix for the given IP and mask length.
-func getPrefix(ipStr string, maskLen int) (string, error) {
-	ip := net.ParseIP(ipStr).To4()
-	if ip == nil {
-		return "", fmt.Errorf("invalid IPv4 address: %s", ipStr)
+type ipFamilyConfig struct {
+	maskLen    int
+	catchAll   string
+	extProbeIP string
+}
+
+// ipFamilyConfigForIP derives the except-block settings from the server pod IP.
+// EKS clusters are single-stack, so the pod IP's family is the cluster's family.
+func ipFamilyConfigForIP(ip string) ipFamilyConfig {
+	if net.ParseIP(ip).To4() == nil {
+		return ipFamilyConfig{
+			maskLen:    64,
+			catchAll:   "::/0",
+			extProbeIP: "2001:4860:4860::8888",
+		}
 	}
-	mask := net.CIDRMask(maskLen, 32)
+	return ipFamilyConfig{
+		maskLen:    16,
+		catchAll:   "0.0.0.0/0",
+		extProbeIP: "8.8.8.8",
+	}
+}
+
+// getPrefix computes the network prefix for the given IP and mask length,
+// masking against the address's native bit width (32 for IPv4, 128 for IPv6).
+func getPrefix(ipStr string, maskLen int) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+	bits := 128
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+		bits = 32
+	}
+	mask := net.CIDRMask(maskLen, bits)
 	network := ip.Mask(mask)
 	return fmt.Sprintf("%s/%d", network.String(), maskLen), nil
 }
@@ -79,14 +108,16 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 	})
 
 	deployClient := func(clientName string) *v1.Pod {
+		cfg := ipFamilyConfigForIP(serverIP)
 		script := fmt.Sprintf(
 			`sleep 30;
 	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
 	nc -z -w1 %s %d && echo "OPEN-%d" || echo "CLOSE-%d";
-	nc -z -w2 8.8.8.8 53 && echo "OPEN-EXT" || echo "CLOSE-EXT";
+	nc -z -w2 %s %d && echo "OPEN-EXT" || echo "CLOSE-EXT";
 	sleep 1000 `,
 			serverIP, allowPort, allowPort, allowPort,
 			serverIP, blockPort, blockPort, blockPort,
+			cfg.extProbeIP, 53,
 		)
 
 		ctnr := manifest.NewBusyBoxContainerBuilder().
@@ -107,22 +138,22 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 		return pod
 	}
 
-	Context("CIDR and Except overlap: /16 allow on 3306 + catch-all except /16", func() {
+	Context("CIDR and Except overlap: server-prefix allow on 3306 + catch-all except server-prefix", func() {
 		BeforeEach(func() {
-			By("Applying network policy with /16 allow and except rule")
+			By("Applying network policy with server-prefix allow and except rule")
 			err := fw.NamespaceManager.CreateNamespace(ctx, clientNamespace)
 			Expect(err).ToNot(HaveOccurred())
-			// Compute the /16 prefix for the server IP
-			p16, err := getPrefix(serverIP, 16)
+			cfg := ipFamilyConfigForIP(serverIP)
+			prefix, err := getPrefix(serverIP, cfg.maskLen)
 			Expect(err).ToNot(HaveOccurred())
 
 			firstRule := manifest.NewEgressRuleBuilder().
-				AddPeer(nil, nil, p16).
+				AddPeer(nil, nil, prefix).
 				AddPort(allowPort, v1.ProtocolTCP).
 				Build()
 
 			secondRule := manifest.NewEgressRuleBuilder().
-				AddPeer(nil, nil, "0.0.0.0/0", p16).
+				AddPeer(nil, nil, cfg.catchAll, prefix).
 				Build()
 
 			policy = manifest.NewNetworkPolicyBuilder().
@@ -140,7 +171,7 @@ var _ = Describe("IPBlock Except Test Cases", func() {
 			clientPod = deployClient(clientName)
 		})
 
-		It("should allow on /16 and 3306 port, deny on rest /16 ports, allow all on rest of endpoints", func() {
+		It("should allow on server prefix and 3306 port, deny on rest server-prefix ports, allow all on rest of endpoints", func() {
 			time.Sleep(30 * time.Second)
 
 			// fetch the logs
