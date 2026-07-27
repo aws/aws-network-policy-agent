@@ -206,7 +206,7 @@ while True:
 		reuserDep, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, reuserDep)
 		Expect(err).ToNot(HaveOccurred())
 
-		By("Deploying privileged check pod to read the NPA log on the test node")
+		By("Deploying log-reader pod to read the NPA log on the test node")
 		// NB: not utils.BuildBPFCheckPod — that pod sleeps 300s and would die
 		// mid-soak (this test can run up to 30m). Use sleep infinity so the pod
 		// stays available for the whole observation window.
@@ -261,31 +261,34 @@ while True:
 func protoPtr(p v1.Protocol) *v1.Protocol { return &p }
 func portPtr(n int32) *intstr.IntOrString { v := intstr.FromInt(int(n)); return &v }
 
-// buildLogReaderPod is a privileged pod pinned to the test node that host-mounts
-// /var/log so the soak can grep the NPA log. Unlike utils.BuildBPFCheckPod it
-// sleeps indefinitely, so it survives the full (up to 30m) observation window.
+// buildLogReaderPod is pinned to the test node and read-only host-mounts just
+// the NPA log directory so the soak can grep the NPA log. Unlike
+// utils.BuildBPFCheckPod it sleeps indefinitely, so it survives the full (up to
+// 30m) observation window. It only needs to read one file, so it drops
+// Privileged/HostPID/HostNetwork and mounts a single directory read-only rather
+// than the whole host root.
 func buildLogReaderPod(node string) *v1.Pod {
-	privileged := true
+	readOnlyRootFS := true
 	hostPathDir := v1.HostPathDirectory
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "log-reader", Namespace: namespace},
 		Spec: v1.PodSpec{
-			NodeName: node, HostPID: true, HostNetwork: true, RestartPolicy: v1.RestartPolicyNever,
+			NodeName: node, RestartPolicy: v1.RestartPolicyNever,
 			Containers: []v1.Container{{
 				Name: "reader", Image: "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
 				Command:         []string{"sleep", "infinity"},
-				SecurityContext: &v1.SecurityContext{Privileged: &privileged},
-				VolumeMounts:    []v1.VolumeMount{{Name: "host-root", MountPath: "/host"}},
+				SecurityContext: &v1.SecurityContext{ReadOnlyRootFilesystem: &readOnlyRootFS},
+				VolumeMounts:    []v1.VolumeMount{{Name: "npa-log", MountPath: "/host/var/log/aws-routed-eni", ReadOnly: true}},
 			}},
 			Volumes: []v1.Volume{{
-				Name:         "host-root",
-				VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/", Type: &hostPathDir}},
+				Name:         "npa-log",
+				VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/var/log/aws-routed-eni", Type: &hostPathDir}},
 			}},
 		},
 	}
 }
 
-// logCount greps the on-node NPA log via the privileged check pod. Retries once
+// logCount greps the on-node NPA log via the log-reader pod. Retries once
 // on a transient exec error; returns -1 only if both attempts fail (caller skips
 // that poll rather than treating -1 as a signal).
 func logCount(checkPod *v1.Pod, pattern string) int {
@@ -318,6 +321,10 @@ func reuserOK(ns string) int {
 		if lerr != nil {
 			continue
 		}
+		// ok= is a cumulative counter, so only the last STATS line for this pod
+		// is meaningful. Track it per pod and add it once; summing every line
+		// would multiply-count the running total.
+		podOK := 0
 		for _, ln := range strings.Split(logs, "\n") {
 			if idx := strings.LastIndex(ln, "ok="); idx >= 0 {
 				rest := ln[idx+3:]
@@ -326,10 +333,11 @@ func reuserOK(ns string) int {
 					end = len(rest)
 				}
 				if v, e := strconv.Atoi(rest[:end]); e == nil {
-					total += v // last STATS line wins per pod (loop overwrites)
+					podOK = v
 				}
 			}
 		}
+		total += podOK
 	}
 	return total
 }

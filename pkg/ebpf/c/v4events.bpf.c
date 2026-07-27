@@ -39,8 +39,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-   __u8 val;
-   __u8 _pad[7];
+   __u64 val;
    __u64 last_seen;
 };
 
