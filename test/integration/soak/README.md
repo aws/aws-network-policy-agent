@@ -27,7 +27,7 @@ to slip into the cadence by accident.
 make build-soak-test-binaries
 
 # …or run a specific suite directly with ginkgo:
-ginkgo --tags soak ./test/integration/soak/conntrack-race/ -- \
+ginkgo --tags soak ./test/integration/soak/port-reuse/ -- \
   --cluster-kubeconfig=$KUBECONFIG \
   --cluster-name=$CLUSTER_NAME \
   --aws-region=$AWS_REGION
@@ -35,9 +35,9 @@ ginkgo --tags soak ./test/integration/soak/conntrack-race/ -- \
 
 ## Suites
 
-- **conntrack-race/** — reproduces the conntrack GC snapshot-vs-iterate race
-  (aws/aws-network-policy-agent#462) and validates the `last_seen` fix. Fails on
-  stock NPA (return-flow `Verdict DENY` when cleanup deletes a live reused entry);
-  passes on the patched agent (`Conntrack cleanup Skip (in use)` fires, 0 DENY).
-  Two-sided assertions (liveness + fix-engaged + no-wedge), early-exit on
-  confirmation, 30-minute cap.
+- **port-reuse/** — soaks an ephemeral-source-port-reuse workload
+  (aws/aws-network-policy-agent#462). A victim pod behind a restrictive ingress
+  policy issues one short-lived request per second while `SO_REUSEADDR` replicas
+  churn connections to force port reuse. Runs for 30 minutes and fails on any
+  `Verdict DENY` to the victim, which means a conntrack entry for a live flow went
+  missing. Liveness gates fail the run fast if the workload or cleanup is inert.
