@@ -89,7 +89,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-   __u64 val; // 0 => default-allow, 1 => policies-applied
+   __u64 val; // pod state, set via GET_CT_VAL
    __u64 last_seen; // bpf_ktime_get_ns() of the last datapath hit; used by userspace GC to skip reused flows
 };
 

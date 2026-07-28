@@ -572,7 +572,7 @@ type ConntrackKey struct {
 }
 
 type ConntrackVal struct {
-	Value    uint64 // 0 => default-allow, 1 => policies-applied
+	Value    uint64 // pod state, set via GET_CT_VAL in the datapath
 	LastSeen uint64 // bpf_ktime_get_ns() of the last datapath hit
 }
 
