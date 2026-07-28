@@ -65,6 +65,20 @@ func getPrefix(ipStr string, maskLen int) (string, error) {
 	return fmt.Sprintf("%s/%d", network.String(), maskLen), nil
 }
 
+// hostCIDR returns the single-host CIDR for ip — /32 for IPv4, /128 for IPv6.
+// A bare "/32" suffix is rejected by the API server on IPv6 addresses.
+func hostCIDR(ip string) (string, error) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ip)
+	}
+	bits := 128
+	if parsed.To4() != nil {
+		bits = 32
+	}
+	return getPrefix(ip, bits)
+}
+
 var _ = Describe("IPBlock Except Test Cases", func() {
 	var (
 		serverPod       *v1.Pod
