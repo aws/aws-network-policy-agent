@@ -77,11 +77,8 @@ var _ = Describe("Ebpf prog protocol and port evaluation test", func() {
 	}
 
 	It("should allow traffic to both ports when policy uses ANY protocol and ANY port", func() {
-		serverCIDR, err := hostCIDR(serverIP)
-		Expect(err).ToNot(HaveOccurred())
-
 		rule := manifest.NewEgressRuleBuilder().
-			AddPeer(nil, nil, serverCIDR).
+			AddPeer(nil, nil, serverIP+hostMask(fw.Options.IpFamily)).
 			AddPort(-1, "").
 			Build()
 
@@ -103,11 +100,8 @@ var _ = Describe("Ebpf prog protocol and port evaluation test", func() {
 	})
 
 	It("should allow on portA and deny on portB when policy allows only portA and ANY protocol", func() {
-		serverCIDR, err := hostCIDR(serverIP)
-		Expect(err).ToNot(HaveOccurred())
-
 		rule := manifest.NewEgressRuleBuilder().
-			AddPeer(nil, nil, serverCIDR).
+			AddPeer(nil, nil, serverIP+hostMask(fw.Options.IpFamily)).
 			AddPort(portA, "").
 			Build()
 
