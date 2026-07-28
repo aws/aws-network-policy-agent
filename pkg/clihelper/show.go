@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -18,6 +19,32 @@ import (
 
 type PodState struct {
 	State uint8
+}
+
+// ktimeGetNs returns the current CLOCK_MONOTONIC time in nanoseconds — the same
+// clock the datapath stamps last_seen with via bpf_ktime_get_ns(), so the two
+// can be subtracted directly.
+func ktimeGetNs() uint64 {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0
+	}
+	return uint64(ts.Nano())
+}
+
+// formatLastSeen renders a raw last_seen timestamp as a human-readable "how long
+// ago the datapath last saw a packet on this flow". now must be a CLOCK_MONOTONIC
+// reading taken once per dump so every entry is aged against the same instant.
+func formatLastSeen(lastSeen, now uint64) string {
+	if lastSeen == 0 {
+		return "never"
+	}
+	if now == 0 || lastSeen > now {
+		// Clock unavailable, or the datapath stamped between our clock read and
+		// this entry's read. Neither is an error; just don't print a negative age.
+		return "0s ago"
+	}
+	return time.Duration(now-lastSeen).Round(time.Millisecond).String() + " ago"
 }
 
 // Show - Displays all loaded AWS BPF Programs and their associated maps
@@ -208,6 +235,8 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		iterKey := utils.ConntrackKey{}
 		iterNextKey := utils.ConntrackKey{}
+		// Read once so every entry in this dump is aged against the same instant.
+		dumpNow := ktimeGetNs()
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
 			if errors.Is(err, unix.ENOENT) {
@@ -226,7 +255,7 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
-					fmt.Println("Last Seen (ns) - ", iterValue.LastSeen)
+					fmt.Printf("Last Seen (ns) -  %d  (%s)\n", iterValue.LastSeen, formatLastSeen(iterValue.LastSeen, dumpNow))
 					fmt.Println("*******************************")
 				}
 
@@ -378,6 +407,8 @@ func MapWalkv6(mapID int) error {
 		byteSlice := utils.ConvConntrackV6ToByte(iterKey)
 		nextbyteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
 
+		// Read once so every entry in this dump is aged against the same instant.
+		dumpNow := ktimeGetNs()
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID)
 		if err != nil {
 			return fmt.Errorf("Unable to get First key: %v", err)
@@ -393,7 +424,7 @@ func MapWalkv6(mapID int) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
-					fmt.Println("Last Seen (ns) - ", iterValue.LastSeen)
+					fmt.Printf("Last Seen (ns) -  %d  (%s)\n", iterValue.LastSeen, formatLastSeen(iterValue.LastSeen, dumpNow))
 					fmt.Println("*******************************")
 				}
 
