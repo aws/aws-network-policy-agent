@@ -7,8 +7,8 @@
 // explicitly opts in with `-tags soak`, and the test/integration/soak path is
 // pruned from the aggregate `make build-test-binaries` glob. Run them on demand:
 //
-//	ginkgo build --tags soak ./test/integration/soak/conntrack-race/
-//	ginkgo --tags soak ./test/integration/soak/conntrack-race/ -- \
+//	ginkgo build --tags soak ./test/integration/soak/port-reuse/
+//	ginkgo --tags soak ./test/integration/soak/port-reuse/ -- \
 //	  --cluster-kubeconfig=$KUBECONFIG --cluster-name=$CLUSTER --aws-region=$REGION
 package soak
 
@@ -24,12 +24,12 @@ import (
 var (
 	fw        *framework.Framework
 	ctx       context.Context
-	namespace = "conntrack-race-soak"
+	namespace = "port-reuse-soak"
 )
 
-func TestConntrackRaceSoak(t *testing.T) {
+func TestPortReuseSoak(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Conntrack GC Race Soak Suite")
+	RunSpecs(t, "Source Port Reuse Soak Suite")
 }
 
 var _ = BeforeSuite(func() {
