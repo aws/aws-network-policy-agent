@@ -1,53 +1,56 @@
 function generate_manifest_and_apply(){
 
     # Use Upstream images by default
+    # NOTE: policy-assistant is the successor to cyclonus from kubernetes-sigs/network-policy-api
+    # The image should be published to registry.k8s.io/networking-e2e-test-images/policy-assistant
+    # If the image is not yet available, it can be built from source using the kubernetes-sigs/network-policy-api repository
     IMAGE_REPOSITORY_PARAMETER=""
-    CYCLONUS_IMAGE_REPOSITORY="mfenwick100"
+    POLICY_ASSISTANT_IMAGE_REPOSITORY="registry.k8s.io/networking-e2e-test-images"
 
     if [[ $TEST_IMAGE_REGISTRY != "registry.k8s.io" ]]; then
         IMAGE_REPOSITORY_PARAMETER="- --image-repository=$TEST_IMAGE_REGISTRY"
-        CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
+        POLICY_ASSISTANT_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
     fi
 
 cat <<EOF | kubectl apply -n netpol -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: cyclonus
+  name: policy-assistant
 spec:
   template:
     spec:
       restartPolicy: OnFailure
-      serviceAccount: cyclonus
+      serviceAccount: policy-assistant
       containers:
-        - name: cyclonus
+        - name: policy-assistant
           imagePullPolicy: Always
-          image: ${CYCLONUS_IMAGE_REPOSITORY}/cyclonus:v0.5.4
+          image: ${POLICY_ASSISTANT_IMAGE_REPOSITORY}/policy-assistant:latest
           command:
-            - ./cyclonus
+            - ./policy-assistant
             - generate
             - --retries=2
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
 
-function run_cyclonus_tests(){
+function run_policy_assistant_tests(){
 
     TIMEOUT=$((5 * 60 * 60))  # 5 hours timeout in seconds
     START_TIME=$(date +%s)
 
     kubectl create ns netpol
-    kubectl create clusterrolebinding cyclonus --clusterrole=cluster-admin --serviceaccount=netpol:cyclonus
-    kubectl create sa cyclonus -n netpol
+    kubectl create clusterrolebinding policy-assistant --clusterrole=cluster-admin --serviceaccount=netpol:policy-assistant
+    kubectl create sa policy-assistant -n netpol
 
     generate_manifest_and_apply
 
-    echo "Executing cyclonus suite"
+    echo "Executing policy-assistant suite"
 
     while true; do
-      STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
+      STATUS=$(kubectl get job.batch/policy-assistant -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
       if [ "$STATUS" == "True" ]; then
-        echo "Job cyclonus has failed. Exiting."
+        echo "Job policy-assistant has failed. Exiting."
         break
       fi
 
@@ -58,14 +61,14 @@ function run_cyclonus_tests(){
           break
       fi
 
-      kubectl wait --for=condition=complete job.batch/cyclonus -n netpol --timeout=60s > /dev/null 2>&1 && break
+      kubectl wait --for=condition=complete job.batch/policy-assistant -n netpol --timeout=60s > /dev/null 2>&1 && break
     done
 
-    kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
+    kubectl logs -n netpol job/policy-assistant > ${DIR}/results.log
     kubectl get pods -A -owide
 
     # Cleanup after test finishes
-    kubectl delete clusterrolebinding cyclonus
+    kubectl delete clusterrolebinding policy-assistant
     kubectl delete ns netpol x y z
 
     cat ${DIR}/results.log
@@ -75,5 +78,10 @@ function run_cyclonus_tests(){
 }
 
 function run_performance_tests(){
-    run_cyclonus_tests
+    run_policy_assistant_tests
+}
+
+# Backwards compatibility alias
+function run_cyclonus_tests(){
+    run_policy_assistant_tests
 }
