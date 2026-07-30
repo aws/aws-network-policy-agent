@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/aws/amazon-vpc-cni-k8s v1.22.4
-	github.com/aws/aws-ebpf-sdk-go v1.0.15
+	github.com/aws/aws-ebpf-sdk-go v1.0.16
 	github.com/aws/aws-sdk-go-v2 v1.43.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.31
