@@ -134,7 +134,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 	parentCNP := utils.GetParentNPNameFromPEName(req.Name)
 	resourceName := req.Name
 
-	targetPods, targetPodIdentifiers, podsToBeCleanedUp, stalePodIdentifiers := r.deriveTargetPodsForParentCNP(ctx, parentCNP, resourceName)
+	targetPods, targetPodIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentCNP(ctx, parentCNP, resourceName)
 
 	r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
 
@@ -161,10 +161,6 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 		utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, req.Name)
 	}
 
-	for _, podIdentifier := range stalePodIdentifiers {
-		utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, req.Name)
-	}
-
 	return nil
 }
 
@@ -174,35 +170,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	parentCNP := ClusterPolicyEndpoint.Spec.PolicyRef.Name
 	resourceName := ClusterPolicyEndpoint.Name
 
-	targetPods, targetPodIdentifiers, podsToBeCleanedUp, stalePodIdentifiers := r.deriveTargetPodsForParentCNP(ctx, parentCNP, resourceName)
-
-	// For stale pod identifiers: remove this CPE from the lookup map, then
-	// re-program the eBPF maps with whatever rules remain for the identifier.
-	// Must delete from the map first so the re-derive below excludes this CPE's
-	// rules. We cannot simply clear the maps (nil, nil): a single podIdentifier
-	// can be selected by multiple ClusterPolicyEndpoints, so it may still have
-	// rules from other policies that must stay applied. Re-deriving returns the
-	// remaining policies' rules (or empty slices if none remain, in which case
-	// updateClusterPolicyBPFMaps resets the pod state to DEFAULT_ALLOW).
-	var staleCleanupErr error
-	for _, podIdentifier := range stalePodIdentifiers {
-		utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, resourceName)
-		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, resourceName, false)
-		if err != nil {
-			log().Errorf("failed to derive remaining cluster policy rules for stale podIdentifier %s: %v", podIdentifier, err)
-			staleCleanupErr = errors.Join(staleCleanupErr, err)
-			continue
-		}
-		if err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules); err != nil {
-			log().Errorf("failed to update cluster policy BPF maps for stale podIdentifier %s: %v", podIdentifier, err)
-			staleCleanupErr = errors.Join(staleCleanupErr, err)
-		}
-	}
-	// Return any stale-cleanup error so controller-runtime requeues; otherwise a
-	// failed clear would silently leave stale deny entries in the eBPF maps.
-	if staleCleanupErr != nil {
-		return staleCleanupErr
-	}
+	targetPods, targetPodIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentCNP(ctx, parentCNP, resourceName)
 
 	// Handle cleanup of pods
 	err := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
@@ -400,7 +368,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 	return clusterPolicyIngressRules, clusterPolicyEgressRules, nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx context.Context, parentCNP, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod, []string) {
+func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx context.Context, parentCNP, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod) {
 	var newTargetPods, podsToBeCleanedUp, currentPods []npatypes.Pod
 	var targetPodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
@@ -420,7 +388,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
 		r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
 		log().Infof("No CPEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
-		return newTargetPods, podIdentifiers, podsToBeCleanedUp, nil
+		return newTargetPods, podIdentifiers, podsToBeCleanedUp
 	}
 
 	// Extract names for later use
@@ -447,6 +415,17 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 		} else {
 			r.ClusterPolicyEndpointSelectorMap.Delete(ClusterPolicyEndpointResource)
 		}
+
+		// Remove every CPE of this parent CNP from the stale identifiers' entries. All of
+		// the parent's CPEs must go, not just resourceName: a single podIdentifier holds the
+		// whole parentCPEList (see deriveClusterPolicyTargetPods), so leaving a sibling CPE
+		// behind would keep the entry alive and let cleanupClusterPolicyPod re-derive this
+		// CNP's rules instead of clearing them. Entries belonging to other CNPs are left
+		// intact, so cleanupClusterPolicyPod can tell "no policies left" (entry absent) from
+		// "another policy still applies" (entry present).
+		for _, podIdentifier := range stalePodIdentifiers {
+			utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, ClusterPolicyEndpointResource)
+		}
 	}
 
 	if len(targetPodIdentifiers) == 0 {
@@ -458,7 +437,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	if len(currentPods) > 0 {
 		podsToBeCleanedUp = utils.GetPodListToBeCleanedUp(currentPods, newTargetPods, podIdentifiers)
 	}
-	return newTargetPods, podIdentifiers, podsToBeCleanedUp, stalePodIdentifiers
+	return newTargetPods, podIdentifiers, podsToBeCleanedUp
 }
 
 func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(ClusterPolicyEndpoint *policyk8sawsv1.ClusterPolicyEndpoint, parentCPEList []string) ([]npatypes.Pod, map[string]bool) {
@@ -503,6 +482,26 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 		err = r.updateClusterPolicyBPFMaps(podIdentifier, clusterPolicyIngressRules, clusterPolicyEgressRules)
 		if err != nil {
 			log().Errorf("cluster policy map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
+			return err
+		}
+	} else {
+		// No entry left in the map means no ClusterPolicyEndpoint selects this podIdentifier
+		// anymore (e.g. the namespace label the CNP matched on was removed). Clear the maps
+		// so the previously programmed deny entries go away and the pod falls back to
+		// DEFAULT_ALLOW; without this the stale entries survive until the pod restarts.
+		//
+		// Skip pods whose eBPF context is already gone: the probes are detached once the last
+		// pod of a podIdentifier leaves the node, so there is nothing left to clear and
+		// UpdateClusterPolicyEbpfMaps would fail. Returning an error there would make routine
+		// pod deletion fail the reconcile and requeue forever.
+		if !r.ebpfClient.HasBPFContext(podIdentifier) {
+			log().Debugf("Skipping cluster policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
+			return nil
+		}
+
+		log().Infof("No cluster policies left for podIdentifier %s, clearing cluster policy maps", podIdentifier)
+		if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
+			log().Errorf("cluster policy map clear failed for podIdentifier %s: %v", podIdentifier, err)
 			return err
 		}
 	}
