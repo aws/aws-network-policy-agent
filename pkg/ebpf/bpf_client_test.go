@@ -123,18 +123,79 @@ func TestBpfClient_IsEBPFProbeAttached_NoCollisionAcrossPods(t *testing.T) {
 }
 
 func TestLoadBPFProgram(t *testing.T) {
-	var wantErr error
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	pinPath := utils.GetBPFPinPathFromPodIdentifier("test-abcd", "ingress")
 
-	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-	testBpfClient := &bpfClient{
-		bpfSDKClient: mockBpfClient,
+	tests := []struct {
+		name       string
+		loadReturn map[string]goelf.BpfData
+		wantErr    bool
+		wantProgFD int
+	}{
+		{
+			name: "success with associated maps",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 7},
+					Maps: map[string]goebpfmaps.BpfMap{
+						utils.TC_INGRESS_MAP:           {MapFD: 100},
+						utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
+					},
+				},
+			},
+			wantErr:    false,
+			wantProgFD: 7,
+		},
+		{
+			name: "program loaded but no associated maps",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 7},
+					Maps:    map[string]goebpfmaps.BpfMap{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "program loaded with invalid FD",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 0},
+					Maps: map[string]goebpfmaps.BpfMap{
+						utils.TC_INGRESS_MAP: {MapFD: 100},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:       "no program data at pinPath",
+			loadReturn: map[string]goelf.BpfData{},
+			wantErr:    true,
+		},
 	}
 
-	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
-	_, _, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-abcd")
-	assert.Equal(t, gotErr, wantErr)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			testBpfClient := &bpfClient{
+				bpfSDKClient: mockBpfClient,
+			}
+
+			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
+				tt.loadReturn, map[string]goebpfmaps.BpfMap{}, nil).Times(1)
+
+			_, gotProgFD, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-abcd")
+			if tt.wantErr {
+				assert.Error(t, gotErr)
+			} else {
+				assert.NoError(t, gotErr)
+				assert.Equal(t, tt.wantProgFD, gotProgFD)
+			}
+		})
+	}
 }
 
 func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
@@ -807,6 +868,10 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		map[string]goelf.BpfData{
 			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_ingress": {
 				Program: goebpfprogs.BpfProgram{ProgFD: 10},
+				Maps: map[string]goebpfmaps.BpfMap{
+					utils.TC_INGRESS_MAP:           {MapFD: 100},
+					utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
+				},
 			},
 		},
 		map[string]goebpfmaps.BpfMap{},
@@ -816,6 +881,10 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		map[string]goelf.BpfData{
 			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_egress": {
 				Program: goebpfprogs.BpfProgram{ProgFD: 11},
+				Maps: map[string]goebpfmaps.BpfMap{
+					utils.TC_EGRESS_MAP:           {MapFD: 110},
+					utils.TC_EGRESS_POD_STATE_MAP: {MapFD: 111},
+				},
 			},
 		},
 		map[string]goebpfmaps.BpfMap{},
