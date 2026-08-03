@@ -23,7 +23,7 @@ type PodState struct {
 // Show - Displays all loaded AWS BPF Programs and their associated maps
 func Show() error {
 
-	bpfSDKclient := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
+	bpfSDKclient := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps, GlobalMaps: utils.GlobalBPFMaps, GlobalPinPrefix: utils.GLOBAL_PIN_PREFIX})
 	bpfState, err := bpfSDKclient.GetAllBpfProgramsAndMaps()
 	if err != nil {
 		return err

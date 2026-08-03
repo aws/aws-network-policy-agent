@@ -153,7 +153,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
-	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
+	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps, GlobalMaps: utils.GlobalBPFMaps, GlobalPinPrefix: utils.GLOBAL_PIN_PREFIX})
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
@@ -208,7 +208,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		}
 		var bpfSdkInputData goelf.BpfCustomData
 		bpfSdkInputData.FilePath = eventsProbe
-		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomPinPath = utils.GLOBAL_PIN_PREFIX
 		bpfSdkInputData.CustomMapSize = make(map[string]int)
 
 		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
@@ -442,6 +442,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		log().Infof("Number of probes/maps recovered - count: %d", len(bpfState))
 		for pinPath, bpfEntry := range bpfState {
 			podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+			if podIdentifier == "" {
+				log().Errorf("Skipping recovered program with unrecognized pin path: %s", pinPath)
+				sdkAPIErr.WithLabelValues("recoverBPFState-bad-pinpath").Inc()
+				continue
+			}
 			log().Infof("Recovered program Identifier: Pin Path: %s PodIdentifier: %s direction: %s", pinPath, podIdentifier, direction)
 			var peBPFContext BPFContext
 			value, ok := policyEndpointeBPFContext.Load(podIdentifier)
@@ -577,6 +582,11 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		if podIdentifier == "" {
+			log().Errorf("Skipping ingress reattach for interface %s, unrecognized pin path: %s", interfaceName, pinPath)
+			sdkAPIErr.WithLabelValues("reattach-bad-pinpath").Inc()
+			continue
+		}
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
 		_, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
@@ -597,6 +607,11 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 
 	for interfaceName, pinPath := range l.interfaceNametoEgressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		if podIdentifier == "" {
+			log().Errorf("Skipping egress reattach for interface %s, unrecognized pin path: %s", interfaceName, pinPath)
+			sdkAPIErr.WithLabelValues("reattach-bad-pinpath").Inc()
+			continue
+		}
 		log().Infof("ReattachEbpfProbes attaching egress for %s interface %s", podIdentifier, interfaceName)
 		_, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {

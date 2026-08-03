@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"path"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -39,6 +40,13 @@ var (
 	TC_CLUSTER_POLICY_EGRESS_MAP    = "cp_egress_map"
 	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
+	GLOBAL_CONNTRACK_MAP            = "aws_conntrack_map"
+	GLOBAL_POLICY_EVENTS_MAP        = "policy_events"
+
+	// GLOBAL_PIN_PREFIX is the pin-filename prefix used for node-wide programs
+	// and maps, e.g. "global_aws_conntrack_map". Per-pod pins instead carry a
+	// "<podName>@<namespace>" identifier.
+	GLOBAL_PIN_PREFIX = "global"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
@@ -58,6 +66,14 @@ var NamespacedBPFMaps = []string{
 	TC_CLUSTER_POLICY_EGRESS_MAP,
 	TC_INGRESS_POD_STATE_MAP,
 	TC_EGRESS_POD_STATE_MAP,
+}
+
+// GlobalBPFMaps lists BPF map names that are pinned once per node rather than
+// per pod-identifier, under the GLOBAL_PIN_PREFIX prefix.
+// Any new node scoped eBPF maps added in ebpf C programs needs to be added in this list for recovery
+var GlobalBPFMaps = []string{
+	GLOBAL_CONNTRACK_MAP,
+	GLOBAL_POLICY_EVENTS_MAP,
 }
 
 func log() logger.Logger {
@@ -203,16 +219,35 @@ func LegacyGetPodIdentifier(podName, podNamespace string) string {
 	return podIdentifierPrefix + "-" + podNamespace
 }
 
+// GetPodIdentifierFromBPFPinPath returns the pod identifier and direction for a
+// per-pod program pin, whose filename is "<podName>@<namespace>_handle_<direction>".
+//
+// The pod name portion can contain underscores, because GetPodIdentifier converts
+// dots in pod names to underscores - so the identifier is everything up to the
+// trailing "_handle_<direction>", not up to the first underscore.
 func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
-	pinPathName := strings.Split(pinPath, "/")
-	parts := strings.Split(pinPathName[7], "_")
+	base := path.Base(pinPath)
 
-	// Format: podIdentifier_handle_direction
-	// parts[len(parts)-2] = "handle", parts[len(parts)-1] = direction
-	podIdentifier := strings.Join(parts[:len(parts)-2], "_")
-	direction := parts[len(parts)-1]
+	for _, direction := range []string{"ingress", "egress"} {
+		progName := TC_INGRESS_PROG
+		if direction == "egress" {
+			progName = TC_EGRESS_PROG
+		}
+		suffix := "_" + progName
+		if !strings.HasSuffix(base, suffix) {
+			continue
+		}
+		podIdentifier := strings.TrimSuffix(base, suffix)
+		//
+		if podIdentifier == "" || podIdentifier == GLOBAL_PIN_PREFIX {
+			// Node-wide pin, not a pod's.
+			return "", ""
+		}
+		return podIdentifier, direction
+	}
 
-	return podIdentifier, direction
+	log().Errorf("Unrecognized program pin format %s", base)
+	return "", ""
 }
 
 func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) string {
