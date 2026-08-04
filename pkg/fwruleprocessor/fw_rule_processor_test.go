@@ -1,6 +1,7 @@
 package fwruleprocessor
 
 import (
+	"encoding/binary"
 	"net"
 	"sort"
 	"testing"
@@ -570,5 +571,186 @@ func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
 			f := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6)
 			assert.Equal(t, tt.expected, f.shouldSkipRule(tt.cidr))
 		})
+	}
+}
+
+// decodeTrieValuePorts decodes a TRIE value produced by utils.ComputeTrieValue
+// into the list of start ports it encodes. Each entry is 12 bytes:
+// protocol (4) + startPort (4) + endPort (4), little-endian. Unused trailing
+// entries have protocol == 0 and are skipped.
+func decodeTrieValuePorts(value []byte) []int {
+	var ports []int
+	for off := 0; off+12 <= len(value); off += 12 {
+		protocol := binary.LittleEndian.Uint32(value[off : off+4])
+		if protocol == 0 {
+			continue
+		}
+		startPort := binary.LittleEndian.Uint32(value[off+4 : off+8])
+		ports = append(ports, int(startPort))
+	}
+	return ports
+}
+
+func containsInt(haystack []int, needle int) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClusterPolicy_NonCanonicalCIDRCollision verifies the CNP path
+// (ComputeClusterPolicyMapEntriesFromEndpointRules) canonicalizes CIDRs before
+// using them as map keys, preventing the same LPM-collision bug that affected
+// the pod-scoped path.
+func TestClusterPolicy_NonCanonicalCIDRCollision(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port443 int32 = 443
+	var port3128 int32 = 3128
+
+	nodeIP := "192.168.0.1"
+
+	rules := []EbpfFirewallRules{
+		{
+			IPCidr:   "10.0.0.0/8",
+			L4Info:   []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+			Action:   v1alpha1.ClusterNetworkPolicyRuleActionAccept,
+			Priority: 100,
+		},
+		{
+			IPCidr:   "10.161.0.0/8", // host bits set; masks to 10.0.0.0/8
+			L4Info:   []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port3128}},
+			Action:   v1alpha1.ClusterNetworkPolicyRuleActionAccept,
+			Priority: 100,
+		},
+	}
+
+	_, canonicalNet, _ := net.ParseCIDR("10.0.0.0/8")
+	canonicalKey := string(utils.ComputeTrieKey(*canonicalNet, false))
+
+	for i := 0; i < 500; i++ {
+		got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(rules)
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+
+		value, ok := got[canonicalKey]
+		if !ok {
+			t.Fatalf("iteration %d: expected a map entry for canonical key 10.0.0.0/8", i)
+		}
+
+		ports := decodeCPETrieValuePorts(value)
+		if !containsInt(ports, int(port443)) || !containsInt(ports, int(port3128)) {
+			t.Fatalf("iteration %d: CNP 10.0.0.0/8 entry lost a port; got ports=%v (want both 443 and 3128). "+
+				"Non-canonical CIDR 10.161.0.0/8 collided with 10.0.0.0/8.", i, ports)
+		}
+	}
+}
+
+// TestFWRuleProcessor_ExceptCIDRCanonicalization verifies that an except CIDR
+// with host bits set is canonicalized so it doesn't silently overwrite the allow
+// rule for the same network prefix.
+func TestFWRuleProcessor_ExceptCIDRCanonicalization(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port443 int32 = 443
+
+	nodeIP := "192.168.0.1"
+
+	rules := []EbpfFirewallRules{
+		{
+			IPCidr: "10.0.0.0/8",
+			L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+			Except: []v1alpha1.NetworkAddress{"10.161.0.0/8"}, // host bits set; masks to 10.0.0.0/8
+		},
+	}
+
+	_, canonicalNet, _ := net.ParseCIDR("10.0.0.0/8")
+	canonicalKey := string(utils.ComputeTrieKey(*canonicalNet, false))
+
+	for i := 0; i < 500; i++ {
+		got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(rules)
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+
+		value, ok := got[canonicalKey]
+		if !ok {
+			t.Fatalf("iteration %d: expected a map entry for canonical key 10.0.0.0/8", i)
+		}
+
+		ports := decodeTrieValuePorts(value)
+		if !containsInt(ports, int(port443)) {
+			t.Fatalf("iteration %d: 10.0.0.0/8 entry lost port 443; got ports=%v. "+
+				"Except CIDR 10.161.0.0/8 (canonicalizes to 10.0.0.0/8) overwrote the allow with a DENY.", i, ports)
+		}
+	}
+}
+
+// decodeCPETrieValuePorts decodes a TRIE value produced by utils.ComputeTrieValueForCPE.
+// Each entry is 16 bytes: protocol (4) + priority (4) + startPort (4) + endPort (4).
+func decodeCPETrieValuePorts(value []byte) []int {
+	var ports []int
+	for off := 0; off+16 <= len(value); off += 16 {
+		protocol := binary.LittleEndian.Uint32(value[off : off+4])
+		if protocol == 0 {
+			continue
+		}
+		startPort := binary.LittleEndian.Uint32(value[off+8 : off+12])
+		ports = append(ports, int(startPort))
+	}
+	return ports
+}
+
+// TestFWRuleProcessor_NonCanonicalCIDRCollision reproduces the intermittent
+// enforcement bug where two ipBlock rules whose CIDRs reduce to the same
+// network after masking (e.g. 10.0.0.0/8 and 10.161.0.0/8, since /8 makes the
+// .161 octet meaningless) are keyed separately in cidrsMap by their raw string.
+// Their L4 (port) sets are never merged, and the final encode loop collapses
+// both to the identical LPM trie key and overwrites one with the other in a
+// non-deterministic (Go map iteration) order.
+//
+// A correct implementation must canonicalize the CIDR before keying, so the
+// resulting 10.0.0.0/8 entry carries the union of both port sets deterministically.
+func TestFWRuleProcessor_NonCanonicalCIDRCollision(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port443 int32 = 443   // STS / VPC endpoint traffic
+	var port3128 int32 = 3128 // proxy traffic
+
+	nodeIP := "192.168.0.1"
+
+	rules := []EbpfFirewallRules{
+		{
+			IPCidr: "10.0.0.0/8",
+			L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+		},
+		{
+			IPCidr: "10.161.0.0/8", // host bits set; masks to 10.0.0.0/8
+			L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port3128}},
+		},
+	}
+
+	_, canonicalNet, _ := net.ParseCIDR("10.0.0.0/8")
+	canonicalKey := string(utils.ComputeTrieKey(*canonicalNet, false))
+
+	// Go map iteration order is randomized, so the overwrite is probabilistic.
+	// Run many iterations to deterministically catch the bug and to prove the
+	// fix is stable across orderings.
+	for i := 0; i < 500; i++ {
+		got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(rules)
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+
+		value, ok := got[canonicalKey]
+		if !ok {
+			t.Fatalf("iteration %d: expected a map entry for canonical key 10.0.0.0/8", i)
+		}
+
+		ports := decodeTrieValuePorts(value)
+		if !containsInt(ports, int(port443)) || !containsInt(ports, int(port3128)) {
+			t.Fatalf("iteration %d: 10.0.0.0/8 entry lost a port; got ports=%v (want both 443 and 3128). "+
+				"Non-canonical CIDR 10.161.0.0/8 collided with 10.0.0.0/8 and overwrote its L4 info.", i, ports)
+		}
 	}
 }
