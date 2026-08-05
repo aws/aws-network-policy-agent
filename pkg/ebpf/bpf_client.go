@@ -188,11 +188,12 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err = ebpfClient.recoverBPFState(ebpfClient.bpfTCClient, ebpfClient.bpfSDKClient, ebpfClient.policyEndpointeBPFContext,
 		ebpfClient.globalMaps, ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired)
 	if err != nil {
-		//Log the error and move on
+		// Recovery is best-effort; the reconcile loop reprograms any pod not recovered here.
 		log().Errorf("Failed to recover the BPF state error: %v", err)
 		sdkAPIErr.WithLabelValues("RecoverBPFState").Inc()
+	} else {
+		log().Info("Successfully recovered BPF state")
 	}
-	log().Info("Successfully recovered BPF state")
 	ebpfClient.interfaceNametoIngressPinPath = interfaceNametoIngressPinPath
 	ebpfClient.interfaceNametoEgressPinPath = interfaceNametoEgressPinPath
 
@@ -411,7 +412,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		if err != nil {
 			log().Errorf("failed to recover global maps %v", err)
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, fmt.Errorf("recover global maps: %w", err)
 		}
 		log().Infof("Total no of  global maps recovered count: %d", len(recoveredGlobalMaps))
 		for globalMapName, globalMap := range recoveredGlobalMaps {
@@ -539,8 +540,15 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 			}
 		}
 
-		// Get attached progIds
+		// Return before CleanupQdiscs on enumeration failure: cleaning up without
+		// the pin paths to reattach would detach every filter and leave all pods
+		// on this node unenforced until the next reconcile.
 		interfaceToIngressProgIds, interfaceToEgressProgIds, err := bpfTCClient.GetAllAttachedProgIds()
+		if err != nil {
+			log().Errorf("Failed to get attached prog IDs, skipping probe cleanup to avoid unenforced pods: %v", err)
+			sdkAPIErr.WithLabelValues("GetAllAttachedProgIds").Inc()
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, fmt.Errorf("get attached prog ids: %w", err)
+		}
 		log().Infof("Got attached ingressprogIds: %d, egressprogIds: %d", len(interfaceToIngressProgIds), len(interfaceToEgressProgIds))
 
 		//cleanup all existing filters
@@ -575,6 +583,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		state = DEFAULT_DENY
 	}
 
+	// Continue past per-pod failures so one bad pod does not block reattaching
+	// the rest; return the failures joined rather than swallowing them.
+	var reattachErr error
+
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
@@ -582,15 +594,18 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		if err != nil {
 			log().Errorf("Failed to Attach Ingress TC probe for interface: %s podIdentifier: %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("attach ingress probe for %s (interface %s): %w", podIdentifier, interfaceName, err))
 		}
 		log().Infof("Updating ingress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, POD_STATE_MAP_KEY, state, true, false)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("ingress pod-state map for %s: %w", podIdentifier, err))
 		}
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, true, false)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("ingress cluster-policy pod-state map for %s: %w", podIdentifier, err))
 		}
 
 	}
@@ -602,20 +617,23 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		if err != nil {
 			log().Errorf("Failed to Attach Egress TC probe for interface: %s podIdentifier %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("attach egress probe for %s (interface %s): %w", podIdentifier, interfaceName, err))
 		}
 
 		log().Infof("Updating egress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, POD_STATE_MAP_KEY, state, false, true)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("egress pod-state map for %s: %w", podIdentifier, err))
 		}
 
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, false, true)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
+			reattachErr = errors.Join(reattachErr, fmt.Errorf("egress cluster-policy pod-state map for %s: %w", podIdentifier, err))
 		}
 	}
-	return nil
+	return reattachErr
 }
 
 func (l *bpfClient) GetNetworkPolicyMode() string {
