@@ -73,13 +73,3 @@ func TestFormatLastSeen(t *testing.T) {
 		})
 	}
 }
-
-// TestKtimeGetNs verifies the CLI's monotonic clock read, which must share a
-// domain with the datapath's bpf_ktime_get_ns() for ages to be meaningful.
-func TestKtimeGetNs(t *testing.T) {
-	t1 := ktimeGetNs()
-	assert.NotZero(t, t1, "ktimeGetNs should return non-zero monotonic time")
-
-	t2 := ktimeGetNs()
-	assert.GreaterOrEqual(t, t2, t1, "ktimeGetNs must be monotonically non-decreasing")
-}

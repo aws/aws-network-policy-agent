@@ -17,17 +17,6 @@ var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
 
-// ktimeGetNs returns the current CLOCK_MONOTONIC time in nanoseconds,
-// matching bpf_ktime_get_ns() used by the datapath to stamp last_seen.
-func ktimeGetNs() uint64 {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC will skip eviction this cycle: %v", err)
-		return 0
-	}
-	return uint64(ts.Nano())
-}
-
 // entryActiveFromRead is the pure delete-decision predicate, split out for
 // unit testing without a live BPF map. An entry is "active" (must NOT be
 // deleted) if the re-read failed (fail-safe) or the datapath refreshed its
@@ -45,6 +34,9 @@ func entryActiveFromRead(cur utils.ConntrackVal, readErr error, gcStart uint64) 
 // On read failure the entry is assumed active (fail-safe: don't delete).
 func (c *conntrackClient) isEntryActive(key unsafe.Pointer, gcStart uint64) bool {
 	var cur utils.ConntrackVal
+	// The datapath may be storing last_seen while we copy the value out. Aligned
+	// u64 stores are atomic on x86-64/arm64, so the worst case is one stale GC
+	// decision that self-heals on the next cycle.
 	err := c.conntrackMap.GetMapEntry(uintptr(key), uintptr(unsafe.Pointer(&cur)))
 	if err != nil {
 		log().Debugf("Conntrack GC: re-read failed, keeping entry: %v", err)
@@ -146,9 +138,11 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
-		gcStart := ktimeGetNs()
-		if gcStart == 0 {
-			// Clock read failed; skip this cycle to avoid mis-deleting active entries
+		gcStart, err := utils.KtimeGetNs()
+		if err != nil {
+			// Without a reference time every entry looks stale, so skip this cycle
+			// rather than risk deleting active entries.
+			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
 			c.hydratelocalConntrack = true
 			return
 		}
@@ -234,7 +228,7 @@ func (c *conntrackClient) CleanupConntrackMap() {
 				// (handles port-reuse race: a new connection refreshes last_seen).
 				expiredFlow := localConntrackEntry
 				if c.isEntryActive(unsafe.Pointer(&expiredFlow), gcStart) {
-					log().Infof("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+					log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
 						utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
 						utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
 						expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
@@ -316,8 +310,11 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
-		gcStart := ktimeGetNs()
-		if gcStart == 0 {
+		gcStart, err := utils.KtimeGetNs()
+		if err != nil {
+			// Without a reference time every entry looks stale, so skip this cycle
+			// rather than risk deleting active entries.
+			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
 			c.hydratelocalConntrack = true
 			return
 		}
@@ -405,7 +402,7 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 				expiredFlow := localConntrackEntry
 				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 				if c.isEntryActive(unsafe.Pointer(&ceByteSlice[0]), gcStart) {
-					log().Infof("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+					log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
 						utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
 						utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
 						expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
