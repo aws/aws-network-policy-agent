@@ -21,19 +21,7 @@ type PodState struct {
 	State uint8
 }
 
-// ktimeGetNs returns the current CLOCK_MONOTONIC time in nanoseconds — the same
-// clock the datapath stamps last_seen with via bpf_ktime_get_ns(), so the two
-// can be subtracted directly.
-func ktimeGetNs() uint64 {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		return 0
-	}
-	return uint64(ts.Nano())
-}
-
-// formatLastSeen renders a raw last_seen timestamp as a human-readable "how long
-// ago the datapath last saw a packet on this flow". now must be a CLOCK_MONOTONIC
+// formatLastSeen renders last_seen as an age. now must be a CLOCK_MONOTONIC
 // reading taken once per dump so every entry is aged against the same instant.
 func formatLastSeen(lastSeen, now uint64) string {
 	if lastSeen == 0 {
@@ -236,7 +224,12 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 		iterKey := utils.ConntrackKey{}
 		iterNextKey := utils.ConntrackKey{}
 		// Read once so every entry in this dump is aged against the same instant.
-		dumpNow := ktimeGetNs()
+		// A failure here only costs the age column, so report it and carry on
+		// rather than failing the whole dump.
+		dumpNow, clockErr := utils.KtimeGetNs()
+		if clockErr != nil {
+			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)
+		}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
 			if errors.Is(err, unix.ENOENT) {
@@ -408,7 +401,12 @@ func MapWalkv6(mapID int) error {
 		nextbyteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
 
 		// Read once so every entry in this dump is aged against the same instant.
-		dumpNow := ktimeGetNs()
+		// A failure here only costs the age column, so report it and carry on
+		// rather than failing the whole dump.
+		dumpNow, clockErr := utils.KtimeGetNs()
+		if clockErr != nil {
+			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)
+		}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID)
 		if err != nil {
 			return fmt.Errorf("Unable to get First key: %v", err)

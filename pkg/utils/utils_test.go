@@ -891,3 +891,16 @@ func TestIsMissingFilterError(t *testing.T) {
 		})
 	}
 }
+
+// TestKtimeGetNs verifies the shared monotonic clock read used by both the GC and
+// the CLI. It must share a domain with the datapath's bpf_ktime_get_ns() for
+// LastSeen ages to mean anything.
+func TestKtimeGetNs(t *testing.T) {
+	t1, err := KtimeGetNs()
+	assert.NoError(t, err)
+	assert.NotZero(t, t1, "KtimeGetNs should return non-zero monotonic time")
+
+	t2, err := KtimeGetNs()
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, t2, t1, "KtimeGetNs must be monotonically non-decreasing")
+}
