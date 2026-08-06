@@ -110,6 +110,7 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
 	ClearDeletedPod(podNamespacedName string)
+	HasBPFContext(podIdentifier string) bool
 }
 
 type BPFContext struct {
@@ -1324,6 +1325,15 @@ func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
 		}
 	}
 	return firstPodInPodIdentifier
+}
+
+// HasBPFContext reports whether an eBPF context is currently registered for the given
+// podIdentifier. The context is created when probes are attached and removed once the last
+// pod of the identifier leaves the node, so callers can use this to skip map updates that
+// would otherwise fail with "no bpf context registered".
+func (l *bpfClient) HasBPFContext(podIdentifier string) bool {
+	_, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	return ok
 }
 
 func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace string) (bool, error) {

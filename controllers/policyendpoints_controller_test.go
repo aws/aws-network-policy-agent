@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -1554,4 +1556,583 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 	assert.NotContains(t, mockBpf.LastEgressRules, catchAll)
 	assert.NotEmpty(t, mockBpf.LastIngressRules)
 	assert.NotEmpty(t, mockBpf.LastEgressRules)
+}
+
+// Shared fixture for the selector-narrowing scenario (the design's bug
+// condition). Used by TestCleanupPodStaleDataplane and by the task 3.4
+// fix-checking tests below so every variant exercises the exact same setup and
+// only the MockBpfClient configuration differs.
+const (
+	narrowingNamespace     = "my-namespace"
+	narrowingNodeIP        = "1.1.1.1"
+	narrowingParentNP      = "allow-all-egress"
+	narrowingPodName       = "deployment1rs-1"
+	narrowingPodIdentifier = "deployment1rs@my-namespace"
+)
+
+// runSelectorNarrowingReconcile drives one Reconcile over the selector-narrowing
+// scenario: the PolicyEndpoint no longer selects any local pod
+// (PodSelectorEndpoints is empty) while the controller caches still hold the old
+// pod and its podIdentifier. deriveTargetPodsForParentNP() drops the
+// podIdentifier from podIdentifierToPolicyEndpointMap before cleanupPod() runs,
+// so cleanupPod() takes the "no policies remain" path.
+//
+// mockBpf is supplied by the caller so each test can configure
+// PodIdentifiersWithoutBPFContext / NetworkPolicyMode and then assert on the
+// recorded calls.
+func runSelectorNarrowingReconcile(t *testing.T, mockBpf *ebpf.MockBpfClient) (*PolicyEndpointsReconciler, error) {
+	t.Helper()
+
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	r := NewPolicyEndpointsReconciler(mockClient, narrowingNodeIP, mockBpf, false)
+
+	// PolicyEndpoint after the podSelector narrowing: no local pod is selected
+	// anymore, so PodSelectorEndpoints is empty.
+	narrowedPE := getPolicyEndpoint(narrowingParentNP, narrowingNamespace, []policyendpoint.PodEndpoint{})
+
+	stalePod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: narrowingPodName, Namespace: narrowingNamespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	// Controller caches still reflect the pre-narrowing state.
+	r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(narrowedPE.Name, narrowingNamespace),
+		[]npatypes.Pod{stalePod})
+	r.podIdentifierToPolicyEndpointMap.Store(narrowingPodIdentifier, []string{narrowedPE.Name})
+	r.networkPolicyToPodIdentifierMap.Store(narrowingParentNP, []string{narrowingPodIdentifier})
+
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
+		Name:      narrowedPE.GetName(),
+		Namespace: narrowedPE.GetNamespace(),
+	}, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*currentPE = narrowedPE
+			return nil
+		},
+	).AnyTimes()
+
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{
+				Items: []policyendpoint.PolicyEndpoint{narrowedPE},
+			}
+			return nil
+		},
+	).AnyTimes()
+
+	_, err := r.Reconcile(context.TODO(), controllerruntime.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      narrowedPE.GetName(),
+			Namespace: narrowedPE.GetNamespace(),
+		},
+	})
+	return r, err
+}
+
+// TestCleanupPodStaleDataplane reproduces the selector-narrowing scenario: a
+// NetworkPolicy's podSelector is narrowed so the local pod is no longer selected
+// (PolicyEndpoint.Spec.PodSelectorEndpoints becomes empty) while the controller
+// caches still hold the pod and its podIdentifier.
+//
+// This is the bug condition from the design doc:
+//
+//	NOT exists(podIdentifierToPolicyEndpointMap[podIdentifier]) AND ebpfClient.HasBPFContext(podIdentifier) == true
+//
+// The assertions below encode the EXPECTED behavior (design `expectedBehavior`):
+// the dataplane is cleaned to the mode's default state with empty rule sets.
+//
+// **Validates: Requirements 1.1, 1.2, 1.3, 1.4**
+func TestCleanupPodStaleDataplane(t *testing.T) {
+	podIdentifier := narrowingPodIdentifier
+
+	mockBpf := &ebpf.MockBpfClient{}
+	r, err := runSelectorNarrowingReconcile(t, mockBpf)
+
+	assert.NoError(t, err)
+
+	// Bug condition precondition 1: the control plane cache no longer tracks any
+	// PolicyEndpoint for this podIdentifier.
+	_, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+	assert.False(t, ok, "podIdentifierToPolicyEndpointMap should no longer track the deselected podIdentifier")
+	assert.Equal(t, 0, sizeOfSyncMap(&r.networkPolicyToPodIdentifierMap))
+
+	// Bug condition precondition 2: the dataplane is still programmed for it.
+	assert.True(t, mockBpf.HasBPFContext(podIdentifier))
+
+	// Expected behavior: a full map update with empty rule sets, pod state reset
+	// to the standard-mode default (DEFAULT_ALLOW).
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps",
+		"stale dataplane must be cleared via UpdateEbpfMaps when no policies remain")
+	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps",
+		"pod state must be reset when no policies remain")
+	assert.Equal(t, ebpf.POD_STATE_MAP_KEY, mockBpf.LastPodStateKey)
+	assert.Equal(t, ebpf.DEFAULT_ALLOW, mockBpf.LastPodState)
+	assert.Empty(t, mockBpf.LastIngressRules)
+	assert.Empty(t, mockBpf.LastEgressRules)
+
+	// Task 3.4 fix checking, standard mode. Companion assertions that pin down
+	// HOW the default state was reached: the no-policies-remain branch must reuse
+	// the existing updateeBPFMaps() path end to end, in order, and nothing else
+	// may touch the bpf client during this reconcile.
+	t.Run("reuses the full updateeBPFMaps sequence", func(t *testing.T) {
+		assert.Equal(t,
+			[]string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+			mockBpf.CallLog)
+	})
+
+	// DEFAULT_ALLOW above is only meaningful if the mode under test really is
+	// standard - otherwise the assertion would pass vacuously.
+	t.Run("standard mode drives the DEFAULT_ALLOW selection", func(t *testing.T) {
+		assert.Equal(t, "standard", r.GeteBPFClient().GetNetworkPolicyMode())
+		assert.False(t, utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()))
+	})
+}
+
+// TestCleanupPodStaleDataplaneWithoutBPFContextIsNoOp is task 3.4 test 2: the
+// same selector-narrowing scenario, but the pod no longer holds an eBPF context
+// (it is already gone from the node). The no-policies-remain branch must bail out
+// before touching any map and must not report an error.
+//
+// **Validates: Requirements 2.4**
+func TestCleanupPodStaleDataplaneWithoutBPFContextIsNoOp(t *testing.T) {
+	mockBpf := &ebpf.MockBpfClient{
+		PodIdentifiersWithoutBPFContext: map[string]bool{narrowingPodIdentifier: true},
+	}
+	r, err := runSelectorNarrowingReconcile(t, mockBpf)
+
+	assert.NoError(t, err)
+
+	// Same control-plane precondition as TestCleanupPodStaleDataplane: the cache
+	// entry is gone. Only the dataplane side of the bug condition differs.
+	_, ok := r.podIdentifierToPolicyEndpointMap.Load(narrowingPodIdentifier)
+	assert.False(t, ok, "podIdentifierToPolicyEndpointMap should no longer track the deselected podIdentifier")
+	assert.False(t, mockBpf.HasBPFContext(narrowingPodIdentifier))
+
+	assert.NotContains(t, mockBpf.CallLog, "UpdateEbpfMaps",
+		"no map update expected when the pod has no eBPF context")
+	assert.NotContains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps",
+		"no pod state update expected when the pod has no eBPF context")
+	assert.Empty(t, mockBpf.CallLog, "cleanup must be a complete no-op")
+}
+
+// TestCleanupPodStaleDataplaneStrictMode is task 3.4 test 3: identical to
+// TestCleanupPodStaleDataplane except the agent runs in strict mode, so the
+// stale dataplane must be reset to DEFAULT_DENY instead of DEFAULT_ALLOW.
+//
+// **Validates: Requirements 2.1, 2.2, 2.5**
+func TestCleanupPodStaleDataplaneStrictMode(t *testing.T) {
+	mockBpf := &ebpf.MockBpfClient{NetworkPolicyMode: "strict"}
+	r, err := runSelectorNarrowingReconcile(t, mockBpf)
+
+	assert.NoError(t, err)
+	assert.True(t, utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()))
+
+	_, ok := r.podIdentifierToPolicyEndpointMap.Load(narrowingPodIdentifier)
+	assert.False(t, ok, "podIdentifierToPolicyEndpointMap should no longer track the deselected podIdentifier")
+	assert.Equal(t, 0, sizeOfSyncMap(&r.networkPolicyToPodIdentifierMap))
+	assert.True(t, mockBpf.HasBPFContext(narrowingPodIdentifier))
+
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps",
+		"stale dataplane must be cleared via UpdateEbpfMaps when no policies remain")
+	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps",
+		"pod state must be reset when no policies remain")
+	assert.Equal(t, ebpf.POD_STATE_MAP_KEY, mockBpf.LastPodStateKey)
+	assert.Equal(t, ebpf.DEFAULT_DENY, mockBpf.LastPodState,
+		"strict mode must fall back to DEFAULT_DENY, not DEFAULT_ALLOW")
+	assert.Empty(t, mockBpf.LastIngressRules)
+	assert.Empty(t, mockBpf.LastEgressRules)
+}
+
+// --- Property 2: Preservation ------------------------------------------------
+//
+// Baseline observed on UNFIXED code. These assertions are a snapshot of the
+// current behavior of cleanupPod() for inputs where isBugCondition(X) is FALSE,
+// i.e. everything the fix in task 3.3 must leave untouched:
+//
+//	(a) podIdentifier IS still present in podIdentifierToPolicyEndpointMap
+//	    -> rules are re-derived from the remaining PolicyEndpoints, a
+//	       0.0.0.0/0 catch-all is appended to whichever direction has no
+//	       active policy, and pod state stays at POLICIES_APPLIED.
+//	(b) podIdentifier is ABSENT from the map AND HasBPFContext() == false
+//	    -> complete no-op: err == nil and CallLog records no map updates.
+//
+// Go has no built-in property-based testing framework, so the property is
+// approximated by exhaustive combinatorial enumeration over the input space:
+//
+//	remaining PE count {1, 2} x isolation {none, ingress-only, egress-only, both}
+//	x HasBPFContext {true, false}
+//
+// The HasBPFContext dimension is a structural invariant check for case (a):
+// the value must not influence the outcome, because the guard in cleanupPod()
+// takes the cache-present path before HasBPFContext() is ever consulted.
+
+// peIsolationShape describes how a remaining PolicyEndpoint is built for the
+// preservation matrix.
+type peIsolationShape string
+
+const (
+	// shapeNone: rules on both directions, no PodIsolation.
+	shapeNone peIsolationShape = "none"
+	// shapeIngressOnly: ingress isolation only, no rules.
+	shapeIngressOnly peIsolationShape = "ingress-only"
+	// shapeEgressOnly: egress isolation only, no rules.
+	shapeEgressOnly peIsolationShape = "egress-only"
+	// shapeBoth: ingress and egress isolation, no rules.
+	shapeBoth peIsolationShape = "both"
+)
+
+// buildRemainingPE builds one of the four isolation shapes above.
+func buildRemainingPE(name, parentNP, namespace string, shape peIsolationShape) policyendpoint.PolicyEndpoint {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+
+	pe := policyendpoint.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: policyendpoint.PolicyEndpointSpec{
+			PodSelector: &metav1.LabelSelector{},
+			PolicyRef:   policyendpoint.PolicyReference{Name: parentNP, Namespace: namespace},
+		},
+	}
+
+	switch shape {
+	case shapeNone:
+		pe.Spec.Ingress = []policyendpoint.EndpointInfo{
+			{CIDR: "10.0.0.0/24", Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}}},
+		}
+		pe.Spec.Egress = []policyendpoint.EndpointInfo{
+			{CIDR: "10.0.1.0/24", Ports: []policyendpoint.Port{{Port: &port80, Protocol: &protocolTCP}}},
+		}
+	case shapeIngressOnly:
+		pe.Spec.PodIsolation = []networking.PolicyType{networking.PolicyTypeIngress}
+	case shapeEgressOnly:
+		pe.Spec.PodIsolation = []networking.PolicyType{networking.PolicyTypeEgress}
+	case shapeBoth:
+		pe.Spec.PodIsolation = []networking.PolicyType{networking.PolicyTypeIngress, networking.PolicyTypeEgress}
+	}
+	return pe
+}
+
+type preservationCombo struct {
+	peCount       int
+	shape         peIsolationShape
+	hasBPFContext bool
+}
+
+// preservationCombos enumerates the full 2 x 4 x 2 input space.
+func preservationCombos() []preservationCombo {
+	var combos []preservationCombo
+	for _, peCount := range []int{1, 2} {
+		for _, shape := range []peIsolationShape{shapeNone, shapeIngressOnly, shapeEgressOnly, shapeBoth} {
+			for _, hasBPFContext := range []bool{true, false} {
+				combos = append(combos, preservationCombo{peCount: peCount, shape: shape, hasBPFContext: hasBPFContext})
+			}
+		}
+	}
+	return combos
+}
+
+// wantRuleCounts returns the observed ingress/egress rule-set sizes and whether
+// each direction carries the 0.0.0.0/0 catch-all, for a given combo.
+func wantRuleCounts(c preservationCombo) (wantIngress, wantEgress int, ingressCatchAll, egressCatchAll bool) {
+	switch c.shape {
+	case shapeNone:
+		// One ingress and one egress rule per remaining PE; both directions
+		// active so no catch-all is appended.
+		return c.peCount, c.peCount, false, false
+	case shapeIngressOnly:
+		// Ingress isolated -> no ingress rules, no ingress catch-all.
+		// Egress has no active policy -> catch-all appended.
+		return 0, 1, false, true
+	case shapeEgressOnly:
+		return 1, 0, true, false
+	default: // shapeBoth
+		// Both directions isolated -> both rule sets stay empty.
+		return 0, 0, false, false
+	}
+}
+
+// TestCleanupPodPreservationProperty freezes the baseline behavior of
+// cleanupPod() for all non-bug-condition inputs (Property 2: Preservation).
+//
+// **Validates: Requirements 2.4, 3.1, 3.2, 3.3, 3.4, 3.6, 3.7, 3.8**
+func TestCleanupPodPreservationProperty(t *testing.T) {
+	namespace := "my-namespace"
+	nodeIP := "1.1.1.1"
+	podIdentifier := "deployment1rs@my-namespace"
+	cleanedUpPE := "cleaned-np-abcd"
+	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	// Case (a): the podIdentifier is still tracked in
+	// podIdentifierToPolicyEndpointMap. Rules are re-derived, catch-all entries
+	// are appended where a direction has no active policy, and pod state stays
+	// at POLICIES_APPLIED - independent of HasBPFContext.
+	for _, combo := range preservationCombos() {
+		c := combo
+		name := fmt.Sprintf("cache-present/pe=%d/isolation=%s/hasBPFContext=%t", c.peCount, c.shape, c.hasBPFContext)
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockClient := mock_client.NewMockClient(ctrl)
+			mockBpf := &ebpf.MockBpfClient{}
+			if !c.hasBPFContext {
+				mockBpf.PodIdentifiersWithoutBPFContext = map[string]bool{podIdentifier: true}
+			}
+			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+			var remainingPEs []string
+			for i := 0; i < c.peCount; i++ {
+				parentNP := fmt.Sprintf("remaining-%d", i)
+				peName := parentNP + "-abcd"
+				pe := buildRemainingPE(peName, parentNP, namespace, c.shape)
+				remainingPEs = append(remainingPEs, peName)
+
+				mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: peName, Namespace: namespace}, gomock.Any()).DoAndReturn(
+					func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+						*currentPE = pe
+						return nil
+					},
+				).AnyTimes()
+			}
+			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, remainingPEs)
+
+			err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+			assert.NoError(t, err)
+
+			// Observed baseline: the existing update path runs end to end.
+			assert.Equal(t,
+				[]string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+				mockBpf.CallLog)
+			assert.Equal(t, ebpf.POD_STATE_MAP_KEY, mockBpf.LastPodStateKey)
+			assert.Equal(t, ebpf.POLICIES_APPLIED, mockBpf.LastPodState,
+				"pod state must stay at POLICIES_APPLIED while any PolicyEndpoint remains")
+
+			wantIngress, wantEgress, ingressCatchAll, egressCatchAll := wantRuleCounts(c)
+			assert.Len(t, mockBpf.LastIngressRules, wantIngress)
+			assert.Len(t, mockBpf.LastEgressRules, wantEgress)
+			if ingressCatchAll {
+				assert.Contains(t, mockBpf.LastIngressRules, catchAll)
+			} else {
+				assert.NotContains(t, mockBpf.LastIngressRules, catchAll)
+			}
+			if egressCatchAll {
+				assert.Contains(t, mockBpf.LastEgressRules, catchAll)
+			} else {
+				assert.NotContains(t, mockBpf.LastEgressRules, catchAll)
+			}
+
+			// The podIdentifier entry itself is untouched by cleanupPod().
+			val, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+			assert.True(t, ok)
+			assert.Equal(t, remainingPEs, val.([]string))
+		})
+	}
+
+	// Case (b): the podIdentifier is absent from the map AND the pod no longer
+	// holds an eBPF context. Observed baseline is a complete no-op.
+	// HasBPFContext == true with an absent podIdentifier is the bug condition
+	// (Property 1) and is deliberately excluded here.
+	for _, combo := range preservationCombos() {
+		c := combo
+		if c.hasBPFContext {
+			continue
+		}
+		name := fmt.Sprintf("cache-absent-no-bpf-context/pe=%d/isolation=%s", c.peCount, c.shape)
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockClient := mock_client.NewMockClient(ctrl)
+			mockBpf := &ebpf.MockBpfClient{
+				PodIdentifiersWithoutBPFContext: map[string]bool{podIdentifier: true},
+			}
+			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+			// Nothing is stored in podIdentifierToPolicyEndpointMap: the entry
+			// was already removed by deriveTargetPodsForParentNP().
+			mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+			err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+			assert.NoError(t, err)
+
+			assert.Empty(t, mockBpf.CallLog, "no-op expected when the pod has no eBPF context")
+			assert.NotContains(t, mockBpf.CallLog, "UpdateEbpfMaps")
+			assert.NotContains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
+			assert.False(t, mockBpf.HasBPFContext(podIdentifier))
+		})
+	}
+
+	// Mock default-mode regression from the controller's point of view: an
+	// unconfigured MockBpfClient still reports standard mode, so the
+	// DEFAULT_ALLOW / DEFAULT_DENY selection in cleanupPod() keeps its current
+	// behavior. The mock-level equivalent lives in
+	// pkg/ebpf/bpf_client_mock_behavior_test.go:TestMockBpfClientGetNetworkPolicyModeBehavior.
+	t.Run("mock defaults to standard network policy mode", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		r := NewPolicyEndpointsReconciler(mock_client.NewMockClient(ctrl), nodeIP, &ebpf.MockBpfClient{}, false)
+		assert.Equal(t, "standard", r.GeteBPFClient().GetNetworkPolicyMode())
+		assert.False(t, utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()))
+	})
+}
+
+// --- Task 3.5: property-based / combinatorial enumeration --------------------
+//
+// Property 1 is enumerated over the network-policy-mode dimension below.
+// Property 2 (preservation) is already enumerated exhaustively over
+// remaining PE count {1, 2} x isolation {none, ingress-only, egress-only, both}
+// x HasBPFContext {true, false} by TestCleanupPodPreservationProperty above, so
+// it is not repeated here. What that matrix does NOT reach is the
+// cache-present-but-no-active-policy path, which is the only input where the
+// original inner branch and the new no-policies-remain branch produce the same
+// pod state - that gap is closed by
+// TestCleanupPodGuardNeverEntersNoPoliciesRemainBranch below.
+
+// networkPolicyModeCombos enumerates the mode dimension of Property 1. The
+// mixed casing pins down that utils.IsStrictMode() is case-insensitive, and the
+// empty value pins down the mock's fallback to standard mode.
+func networkPolicyModeCombos() []string {
+	return []string{"", "standard", "Strict", "strict"}
+}
+
+// wantDefaultPodState derives the expected pod state from utils.IsStrictMode()
+// itself rather than from a per-string lookup table, so the expectation cannot
+// drift away from the production decision the fix makes.
+func wantDefaultPodState(effectiveMode string) int {
+	if utils.IsStrictMode(effectiveMode) {
+		return ebpf.DEFAULT_DENY
+	}
+	return ebpf.DEFAULT_ALLOW
+}
+
+// TestCleanupPodStaleDataplaneModeProperty enumerates Property 1 (bug
+// condition) over NetworkPolicyMode ∈ {"", "standard", "Strict", "strict"} with
+// HasBPFContext == true. For every mode the stale dataplane must be reset to the
+// state utils.IsStrictMode() dictates, with empty ingress/egress rule sets.
+//
+// **Validates: Requirements 2.2, 2.5**
+func TestCleanupPodStaleDataplaneModeProperty(t *testing.T) {
+	for _, mode := range networkPolicyModeCombos() {
+		mode := mode
+		t.Run(fmt.Sprintf("mode=%q", mode), func(t *testing.T) {
+			mockBpf := &ebpf.MockBpfClient{NetworkPolicyMode: mode}
+			r, err := runSelectorNarrowingReconcile(t, mockBpf)
+			assert.NoError(t, err)
+
+			// Bug condition holds: cache entry gone, dataplane still programmed.
+			_, ok := r.podIdentifierToPolicyEndpointMap.Load(narrowingPodIdentifier)
+			assert.False(t, ok, "podIdentifierToPolicyEndpointMap should no longer track the deselected podIdentifier")
+			assert.True(t, mockBpf.HasBPFContext(narrowingPodIdentifier))
+
+			effectiveMode := r.GeteBPFClient().GetNetworkPolicyMode()
+			wantState := wantDefaultPodState(effectiveMode)
+
+			assert.Equal(t,
+				[]string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+				mockBpf.CallLog)
+			assert.Equal(t, ebpf.POD_STATE_MAP_KEY, mockBpf.LastPodStateKey)
+			assert.Equal(t, wantState, mockBpf.LastPodState,
+				"pod state must follow utils.IsStrictMode(%q)", effectiveMode)
+			assert.Empty(t, mockBpf.LastIngressRules)
+			assert.Empty(t, mockBpf.LastEgressRules)
+		})
+	}
+}
+
+// TestCleanupPodGuardNeverEntersNoPoliciesRemainBranch is the structural guard
+// invariant: whenever the podIdentifier IS present in
+// podIdentifierToPolicyEndpointMap, the new no-policies-remain branch must never
+// run, no matter what HasBPFContext() would answer.
+//
+// The remaining PolicyEndpoint here carries no rules and no PodIsolation, so the
+// original inner branch also lands on DEFAULT_ALLOW / DEFAULT_DENY. Pod state
+// alone therefore cannot tell the two paths apart - HasBPFContext == false is
+// what discriminates them: the new branch would short-circuit to a complete
+// no-op, while the cache-present path must still push a full map update. The
+// combos where remaining policies keep the pod at POLICIES_APPLIED are already
+// enumerated by TestCleanupPodPreservationProperty.
+//
+// **Validates: Requirements 3.1, 3.2, 3.8**
+func TestCleanupPodGuardNeverEntersNoPoliciesRemainBranch(t *testing.T) {
+	namespace := "my-namespace"
+	nodeIP := "1.1.1.1"
+	podIdentifier := "deployment1rs@my-namespace"
+	cleanedUpPE := "cleaned-np-abcd"
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	for _, peCount := range []int{1, 2} {
+		for _, hasBPFContext := range []bool{true, false} {
+			for _, mode := range networkPolicyModeCombos() {
+				peCount, hasBPFContext, mode := peCount, hasBPFContext, mode
+				name := fmt.Sprintf("pe=%d/hasBPFContext=%t/mode=%q", peCount, hasBPFContext, mode)
+				t.Run(name, func(t *testing.T) {
+					ctrl := gomock.NewController(t)
+					defer ctrl.Finish()
+
+					mockClient := mock_client.NewMockClient(ctrl)
+					mockBpf := &ebpf.MockBpfClient{NetworkPolicyMode: mode}
+					if !hasBPFContext {
+						mockBpf.PodIdentifiersWithoutBPFContext = map[string]bool{podIdentifier: true}
+					}
+					r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+					var remainingPEs []string
+					for i := 0; i < peCount; i++ {
+						parentNP := fmt.Sprintf("empty-%d", i)
+						peName := parentNP + "-abcd"
+						// No rules and no PodIsolation: the cache-present path
+						// resolves to "no active policies".
+						pe := policyendpoint.PolicyEndpoint{
+							ObjectMeta: metav1.ObjectMeta{Name: peName, Namespace: namespace},
+							Spec: policyendpoint.PolicyEndpointSpec{
+								PodSelector: &metav1.LabelSelector{},
+								PolicyRef:   policyendpoint.PolicyReference{Name: parentNP, Namespace: namespace},
+							},
+						}
+						remainingPEs = append(remainingPEs, peName)
+
+						mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: peName, Namespace: namespace}, gomock.Any()).DoAndReturn(
+							func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+								*currentPE = pe
+								return nil
+							},
+						).AnyTimes()
+					}
+					r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, remainingPEs)
+
+					err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+					assert.NoError(t, err)
+
+					// Path signature of the cache-present branch: the full update
+					// sequence ran even when HasBPFContext() is false, so the new
+					// no-policies-remain branch was never entered.
+					assert.Equal(t,
+						[]string{"UpdateEbpfMaps", "UpdatePodStateEbpfMaps", "CreatePodStateEbpfEntryIfNotExists"},
+						mockBpf.CallLog)
+					assert.Equal(t, ebpf.POD_STATE_MAP_KEY, mockBpf.LastPodStateKey)
+					assert.Equal(t, wantDefaultPodState(r.GeteBPFClient().GetNetworkPolicyMode()), mockBpf.LastPodState)
+					assert.Empty(t, mockBpf.LastIngressRules)
+					assert.Empty(t, mockBpf.LastEgressRules)
+
+					// The cache entry itself is untouched by cleanupPod().
+					val, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+					assert.True(t, ok)
+					assert.Equal(t, remainingPEs, val.([]string))
+				})
+			}
+		}
+	}
 }

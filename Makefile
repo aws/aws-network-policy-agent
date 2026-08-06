@@ -34,6 +34,16 @@ ENVTEST_K8S_VERSION = 1.25.0
 # Skip installing the latest managed addon while running cyclonus test
 SKIP_ADDON_INSTALLATION ?= "false"
 
+# Defaults for the integration test suite flags (see test/framework/options.go).
+KUBECONFIG ?= $(HOME)/.kube/config
+TEST_IMAGE_REGISTRY ?= registry.k8s.io
+AWS_REGION ?= us-west-2
+# IP family for the test suite. Derived from IP_FAMILY rather than defaulting it, so
+# targets that pass IP_FAMILY through to scripts keep their existing behaviour.
+TEST_IP_FAMILY = $(if $(IP_FAMILY),$(IP_FAMILY),IPv4)
+# Ginkgo focus regex matching only the PolicyEndpoint selector-narrowing specs.
+SELECTOR_NARROWING_FOCUS ?= PolicyEndpoint Selector Narrowing
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -318,6 +328,21 @@ cleanup-ebpf-sdk-override:
 run-cyclonus-test: ## Runs cyclonus tests on an existing cluster. Call with CLUSTER_NAME=<name of your cluster>, SKIP_ADDON_INSTALLATION=<true/false> to execute cyclonus test
 ifdef CLUSTER_NAME
 	CLUSTER_NAME=$(CLUSTER_NAME) SKIP_ADDON_INSTALLATION=$(SKIP_ADDON_INSTALLATION) ./scripts/run-cyclonus-tests.sh
+else
+	@echo 'Pass CLUSTER_NAME parameter'
+endif
+
+.PHONY: test-selector-narrowing
+test-selector-narrowing: ## Runs only the PolicyEndpoint selector-narrowing integration specs against an existing cluster. Call with CLUSTER_NAME=<name of your cluster>, optionally KUBECONFIG=<path>, TEST_IMAGE_REGISTRY=<registry>, AWS_REGION=<region>, IP_FAMILY=<IPv4|IPv6>
+ifdef CLUSTER_NAME
+	CGO_ENABLED=0 ginkgo -v -timeout 30m --no-color --fail-on-pending \
+		--focus='$(SELECTOR_NARROWING_FOCUS)' \
+		./test/integration/policy -- \
+		--cluster-kubeconfig=$(KUBECONFIG) \
+		--cluster-name=$(CLUSTER_NAME) \
+		--aws-region=$(AWS_REGION) \
+		--test-image-registry=$(TEST_IMAGE_REGISTRY) \
+		--ip-family=$(TEST_IP_FAMILY)
 else
 	@echo 'Pass CLUSTER_NAME parameter'
 endif
