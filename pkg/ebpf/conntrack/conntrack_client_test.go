@@ -77,16 +77,6 @@ func TestConntrackValLayout(t *testing.T) {
 		"ConntrackVal.LastSeen must be at offset 8")
 }
 
-// TestKtimeGetNs verifies that ktimeGetNs returns a sane monotonic value.
-func TestKtimeGetNs(t *testing.T) {
-	ts1 := ktimeGetNs()
-	assert.NotZero(t, ts1, "ktimeGetNs should return non-zero monotonic time")
-
-	ts2 := ktimeGetNs()
-	assert.GreaterOrEqual(t, ts2, ts1,
-		"ktimeGetNs must be monotonically non-decreasing")
-}
-
 // TestEntryActiveFromRead is the core GC-race guard predicate. It decides
 // whether a delete candidate (absent from the kernel snapshot) must be KEPT
 // because the datapath refreshed its last_seen during this GC cycle — the

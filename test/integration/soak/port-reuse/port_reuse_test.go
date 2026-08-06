@@ -5,6 +5,7 @@ package soak
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -43,14 +44,12 @@ rather than a probe for one specific code path. If a DENY appears, the NPA log
 carries the 5-tuple and the surrounding cleanup trace needed to debug it.
 
 The log-reader pod tails DENY events to its own stdout and the test reads them with
-PodLogs, which proved far more reliable than exec'ing a grep under this workload. A
-read can still fail, so a failed read is a skipped poll and a pass additionally
-requires minPollCoverage of the polls to have actually read the log — a run that was
+PodLogs. A read can fail, so a failed read is a skipped poll and a pass additionally
+requires minPollCoverage of polls to have actually read the log — a run that was
 mostly blind fails instead of reporting success.
 
-It runs the full soakDuration with no early exit, so a slow-developing problem has
-time to appear. Guarded by the `soak` build tag and excluded from the regular
-integration cadence; see the package doc in port_reuse_suite_test.go.
+Guarded by the `soak` build tag and excluded from the regular integration cadence;
+see the package doc in port_reuse_suite_test.go.
 
 Assertions:
   - LIVENESS (fail fast): reuser is churning AND cleanup is running. A silent
@@ -67,19 +66,11 @@ const (
 	soakWarmup       = 90 * time.Second
 	npaLogPath       = "/host/var/log/aws-routed-eni/network-policy-agent.log"
 
-	// 3 replicas x 4 threads at ~250 conn/sec each: ~1k/sec per pod, ~3k/sec
-	// aggregate. Each replica cycles its own ~28k ephemeral-port range independently
-	// (itertools.cycle is per-process), so a given port comes back around about
-	// every 28s per pod.
-	//
-	// A flow is only at risk while the same ephemeral port can be reused between the
-	// userspace cleanup taking its kernel conntrack snapshot and walking the eBPF
-	// map, so the port range has to cycle on a timescale comparable to that span.
-	// These are the parameters from the reported workload, matched verbatim (3
-	// replicas, 4 threads, 4ms), so the soak exercises the same shape that produced
-	// the original failure: enough SO_REUSEADDR reuse to keep ports recycling
-	// against the cleanup walk, without loading the node hard enough to disturb pod
-	// liveness probes.
+	// ~3k conn/sec aggregate. Each replica cycles its own ~28k ephemeral-port range
+	// (itertools.cycle is per-process), so a port comes back around every ~28s per
+	// pod — the port range has to recycle on a timescale comparable to a cleanup
+	// walk for a flow to be at risk at all. Raising these further loads the node
+	// hard enough to disturb liveness probes.
 	reuserReplicas     = 3
 	reuserThreads      = 4
 	reuserSleepPerConn = "0.004"
@@ -88,20 +79,17 @@ const (
 	// soak exercises without a code change.
 	echoImage = "public.ecr.aws/nginx/nginx:1.31"
 
-	// One port end to end: the echo container, the Service port and targetPort, and
-	// both port-reuser NetworkPolicy rules. NetworkPolicy egress matches the
-	// destination port after service translation, so remapping ports across the
-	// Service here would deny the reuser's own traffic and mask what the soak is
-	// meant to observe.
+	// One port end to end (container, Service port and targetPort, both reuser
+	// policy rules). NetworkPolicy egress matches the port after service
+	// translation, so remapping across the Service would deny the reuser's own
+	// traffic.
 	echoPort = 80
 
 	// The victim's ingress policy allows only a port it never serves on, so its
 	// return traffic is admitted purely by conntrack state.
 	victimAllowedPort = 8086
-	// The victim drives short-lived TLS requests at the apiserver, each on a fresh
-	// ephemeral port, to keep a population of return flows in the conntrack map.
-	// A near-idle victim leaves too few flows at risk for the soak to observe
-	// anything, so the rate is deliberately well above one request per second.
+	// A near-idle victim leaves too few return flows in the conntrack map for the
+	// soak to observe anything, so the rate is well above one request per second.
 	victimThreads  = 8
 	victimSleep    = "0.02" // per-thread pause between requests; ~200 req/sec aggregate in practice
 	victimPipPkg   = "requests==2.32.3"
@@ -109,24 +97,20 @@ const (
 	victimRoleName = "victim-pod-lister"
 	victimBindName = "victim-pod-lister-binding"
 
-	// The agent's flow-event line is not formatted identically across address
-	// families: the IPv4 path logs "Verdict DENY" (pkg/ebpf/events/events.go) and
-	// the IPv6 path "Verdict: DENY". Match both, or the detector is silently blind
-	// on one family while every other gate still reports a healthy run. The same
-	// pattern feeds the log-reader's grep and the Go-side matcher so they cannot
-	// drift apart.
+	// The agent's flow-event line differs by family: IPv4 logs "Verdict DENY", IPv6
+	// "Verdict: DENY" (pkg/ebpf/events/events.go). Match both, or the detector is
+	// silently blind on one family while every other gate reports a healthy run.
+	// Shared by the log-reader's grep and the Go matcher so they cannot drift.
 	denyLogPattern = "Verdict:? DENY"
 	cleanupLogLine = "Done cleanup of conntrack map"
 
 	logReadAttempts = 4 // total attempts per log read (1 initial + 3 retries, ~12s of backoff)
 	// How long the cleanup-event stream may go quiet before the log-reader is
-	// treated as no longer following the log. The agent emits one event per cleanup
-	// period, so this has to be generous enough to cover the largest period a run
-	// might use (the default is 300s) plus jitter — a threshold tuned to a short
-	// period will fail runs where cleanup is simply infrequent.
+	// treated as no longer following the log. One event per cleanup period, so this
+	// must cover the largest period a run might use (default 300s) plus jitter; a
+	// threshold tuned to a short period fails runs where cleanup is just infrequent.
 	maxCleanupGap = 12 * time.Minute
-	// A pass is only meaningful if the run watched for most of the soak, so require
-	// this share of polls to have actually read the log.
+	// A pass is only meaningful if the run watched for most of the soak.
 	minPollCoverage = 80.0
 )
 
@@ -135,8 +119,15 @@ var denyLogRE = regexp.MustCompile(denyLogPattern)
 var _ = Describe("Source Port Reuse [PortReuse][Soak]", func() {
 
 	// isV6 selects the address family for the workload. The conntrack path under
-	// test is family-independent, so the same soak runs on either.
-	isV6 := func() bool { return fw.Options.IpFamily == "IPv6" }
+	// test is family-independent, so the same soak runs on either. The family is
+	// derived from the address the reuser will actually dial rather than from the
+	// --ip-family flag: if the two disagreed, the reuser would open sockets of the
+	// wrong family and every connection would fail, leaving the soak with no load
+	// to observe.
+	isV6 := func(addr string) bool {
+		ip := net.ParseIP(addr)
+		return ip != nil && ip.To4() == nil
+	}
 
 	var (
 		victimPod *v1.Pod
@@ -205,8 +196,12 @@ var _ = Describe("Source Port Reuse [PortReuse][Soak]", func() {
 					Name: "nginx", Image: echoImage,
 					Ports:   []v1.ContainerPort{{ContainerPort: echoPort}},
 					Command: []string{"sh", "-c"},
+					// printf '%s' rather than printf <conf>: as a format string, the
+					// config's \n would be expanded into a literal newline (and any
+					// future % would be treated as a conversion). Passing it as an
+					// argument writes it verbatim.
 					Args: []string{fmt.Sprintf(
-						"printf %s > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
+						"printf '%%s' %s > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
 						shellQuote(echoConf))},
 				}},
 			},
@@ -326,7 +321,7 @@ while True:
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, reuserEg)).To(Succeed())
 
 		By("Deploying port-reuser amplifier (SO_REUSEADDR TIME_WAIT reuse)")
-		reuserDep = buildReuserDeployment(node, echoVIP, isV6())
+		reuserDep = buildReuserDeployment(node, echoVIP, isV6(echoVIP))
 		reuserDep, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, reuserDep)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -355,8 +350,17 @@ while True:
 		time.Sleep(soakWarmup)
 
 		By("Confirming liveness: reuser churning + cleanup running (fail fast otherwise)")
+		// The reuser script swallows per-connection errors and keeps going, so a
+		// reuser that connects to nothing looks Running and reports ok=0 forever.
+		// Report its error tally alongside the failure: an ok=0/err>0 reuser means
+		// the connections are being attempted and rejected (target, policy or
+		// address family), which is a different problem from a reuser that never
+		// started.
 		Eventually(func() int { return statsOK(namespace, "port-reuser") }, 2*time.Minute, 15*time.Second).
-			Should(BeNumerically(">", 1000), "port-reuser is not generating connections")
+			Should(BeNumerically(">", 1000), func() string {
+				ok, errs := statsCounts(namespace, "port-reuser")
+				return fmt.Sprintf("port-reuser is not generating connections (ok=%d err=%d to %s)", ok, errs, echoVIP)
+			})
 		// The victim's return flows are what this soak actually observes, so a victim
 		// that silently fails every request would weaken the run with no signal. Its
 		// script swallows exceptions and keeps running, so it has to be gated here.
@@ -502,17 +506,13 @@ func portPtr(n int32) *intstr.IntOrString { v := intstr.FromInt(int(n)); return 
 // log directory, and tails the DENY events out to its own stdout so the test can
 // read them with PodLogs.
 //
-// Reading via PodLogs rather than exec'ing a grep matters: under this workload the
-// exec dial timed out on most polls, leaving the test blind for the majority of a
-// run. A log read is a far lighter request than a SPDY exec upgrade that spawns a
-// process, and has not failed since. Both subresources are proxied by the apiserver
-// to the node's kubelet though, so the read is not immune — that is why a failed
-// read is a skipped poll and why minPollCoverage gates the pass.
+// PodLogs rather than exec'ing a grep: a log read is far lighter than a SPDY exec
+// upgrade that spawns a process, which timed out on most polls under this workload.
+// Both subresources are apiserver-proxied to the kubelet though, so the read is not
+// immune — hence a failed read is a skipped poll and minPollCoverage gates the pass.
 //
 // -F follows across the agent's log rotation, and stdbuf keeps grep from buffering
-// matches for minutes at a time. It only needs to read one file, so it drops
-// Privileged/HostPID/HostNetwork and mounts a single directory read-only rather
-// than the whole host root.
+// matches for minutes at a time.
 func buildLogReaderPod(node string, watchedIPs []string) *v1.Pod {
 	readOnlyRootFS := true
 	hostPathDir := v1.HostPathDirectory
@@ -584,35 +584,58 @@ func eventCounts(checkPod *v1.Pod) (denies int, cleanups int) {
 // pods with the given app label print in their STATS log lines
 // ("[STATS] ok=N err=M").
 func statsOK(ns, appLabel string) int {
+	ok, _ := statsCounts(ns, appLabel)
+	return ok
+}
+
+// statsCounts sums both counters from the STATS log lines of the pods with the
+// given app label. The two together distinguish a workload that never started
+// (ok=0 err=0) from one whose every attempt is failing (ok=0 err>0).
+func statsCounts(ns, appLabel string) (int, int) {
 	pods, err := fw.PodManager.GetPodsWithLabel(ctx, ns, "app", appLabel)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
-	total := 0
+	totalOK, totalErr := 0, 0
 	for _, p := range pods {
 		logs, lerr := fw.PodManager.PodLogs(ns, p.Name)
 		if lerr != nil {
 			continue
 		}
-		// ok= is a cumulative counter, so only the last STATS line for this pod
-		// is meaningful. Track it per pod and add it once; summing every line
-		// would multiply-count the running total.
-		podOK := 0
+		// Both are cumulative counters, so only the last STATS line for this pod
+		// is meaningful. Track them per pod and add once; summing every line
+		// would multiply-count the running totals.
+		podOK, podErr := 0, 0
 		for _, ln := range strings.Split(logs, "\n") {
-			if idx := strings.LastIndex(ln, "ok="); idx >= 0 {
-				rest := ln[idx+3:]
-				end := strings.IndexAny(rest, " \t")
-				if end < 0 {
-					end = len(rest)
-				}
-				if v, e := strconv.Atoi(rest[:end]); e == nil {
-					podOK = v
-				}
+			if v, found := lastCounter(ln, "ok="); found {
+				podOK = v
+			}
+			if v, found := lastCounter(ln, "err="); found {
+				podErr = v
 			}
 		}
-		total += podOK
+		totalOK += podOK
+		totalErr += podErr
 	}
-	return total
+	return totalOK, totalErr
+}
+
+// lastCounter pulls the integer following the last occurrence of key in line.
+func lastCounter(line, key string) (int, bool) {
+	idx := strings.LastIndex(line, key)
+	if idx < 0 {
+		return 0, false
+	}
+	rest := line[idx+len(key):]
+	end := strings.IndexAny(rest, " \t")
+	if end < 0 {
+		end = len(rest)
+	}
+	v, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 func getServiceClusterIP(ns, name string) string {

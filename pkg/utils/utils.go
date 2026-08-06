@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -574,6 +575,16 @@ type ConntrackKey struct {
 type ConntrackVal struct {
 	Value    uint64 // pod state, set via GET_CT_VAL in the datapath
 	LastSeen uint64 // bpf_ktime_get_ns() of the last datapath hit
+}
+
+// KtimeGetNs returns CLOCK_MONOTONIC nanoseconds, the clock bpf_ktime_get_ns()
+// reads. It must stay CLOCK_MONOTONIC to remain comparable with BPF timestamps.
+func KtimeGetNs() (uint64, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, err
+	}
+	return uint64(ts.Nano()), nil
 }
 
 func ConvConntrackV6ToByte(key ConntrackKeyV6) []byte {
