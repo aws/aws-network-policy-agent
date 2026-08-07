@@ -36,6 +36,19 @@ type MockBpfClient struct {
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
+
+	// Captured args from the most recent UpdatePodStateEbpfMaps call.
+	LastPodStateKey int
+	LastPodState    int
+
+	// PodIdentifiersWithoutBPFContext lets tests simulate pods whose eBPF
+	// context has already been torn down. HasBPFContext returns false for any
+	// podIdentifier present here, and true otherwise.
+	PodIdentifiersWithoutBPFContext map[string]bool
+
+	// NetworkPolicyMode overrides the value returned by GetNetworkPolicyMode.
+	// An empty value falls back to "standard" to preserve existing behavior.
+	NetworkPolicyMode string
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -62,7 +75,13 @@ func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingres
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
+	m.LastPodStateKey = key
+	m.LastPodState = state
 	return m.UpdatePodStateEbpfMapsErr
+}
+
+func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {
+	return !m.PodIdentifiersWithoutBPFContext[podIdentifier]
 }
 
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
@@ -76,7 +95,10 @@ func (m *MockBpfClient) ReAttachEbpfProbes() error {
 }
 
 func (m *MockBpfClient) GetNetworkPolicyMode() string {
-	return "standard"
+	if m.NetworkPolicyMode == "" {
+		return "standard"
+	}
+	return m.NetworkPolicyMode
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {

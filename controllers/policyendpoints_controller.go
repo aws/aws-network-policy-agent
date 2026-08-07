@@ -415,6 +415,32 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 			}
 		}
 
+	} else {
+		// No PolicyEndpoint resources remain against this podIdentifier. The controller
+		// cache is already clean, but the dataplane may still be programmed with the
+		// stale policy maps and a POLICIES_APPLIED pod_state (for instance when a
+		// NetworkPolicy podSelector is narrowed and this pod gets deselected). Reset it
+		// to the mode's default state so the pod recovers without a restart.
+		// Skip pods whose eBPF context is already gone: the probes are detached once the last
+		// pod of a podIdentifier leaves the node, so there is nothing left to clear and
+		// updateeBPFMaps would fail. Returning an error there would make routine pod deletion
+		// fail the reconcile and requeue forever.
+		if !r.ebpfClient.HasBPFContext(podIdentifier) {
+			log().Debugf("Skipping cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
+			return nil
+		}
+
+		state := DEFAULT_ALLOW
+		if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
+			state = DEFAULT_DENY
+		}
+
+		log().Infof("No policies remain. Resetting maps and pod_state for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
+		err = r.updateeBPFMaps(podIdentifier, nil, nil, state)
+		if err != nil {
+			log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
+			return err
+		}
 	}
 	return nil
 }
