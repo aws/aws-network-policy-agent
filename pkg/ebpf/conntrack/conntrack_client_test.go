@@ -1,8 +1,10 @@
 package conntrack
 
 import (
+	"errors"
 	"reflect"
 	"testing"
+	"unsafe"
 
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
@@ -58,4 +60,67 @@ func TestConntrackKeyV6Shape(t *testing.T) {
 	got := fieldNames(reflect.TypeOf(utils.ConntrackKeyV6{}))
 	assert.Equal(t, expected, got,
 		"ConntrackKeyV6 shape changed — review GC hydrate/lookup paths in Cleanupv6ConntrackMap before updating this list")
+}
+
+// TestConntrackValLayout verifies that ConntrackVal matches the BPF
+// struct conntrack_value layout: 8 byte val + 8 byte last_seen = 16.
+func TestConntrackValLayout(t *testing.T) {
+	val := utils.ConntrackVal{}
+	assert.Equal(t, uintptr(16), unsafe.Sizeof(val),
+		"ConntrackVal size must be 16 bytes to match BPF struct conntrack_value")
+	assert.Equal(t, uintptr(8), unsafe.Sizeof(val.Value),
+		"Value must be 8 bytes to match __u64 val")
+
+	// LastSeen at offset 8 (after the 8-byte val)
+	lastSeenOffset := unsafe.Offsetof(val.LastSeen)
+	assert.Equal(t, uintptr(8), lastSeenOffset,
+		"ConntrackVal.LastSeen must be at offset 8")
+}
+
+// TestEntryActiveFromRead is the core GC-race guard predicate. It decides
+// whether a delete candidate (absent from the kernel snapshot) must be KEPT
+// because the datapath refreshed its last_seen during this GC cycle — the
+// port-reuse race. Delete only when the entry is genuinely stale.
+func TestEntryActiveFromRead(t *testing.T) {
+	const gcStart = uint64(1_000_000)
+
+	cases := []struct {
+		name    string
+		val     utils.ConntrackVal
+		readErr error
+		want    bool // true => active => KEEP (skip delete)
+	}{
+		{
+			name: "refreshed after gcStart -> keep (port-reuse race)",
+			val:  utils.ConntrackVal{Value: 1, LastSeen: gcStart + 500},
+			want: true,
+		},
+		{
+			name: "stale before gcStart -> delete",
+			val:  utils.ConntrackVal{Value: 1, LastSeen: gcStart - 500},
+			want: false,
+		},
+		{
+			name: "exactly gcStart -> keep (>= boundary)",
+			val:  utils.ConntrackVal{Value: 1, LastSeen: gcStart},
+			want: true,
+		},
+		{
+			name:    "re-read failed -> keep (fail-safe)",
+			val:     utils.ConntrackVal{},
+			readErr: errors.New("ENOENT"),
+			want:    true,
+		},
+		{
+			name: "zero last_seen, stale -> delete",
+			val:  utils.ConntrackVal{Value: 1, LastSeen: 0},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := entryActiveFromRead(tc.val, tc.readErr, gcStart)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

@@ -17,6 +17,33 @@ var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
 
+// entryActiveFromRead is the pure delete-decision predicate, split out for
+// unit testing without a live BPF map. An entry is "active" (must NOT be
+// deleted) if the re-read failed (fail-safe) or the datapath refreshed its
+// last_seen at or after gcStart (i.e., the flow was touched during this GC
+// cycle — the port-reuse race case).
+func entryActiveFromRead(cur utils.ConntrackVal, readErr error, gcStart uint64) bool {
+	if readErr != nil {
+		return true
+	}
+	return cur.LastSeen >= gcStart
+}
+
+// isEntryActive re-reads the live BPF map entry and returns true if it has
+// been touched by the datapath since gcStart (i.e., last_seen >= gcStart).
+// On read failure the entry is assumed active (fail-safe: don't delete).
+func (c *conntrackClient) isEntryActive(key unsafe.Pointer, gcStart uint64) bool {
+	var cur utils.ConntrackVal
+	// The datapath may be storing last_seen while we copy the value out. Aligned
+	// u64 stores are atomic on x86-64/arm64, so the worst case is one stale GC
+	// decision that self-heals on the next cycle.
+	err := c.conntrackMap.GetMapEntry(uintptr(key), uintptr(unsafe.Pointer(&cur)))
+	if err != nil {
+		log().Debugf("Conntrack GC: re-read failed, keeping entry: %v", err)
+	}
+	return entryActiveFromRead(cur, err, gcStart)
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -111,6 +138,14 @@ func (c *conntrackClient) CleanupConntrackMap() {
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
+		gcStart, err := utils.KtimeGetNs()
+		if err != nil {
+			// Without a reference time every entry looks stale, so skip this cycle
+			// rather than risk deleting active entries.
+			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
+			c.hydratelocalConntrack = true
+			return
+		}
 		conntrackFlows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET)
 		if err != nil {
 			log().Errorf("Failed to read from conntrack table %v", err)
@@ -188,12 +223,20 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			newKey.Ifindex = 0 // strip for 5-tuple comparison
 			_, ok := kernelConntrackV4Cache[newKey]
 			if !ok {
-				// Delete the entry in local cache since kernel entry is still missing so expired case
+				// Candidate for deletion — absent from kernel snapshot.
+				// Re-read the live BPF entry to check if it was touched since GC started
+				// (handles port-reuse race: a new connection refreshes last_seen).
 				expiredFlow := localConntrackEntry
+				if c.isEntryActive(unsafe.Pointer(&expiredFlow), gcStart) {
+					log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+						utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
+						utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
+						expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+					continue
+				}
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				log().Infof("Conntrack cleanup Delete - %s", key)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&expiredFlow)))
-
 			}
 		}
 		//c.localConntrackV4Cache = make(map[utils.ConntrackKey]bool)
@@ -267,6 +310,14 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 	} else {
 		// Conntrack table is already hydrated from previous run
 		// So read from kernel conntrack table
+		gcStart, err := utils.KtimeGetNs()
+		if err != nil {
+			// Without a reference time every entry looks stale, so skip this cycle
+			// rather than risk deleting active entries.
+			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
+			c.hydratelocalConntrack = true
+			return
+		}
 		conntrackFlows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET6)
 		if err != nil {
 			log().Info("Failed to read from conntrack table")
@@ -348,11 +399,17 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 			lookupKey.Ifindex = 0 // strip for 5-tuple comparison
 			_, ok := kernelConntrackV6Cache[lookupKey]
 			if !ok {
-				// Delete the entry in local cache since kernel entry is still missing so expired case
 				expiredFlow := localConntrackEntry
+				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
+				if c.isEntryActive(unsafe.Pointer(&ceByteSlice[0]), gcStart) {
+					log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+						utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
+						utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
+						expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+					continue
+				}
 				key := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
 				log().Infof("Conntrack cleanup Delete - %s", key)
-				ceByteSlice := utils.ConvConntrackV6ToByte(expiredFlow)
 				c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&ceByteSlice[0])))
 			}
 		}
