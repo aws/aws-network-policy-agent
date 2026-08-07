@@ -23,7 +23,7 @@ type PodState struct {
 // Show - Displays all loaded AWS BPF Programs and their associated maps
 func Show() error {
 
-	bpfSDKclient := goelf.New()
+	bpfSDKclient := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
 	bpfState, err := bpfSDKclient.GetAllBpfProgramsAndMaps()
 	if err != nil {
 		return err
@@ -222,7 +222,7 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 				if err != nil {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
-					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String())
+					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(iterKey.Source_ip).String(), iterKey.Source_port, utils.ConvIntToIPv4(iterKey.Dest_ip).String(), iterKey.Dest_port, iterKey.Protocol, utils.ConvIntToIPv4(iterKey.Owner_ip).String(), iterKey.Ifindex)
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
@@ -388,7 +388,7 @@ func MapWalkv6(mapID int) error {
 					return fmt.Errorf("Unable to get map entry: %v", err)
 				} else {
 					v6key := utils.ConvByteToConntrackV6(byteSlice)
-					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s", utils.ConvByteToIPv6(v6key.Source_ip).String(), v6key.Source_port, utils.ConvByteToIPv6(v6key.Dest_ip).String(), v6key.Dest_port, v6key.Protocol, utils.ConvByteToIPv6(v6key.Owner_ip).String())
+					retrievedKey := fmt.Sprintf("Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(v6key.Source_ip).String(), v6key.Source_port, utils.ConvByteToIPv6(v6key.Dest_ip).String(), v6key.Dest_port, v6key.Protocol, utils.ConvByteToIPv6(v6key.Owner_ip).String(), v6key.Ifindex)
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)

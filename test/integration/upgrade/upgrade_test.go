@@ -2,8 +2,6 @@ package upgrade
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
@@ -14,6 +12,8 @@ import (
 	network "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 )
 
 /*
@@ -35,12 +35,6 @@ const (
 	bpfSettleInterval = 10 * time.Second
 )
 
-type bpfState struct {
-	progIDs    map[string]int // pinPath basename -> prog ID
-	mapIDs     map[string]int // "podIdentifier/mapName" -> map ID
-	globalMaps map[string]int // global map name -> map ID (deduplicated)
-}
-
 // Scenario 1: Binary unchanged (v1.3.2 <-> v1.3.4)
 var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 	const (
@@ -52,10 +46,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 		networkPolicy     *network.NetworkPolicy
 		workloadPod       *v1.Pod
 		nodeName          string
-		preUpgradeState   bpfState
-		postUpgradeState  bpfState
-		preRollbackState  bpfState
-		postRollbackState bpfState
+		preUpgradeState   utils.BPFState
+		postUpgradeState  utils.BPFState
+		preRollbackState  utils.BPFState
+		postRollbackState utils.BPFState
 	)
 
 	It("should preserve all BPF state across upgrade", func() {
@@ -79,10 +73,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 
 		By("Capturing pre-upgrade BPF state")
 		preUpgradeState = captureBPFState(nodeName)
-		Expect(preUpgradeState.progIDs).ToNot(BeEmpty(), "should have BPF programs before upgrade")
-		Expect(preUpgradeState.globalMaps).ToNot(BeEmpty(), "should have global maps before upgrade")
+		Expect(preUpgradeState.ProgIDs).ToNot(BeEmpty(), "should have BPF programs before upgrade")
+		Expect(preUpgradeState.GlobalMaps).ToNot(BeEmpty(), "should have global maps before upgrade")
 		GinkgoWriter.Printf("Pre-upgrade: progs=%v perPodMaps=%v globalMaps=%v\n",
-			preUpgradeState.progIDs, preUpgradeState.mapIDs, preUpgradeState.globalMaps)
+			preUpgradeState.ProgIDs, preUpgradeState.MapIDs, preUpgradeState.GlobalMaps)
 
 		By("Upgrading agent to: " + toTag)
 		setAgentImage(baseImage + ":" + toTag)
@@ -91,9 +85,9 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 
 		By("Capturing post-upgrade BPF state")
 		postUpgradeState = captureBPFState(nodeName)
-		Expect(postUpgradeState.progIDs).ToNot(BeEmpty(), "should have BPF programs after upgrade")
+		Expect(postUpgradeState.ProgIDs).ToNot(BeEmpty(), "should have BPF programs after upgrade")
 		GinkgoWriter.Printf("Post-upgrade: progs=%v perPodMaps=%v globalMaps=%v\n",
-			postUpgradeState.progIDs, postUpgradeState.mapIDs, postUpgradeState.globalMaps)
+			postUpgradeState.ProgIDs, postUpgradeState.MapIDs, postUpgradeState.GlobalMaps)
 
 		By("Validating: all IDs preserved (binary unchanged)")
 		validateBPFState(preUpgradeState, postUpgradeState, false, "upgrade")
@@ -102,9 +96,9 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 	It("should preserve all BPF state across rollback", func() {
 		By("Capturing pre-rollback BPF state (agent on " + toTag + ")")
 		preRollbackState = captureBPFState(nodeName)
-		Expect(preRollbackState.progIDs).ToNot(BeEmpty())
+		Expect(preRollbackState.ProgIDs).ToNot(BeEmpty())
 		GinkgoWriter.Printf("Pre-rollback: progs=%v perPodMaps=%v globalMaps=%v\n",
-			preRollbackState.progIDs, preRollbackState.mapIDs, preRollbackState.globalMaps)
+			preRollbackState.ProgIDs, preRollbackState.MapIDs, preRollbackState.GlobalMaps)
 
 		By("Rolling back agent to: " + fromTag)
 		setAgentImage(baseImage + ":" + fromTag)
@@ -113,9 +107,9 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Unchanged", Ordered, func() {
 
 		By("Capturing post-rollback BPF state")
 		postRollbackState = captureBPFState(nodeName)
-		Expect(postRollbackState.progIDs).ToNot(BeEmpty())
+		Expect(postRollbackState.ProgIDs).ToNot(BeEmpty())
 		GinkgoWriter.Printf("Post-rollback: progs=%v perPodMaps=%v globalMaps=%v\n",
-			postRollbackState.progIDs, postRollbackState.mapIDs, postRollbackState.globalMaps)
+			postRollbackState.ProgIDs, postRollbackState.MapIDs, postRollbackState.GlobalMaps)
 
 		By("Validating: all IDs preserved (binary unchanged)")
 		validateBPFState(preRollbackState, postRollbackState, false, "rollback")
@@ -142,10 +136,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 		networkPolicy     *network.NetworkPolicy
 		workloadPod       *v1.Pod
 		nodeName          string
-		preUpgradeState   bpfState
-		postUpgradeState  bpfState
-		preRollbackState  bpfState
-		postRollbackState bpfState
+		preUpgradeState   utils.BPFState
+		postUpgradeState  utils.BPFState
+		preRollbackState  utils.BPFState
+		postRollbackState utils.BPFState
 	)
 
 	It("should reload all BPF state across upgrade", func() {
@@ -169,10 +163,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 
 		By("Capturing pre-upgrade BPF state")
 		preUpgradeState = captureBPFState(nodeName)
-		Expect(preUpgradeState.progIDs).ToNot(BeEmpty(), "should have BPF programs before upgrade")
-		Expect(preUpgradeState.globalMaps).ToNot(BeEmpty(), "should have global maps before upgrade")
+		Expect(preUpgradeState.ProgIDs).ToNot(BeEmpty(), "should have BPF programs before upgrade")
+		Expect(preUpgradeState.GlobalMaps).ToNot(BeEmpty(), "should have global maps before upgrade")
 		GinkgoWriter.Printf("Pre-upgrade: progs=%v perPodMaps=%v globalMaps=%v\n",
-			preUpgradeState.progIDs, preUpgradeState.mapIDs, preUpgradeState.globalMaps)
+			preUpgradeState.ProgIDs, preUpgradeState.MapIDs, preUpgradeState.GlobalMaps)
 
 		By("Upgrading agent to: " + toTag)
 		setAgentImage(baseImage + ":" + toTag)
@@ -181,10 +175,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 
 		By("Capturing post-upgrade BPF state")
 		postUpgradeState = captureBPFState(nodeName)
-		Expect(postUpgradeState.progIDs).ToNot(BeEmpty(), "should have BPF programs after upgrade")
-		Expect(postUpgradeState.globalMaps).ToNot(BeEmpty(), "should have global maps after upgrade")
+		Expect(postUpgradeState.ProgIDs).ToNot(BeEmpty(), "should have BPF programs after upgrade")
+		Expect(postUpgradeState.GlobalMaps).ToNot(BeEmpty(), "should have global maps after upgrade")
 		GinkgoWriter.Printf("Post-upgrade: progs=%v perPodMaps=%v globalMaps=%v\n",
-			postUpgradeState.progIDs, postUpgradeState.mapIDs, postUpgradeState.globalMaps)
+			postUpgradeState.ProgIDs, postUpgradeState.MapIDs, postUpgradeState.GlobalMaps)
 
 		By("Validating: all BPF state reloaded (binary changed)")
 		validateBPFState(preUpgradeState, postUpgradeState, true, "upgrade")
@@ -193,9 +187,9 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 	It("should reload all BPF state across rollback", func() {
 		By("Capturing pre-rollback BPF state (agent on " + toTag + ")")
 		preRollbackState = captureBPFState(nodeName)
-		Expect(preRollbackState.progIDs).ToNot(BeEmpty())
+		Expect(preRollbackState.ProgIDs).ToNot(BeEmpty())
 		GinkgoWriter.Printf("Pre-rollback: progs=%v perPodMaps=%v globalMaps=%v\n",
-			preRollbackState.progIDs, preRollbackState.mapIDs, preRollbackState.globalMaps)
+			preRollbackState.ProgIDs, preRollbackState.MapIDs, preRollbackState.GlobalMaps)
 
 		By("Rolling back agent to: " + fromTag)
 		setAgentImage(baseImage + ":" + fromTag)
@@ -204,10 +198,10 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 
 		By("Capturing post-rollback BPF state")
 		postRollbackState = captureBPFState(nodeName)
-		Expect(postRollbackState.progIDs).ToNot(BeEmpty())
-		Expect(postRollbackState.globalMaps).ToNot(BeEmpty())
+		Expect(postRollbackState.ProgIDs).ToNot(BeEmpty())
+		Expect(postRollbackState.GlobalMaps).ToNot(BeEmpty())
 		GinkgoWriter.Printf("Post-rollback: progs=%v perPodMaps=%v globalMaps=%v\n",
-			postRollbackState.progIDs, postRollbackState.mapIDs, postRollbackState.globalMaps)
+			postRollbackState.ProgIDs, postRollbackState.MapIDs, postRollbackState.GlobalMaps)
 
 		By("Validating: all BPF state reloaded (binary changed)")
 		validateBPFState(preRollbackState, postRollbackState, true, "rollback")
@@ -223,37 +217,37 @@ var _ = Describe("Agent Upgrade/Rollback - Binary Changed", Ordered, func() {
 	})
 })
 
-func validateBPFState(before, after bpfState, binaryChanged bool, operation string) {
+func validateBPFState(before, after utils.BPFState, binaryChanged bool, operation string) {
 	if binaryChanged {
 		By("Binary changed: expecting all new IDs (programs, per-pod maps, global maps)")
-		for name, oldID := range before.progIDs {
-			newID, exists := after.progIDs[name]
+		for name, oldID := range before.ProgIDs {
+			newID, exists := after.ProgIDs[name]
 			Expect(exists).To(BeTrue(), "program %s should still exist after %s", name, operation)
 			Expect(newID).ToNot(Equal(oldID),
 				fmt.Sprintf("program %s should have new ID after binary change (old=%d new=%d)", name, oldID, newID))
 		}
-		for name, oldID := range before.globalMaps {
-			newID, exists := after.globalMaps[name]
+		for name, oldID := range before.GlobalMaps {
+			newID, exists := after.GlobalMaps[name]
 			Expect(exists).To(BeTrue(), "global map %s should still exist after %s", name, operation)
 			Expect(newID).ToNot(Equal(oldID),
 				fmt.Sprintf("global map %s should have new ID after binary change (old=%d new=%d)", name, oldID, newID))
 		}
 	} else {
 		By("Binary unchanged: expecting same program and map IDs")
-		for name, oldID := range before.progIDs {
-			newID, exists := after.progIDs[name]
+		for name, oldID := range before.ProgIDs {
+			newID, exists := after.ProgIDs[name]
 			Expect(exists).To(BeTrue(), "program %s should still exist after %s", name, operation)
 			Expect(newID).To(Equal(oldID),
 				fmt.Sprintf("program %s should keep same ID when binary unchanged (old=%d new=%d)", name, oldID, newID))
 		}
-		for key, oldID := range before.mapIDs {
-			newID, exists := after.mapIDs[key]
+		for key, oldID := range before.MapIDs {
+			newID, exists := after.MapIDs[key]
 			Expect(exists).To(BeTrue(), "per-pod map %s should still exist after %s", key, operation)
 			Expect(newID).To(Equal(oldID),
 				fmt.Sprintf("per-pod map %s should keep same ID when binary unchanged (old=%d new=%d)", key, oldID, newID))
 		}
-		for name, oldID := range before.globalMaps {
-			newID, exists := after.globalMaps[name]
+		for name, oldID := range before.GlobalMaps {
+			newID, exists := after.GlobalMaps[name]
 			Expect(exists).To(BeTrue(), "global map %s should still exist after %s", name, operation)
 			Expect(newID).To(Equal(oldID),
 				fmt.Sprintf("global map %s should keep same ID when binary unchanged (old=%d new=%d)", name, oldID, newID))
@@ -324,8 +318,8 @@ func buildTestNetworkPolicy(suffix string) *network.NetworkPolicy {
 		Build()
 }
 
-func captureBPFState(nodeName string) bpfState {
-	checkPod := buildBPFCheckPod(nodeName)
+func captureBPFState(nodeName string) utils.BPFState {
+	checkPod := utils.BuildBPFCheckPod(namespace, nodeName)
 	var err error
 	checkPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, podReadyTimeout)
 	Expect(err).ToNot(HaveOccurred())
@@ -336,119 +330,7 @@ func captureBPFState(nodeName string) bpfState {
 	Expect(err).ToNot(HaveOccurred())
 	GinkgoWriter.Printf("loaded-ebpfdata output:\n%s\n", output)
 
-	return parseLoadedEBPFData(output)
-}
-
-func buildBPFCheckPod(nodeName string) *v1.Pod {
-	privileged := true
-	hostPathDir := v1.HostPathDirectory
-	return &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("bpf-check-%d", time.Now().UnixNano()),
-			Namespace: namespace,
-		},
-		Spec: v1.PodSpec{
-			NodeName:      nodeName,
-			HostPID:       true,
-			HostNetwork:   true,
-			RestartPolicy: v1.RestartPolicyNever,
-			Containers: []v1.Container{
-				{
-					Name:    "check",
-					Image:   "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
-					Command: []string{"sleep", "300"},
-					SecurityContext: &v1.SecurityContext{
-						Privileged: &privileged,
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-root",
-							MountPath: "/host",
-						},
-					},
-				},
-			},
-			Volumes: []v1.Volume{
-				{
-					Name: "host-root",
-					VolumeSource: v1.VolumeSource{
-						HostPath: &v1.HostPathVolumeSource{
-							Path: "/",
-							Type: &hostPathDir,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// parseLoadedEBPFData parses the output of `aws-eks-na-cli ebpf loaded-ebpfdata`.
-// Format:
-//
-//	PinPath:  /sys/fs/bpf/globals/aws/programs/podid_handle_ingress
-//	Pod Identifier : podid  Direction : ingress
-//	Prog ID:  1446
-//	Associated Maps ->
-//	Map Name:  ingress_map
-//	Map ID:  517
-//	Map Name:  aws_conntrack_map
-//	Map ID:  514
-//	===...===
-func parseLoadedEBPFData(output string) bpfState {
-	state := bpfState{
-		progIDs:    make(map[string]int),
-		mapIDs:     make(map[string]int),
-		globalMaps: make(map[string]int),
-	}
-
-	var currentPinName string
-	var currentPodID string
-	lines := strings.Split(output, "\n")
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-
-		if strings.HasPrefix(line, "PinPath:") {
-			pinPath := strings.TrimSpace(strings.TrimPrefix(line, "PinPath:"))
-			segments := strings.Split(pinPath, "/")
-			currentPinName = segments[len(segments)-1]
-		}
-
-		if strings.HasPrefix(line, "Pod Identifier :") {
-			parts := strings.Split(line, "Direction")
-			if len(parts) > 0 {
-				currentPodID = strings.TrimSpace(strings.TrimPrefix(parts[0], "Pod Identifier :"))
-			}
-		}
-
-		if strings.HasPrefix(line, "Prog ID:") {
-			idStr := strings.TrimSpace(strings.TrimPrefix(line, "Prog ID:"))
-			if id, err := strconv.Atoi(idStr); err == nil && currentPinName != "" {
-				state.progIDs[currentPinName] = id
-			}
-		}
-
-		if strings.HasPrefix(line, "Map Name:") {
-			mapName := strings.TrimSpace(strings.TrimPrefix(line, "Map Name:"))
-			if i+1 < len(lines) {
-				nextLine := strings.TrimSpace(lines[i+1])
-				if strings.HasPrefix(nextLine, "Map ID:") {
-					idStr := strings.TrimSpace(strings.TrimPrefix(nextLine, "Map ID:"))
-					if id, err := strconv.Atoi(idStr); err == nil {
-						if isGlobalMap(mapName) {
-							state.globalMaps[mapName] = id
-						} else if currentPodID != "" {
-							state.mapIDs[currentPodID+"/"+mapName] = id
-						}
-					}
-					i++
-				}
-			}
-		}
-	}
+	state, err := utils.ParseLoadedEBPFData(output)
+	Expect(err).ToNot(HaveOccurred(), "failed to parse loaded-ebpfdata output")
 	return state
-}
-
-func isGlobalMap(name string) bool {
-	return name == "aws_conntrack_map" || name == "policy_events"
 }

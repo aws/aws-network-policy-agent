@@ -1,5 +1,6 @@
 # Build the manager binary
 ARG golang_image
+ARG base_image
 
 FROM $golang_image as builder
 
@@ -32,7 +33,7 @@ COPY . ./
 RUN make vmlinuxh
 
 # Build BPF
-FROM public.ecr.aws/amazonlinux/amazonlinux:2 as bpfbuilder
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as bpfbuilder
 WORKDIR /bpfbuilder
 RUN yum update -y && \
     yum install -y iproute procps-ng && \
@@ -45,7 +46,7 @@ COPY --from=vmlinuxbuilder /vmlinuxbuilder/pkg/ebpf/c/vmlinux.h ./pkg/ebpf/c/
 RUN make build-bpf
 
 # Container base image
-FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-glibc:latest.2
+FROM ${base_image}
 
 WORKDIR /
 COPY --from=builder /workspace/controller .

@@ -1,4 +1,4 @@
-package policy
+package restart
 
 import (
 	"context"
@@ -12,18 +12,17 @@ import (
 var (
 	fw        *framework.Framework
 	ctx       context.Context
-	namespace = "policy"
+	namespace = "restart-test"
 )
 
-func TestNetworkPolicy(t *testing.T) {
+func TestAgentRestart(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Network Policy Test Suite")
+	RunSpecs(t, "Agent Restart Test Suite")
 }
 
 var _ = BeforeSuite(func() {
 	fw = framework.New(framework.GlobalOptions)
 	ctx = context.Background()
-
 	err := fw.NamespaceManager.CreateNamespace(ctx, namespace)
 	Expect(err).ToNot(HaveOccurred())
 })

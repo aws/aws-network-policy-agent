@@ -98,6 +98,19 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(f.hostMask)
 		}
 
+		// Canonicalize the CIDR (mask off host bits) before it is used as the
+		// cidrsMap key. A rule expressed with host bits set - e.g. 10.161.0.0/8,
+		// which a /8 mask reduces to the network 10.0.0.0/8 - would otherwise be
+		// keyed by its raw string and treated as distinct from 10.0.0.0/8. Their
+		// L4 (port) sets would never be merged, and because both encode to the
+		// identical LPM trie key, the final map write silently overwrites one
+		// with the other in Go's randomized map-iteration order, producing
+		// non-deterministic port enforcement across reconciliations. Masking here
+		// makes such rules share a key so their ports are merged deterministically.
+		if _, ipNet, err := net.ParseCIDR(string(firewallRule.IPCidr)); err == nil {
+			firewallRule.IPCidr = v1alpha1.NetworkAddress(ipNet.String())
+		}
+
 		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
 		}
@@ -128,16 +141,20 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
 	for exceptCidr := range exceptCidrs {
-		if _, ok := cidrsMap[exceptCidr]; !ok {
+		canonicalExcept := exceptCidr
+		if _, ipNet, err := net.ParseCIDR(exceptCidr); err == nil {
+			canonicalExcept = ipNet.String()
+		}
+		if _, ok := cidrsMap[canonicalExcept]; !ok {
 			exceptFirewall := EbpfFirewallRules{
-				IPCidr: v1alpha1.NetworkAddress(exceptCidr),
+				IPCidr: v1alpha1.NetworkAddress(canonicalExcept),
 				Except: []v1alpha1.NetworkAddress{},
 				L4Info: []v1alpha1.Port{},
 			}
 			addDenyAllL4Entry(&exceptFirewall)
-			cidrsMap[exceptCidr] = exceptFirewall
+			cidrsMap[canonicalExcept] = exceptFirewall
 		}
-		log().Debugf("Parsed Except CIDR: %s", exceptCidr)
+		log().Debugf("Parsed Except CIDR: %s (canonical: %s)", exceptCidr, canonicalExcept)
 	}
 
 	for key, value := range cidrsMap {
@@ -156,8 +173,11 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 }
 
 // sorting Firewall Rules in Ascending Order of Prefix length
+// SliceStable is used so that rules sharing the same prefix length retain a
+// deterministic relative order; this keeps the L4-info inheritance in
+// checkAndDeriveL4InfoFromAnyMatchingCIDRs stable across runs.
 func sortFirewallRulesByPrefixLength(rules []EbpfFirewallRules, prefixLenStr string) {
-	sort.Slice(rules, func(i, j int) bool {
+	sort.SliceStable(rules, func(i, j int) bool {
 
 		prefixSplit := strings.Split(prefixLenStr, "/")
 		prefixLen, _ := strconv.Atoi(prefixSplit[1])
@@ -222,32 +242,33 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
 }
 
 func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
-	uniquePorts := make(map[string]v1alpha1.Port)
-	var result []v1alpha1.Port
-	var key string
+	type portKey struct {
+		protocol string
+		port     int
+		endPort  int
+	}
+	uniquePorts := make(map[portKey]v1alpha1.Port, len(ports))
+	result := make([]v1alpha1.Port, 0, len(ports))
 
 	for _, p := range ports {
 
-		portKey := 0
-		endPortKey := 0
+		pk := portKey{}
 
 		if p.Port != nil {
-			portKey = int(*p.Port)
+			pk.port = int(*p.Port)
 		}
 
 		if p.EndPort != nil {
-			endPortKey = int(*p.EndPort)
+			pk.endPort = int(*p.EndPort)
 		}
-		if p.Protocol == nil {
-			key = fmt.Sprintf("%s-%d-%d", "", portKey, endPortKey)
-		} else {
-			key = fmt.Sprintf("%s-%d-%d", *p.Protocol, portKey, endPortKey)
+		if p.Protocol != nil {
+			pk.protocol = string(*p.Protocol)
 		}
 
-		if _, ok := uniquePorts[key]; ok {
+		if _, ok := uniquePorts[pk]; ok {
 			continue
 		} else {
-			uniquePorts[key] = p
+			uniquePorts[pk] = p
 		}
 	}
 
@@ -320,7 +341,10 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 func (f *FirewallRuleProcessor) normalizeCIDR(cidr string) string {
 	if !strings.Contains(cidr, "/") {
-		return cidr + f.hostMask
+		cidr = cidr + f.hostMask
+	}
+	if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+		return ipNet.String()
 	}
 	return cidr
 }
@@ -342,7 +366,7 @@ func (f *FirewallRuleProcessor) shouldSkipRule(cidr string) bool {
 }
 
 func (f *FirewallRuleProcessor) sortByCIDRLength(rules []EbpfFirewallRules) {
-	sort.Slice(rules, func(i, j int) bool {
+	sort.SliceStable(rules, func(i, j int) bool {
 		cidrI := f.normalizeCIDR(string(rules[i].IPCidr))
 		cidrJ := f.normalizeCIDR(string(rules[j].IPCidr))
 

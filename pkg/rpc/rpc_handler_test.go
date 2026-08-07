@@ -15,6 +15,7 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -182,4 +183,33 @@ func TestEnforceNpToPod_NoPolicies_UpdatesBothPodStateMaps(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 2, updateCount, "should update both pod state map and cluster policy pod state map")
+}
+
+// TestEnforceNpToPod_FailsClosedOnPodStateError verifies that EnforceNpToPod
+// returns an error rather than a success reply when the pod-state map write
+// fails on the no-cached-policies path that seeds default-allow/default-deny.
+// Both reconcilers are wired so the readiness check passes and execution
+// reaches UpdatePodStateEbpfMaps.
+func TestEnforceNpToPod_FailsClosedOnPodStateError(t *testing.T) {
+	injected := errors.New("simulated pod state write failure")
+	mockBpfClient := &ebpf.MockBpfClient{
+		UpdatePodStateEbpfMapsErr: injected,
+	}
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
+
+	s := &server{
+		policyReconciler:        reconciler,
+		clusterPolicyReconciler: clusterReconciler,
+	}
+
+	resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+		K8S_POD_NAME:        "nginx-abc123",
+		K8S_POD_NAMESPACE:   "default",
+		NETWORK_POLICY_MODE: "standard",
+		InterfaceCount:      1,
+	})
+
+	assert.ErrorIs(t, err, injected)
+	assert.Nil(t, resp, "rpc must not return a success reply when the pod-state write fails")
 }
