@@ -21,7 +21,9 @@ const (
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
+	defaultPolicyEventLogsScope        = "ACCEPT"
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
+	flagPolicyEventLogsScope           = "policy-event-logs-scope"
 	flagEnableCloudWatchLogs           = "enable-cloudwatch-logs"
 	flagEnableIPv6                     = "enable-ipv6"
 	flagEnableNetworkPolicy            = "enable-network-policy"
@@ -58,6 +60,8 @@ type ControllerConfig struct {
 	RuntimeConfig RuntimeConfig
 	// Configuration for enabling profiling
 	EnableProfiling bool
+	// Policy event logs scope
+	PolicyEventLogsScope string
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -80,7 +84,8 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
 		"Table size for network policy agent conntrack cache")
-
+	fs.StringVar(&cfg.PolicyEventLogsScope, flagPolicyEventLogsScope, defaultPolicyEventLogsScope, ""+
+		"Set the policy event logs scope, if set to ACCEPT both ACCEPT and DENY events are generated, if set to DENY only DENY events are generated - ACCEPT, DENY")
 	cfg.RuntimeConfig.BindFlags(fs)
 }
 
