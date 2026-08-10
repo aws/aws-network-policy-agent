@@ -6,8 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestFormatLastSeen covers the human-readable rendering of the conntrack
-// last_seen stamp, including the cases where an age cannot be computed.
 func TestFormatLastSeen(t *testing.T) {
 	const now = uint64(10_000_000_000) // 10s on the monotonic clock
 

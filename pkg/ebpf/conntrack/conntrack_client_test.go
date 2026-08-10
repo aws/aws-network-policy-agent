@@ -62,8 +62,8 @@ func TestConntrackKeyV6Shape(t *testing.T) {
 		"ConntrackKeyV6 shape changed — review GC hydrate/lookup paths in Cleanupv6ConntrackMap before updating this list")
 }
 
-// TestConntrackValLayout verifies that ConntrackVal matches the BPF
-// struct conntrack_value layout: 8 byte val + 8 byte last_seen = 16.
+// TestConntrackValLayout guards ConntrackVal against drifting from the C
+// struct conntrack_value: 8 byte val + 8 byte last_seen.
 func TestConntrackValLayout(t *testing.T) {
 	val := utils.ConntrackVal{}
 	assert.Equal(t, uintptr(16), unsafe.Sizeof(val),
@@ -71,16 +71,11 @@ func TestConntrackValLayout(t *testing.T) {
 	assert.Equal(t, uintptr(8), unsafe.Sizeof(val.Value),
 		"Value must be 8 bytes to match __u64 val")
 
-	// LastSeen at offset 8 (after the 8-byte val)
 	lastSeenOffset := unsafe.Offsetof(val.LastSeen)
 	assert.Equal(t, uintptr(8), lastSeenOffset,
 		"ConntrackVal.LastSeen must be at offset 8")
 }
 
-// TestEntryActiveFromRead is the core GC-race guard predicate. It decides
-// whether a delete candidate (absent from the kernel snapshot) must be KEPT
-// because the datapath refreshed its last_seen during this GC cycle — the
-// port-reuse race. Delete only when the entry is genuinely stale.
 func TestEntryActiveFromRead(t *testing.T) {
 	const gcStart = uint64(1_000_000)
 
@@ -88,10 +83,10 @@ func TestEntryActiveFromRead(t *testing.T) {
 		name    string
 		val     utils.ConntrackVal
 		readErr error
-		want    bool // true => active => KEEP (skip delete)
+		want    bool // true means keep the entry
 	}{
 		{
-			name: "refreshed after gcStart -> keep (port-reuse race)",
+			name: "refreshed after gcStart -> keep",
 			val:  utils.ConntrackVal{Value: 1, LastSeen: gcStart + 500},
 			want: true,
 		},
