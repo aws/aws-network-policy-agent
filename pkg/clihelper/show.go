@@ -22,14 +22,14 @@ type PodState struct {
 }
 
 // formatLastSeen renders last_seen as an age. now must be a CLOCK_MONOTONIC
-// reading taken once per dump so every entry is aged against the same instant.
+// reading, to match the clock the datapath stamps with.
 func formatLastSeen(lastSeen, now uint64) string {
 	if lastSeen == 0 {
 		return "never"
 	}
 	if now == 0 || lastSeen > now {
-		// Clock unavailable, or the datapath stamped between our clock read and
-		// this entry's read. Neither is an error; just don't print a negative age.
+		// Either the clock read failed, or the datapath stamped the entry after
+		// we read the clock. Neither is an error, so avoid a negative age.
 		return "0s ago"
 	}
 	return time.Duration(now-lastSeen).Round(time.Millisecond).String() + " ago"
@@ -224,8 +224,7 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 		iterKey := utils.ConntrackKey{}
 		iterNextKey := utils.ConntrackKey{}
 		// Read once so every entry in this dump is aged against the same instant.
-		// A failure here only costs the age column, so report it and carry on
-		// rather than failing the whole dump.
+		// A failure here only costs the age column, so carry on with the dump.
 		dumpNow, clockErr := utils.KtimeGetNs()
 		if clockErr != nil {
 			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)
@@ -401,8 +400,7 @@ func MapWalkv6(mapID int) error {
 		nextbyteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
 
 		// Read once so every entry in this dump is aged against the same instant.
-		// A failure here only costs the age column, so report it and carry on
-		// rather than failing the whole dump.
+		// A failure here only costs the age column, so carry on with the dump.
 		dumpNow, clockErr := utils.KtimeGetNs()
 		if clockErr != nil {
 			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)

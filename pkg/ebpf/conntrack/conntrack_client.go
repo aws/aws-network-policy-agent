@@ -17,11 +17,10 @@ var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
 
-// entryActiveFromRead is the pure delete-decision predicate, split out for
-// unit testing without a live BPF map. An entry is "active" (must NOT be
-// deleted) if the re-read failed (fail-safe) or the datapath refreshed its
-// last_seen at or after gcStart (i.e., the flow was touched during this GC
-// cycle — the port-reuse race case).
+// entryActiveFromRead reports whether an entry must be kept. An entry counts as
+// active if the datapath stamped it at or after gcStart, or if the re-read
+// failed, in which case we keep the entry rather than risk deleting a live one.
+// Split out from isEntryActive so it can be tested without a live BPF map.
 func entryActiveFromRead(cur utils.ConntrackVal, readErr error, gcStart uint64) bool {
 	if readErr != nil {
 		return true
@@ -29,9 +28,8 @@ func entryActiveFromRead(cur utils.ConntrackVal, readErr error, gcStart uint64) 
 	return cur.LastSeen >= gcStart
 }
 
-// isEntryActive re-reads the live BPF map entry and returns true if it has
-// been touched by the datapath since gcStart (i.e., last_seen >= gcStart).
-// On read failure the entry is assumed active (fail-safe: don't delete).
+// isEntryActive re-reads the live map entry to see whether the datapath has
+// touched it since gcStart.
 func (c *conntrackClient) isEntryActive(key unsafe.Pointer, gcStart uint64) bool {
 	var cur utils.ConntrackVal
 	// The datapath may be storing last_seen while we copy the value out. Aligned
@@ -140,8 +138,8 @@ func (c *conntrackClient) CleanupConntrackMap() {
 		// So read from kernel conntrack table
 		gcStart, err := utils.KtimeGetNs()
 		if err != nil {
-			// Without a reference time every entry looks stale, so skip this cycle
-			// rather than risk deleting active entries.
+			// Without a reference time every entry would look stale, so skip the
+			// cycle rather than risk deleting active entries.
 			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
 			c.hydratelocalConntrack = true
 			return
@@ -223,9 +221,9 @@ func (c *conntrackClient) CleanupConntrackMap() {
 			newKey.Ifindex = 0 // strip for 5-tuple comparison
 			_, ok := kernelConntrackV4Cache[newKey]
 			if !ok {
-				// Candidate for deletion — absent from kernel snapshot.
-				// Re-read the live BPF entry to check if it was touched since GC started
-				// (handles port-reuse race: a new connection refreshes last_seen).
+				// Absent from the kernel snapshot, so a delete candidate. The
+				// snapshot is a point-in-time view, so re-read the live entry to
+				// confirm the flow has not been picked up again since.
 				expiredFlow := localConntrackEntry
 				if c.isEntryActive(unsafe.Pointer(&expiredFlow), gcStart) {
 					log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
@@ -312,8 +310,8 @@ func (c *conntrackClient) Cleanupv6ConntrackMap() {
 		// So read from kernel conntrack table
 		gcStart, err := utils.KtimeGetNs()
 		if err != nil {
-			// Without a reference time every entry looks stale, so skip this cycle
-			// rather than risk deleting active entries.
+			// Without a reference time every entry would look stale, so skip the
+			// cycle rather than risk deleting active entries.
 			log().Errorf("clock_gettime(CLOCK_MONOTONIC) failed, GC skipping eviction this cycle: %v", err)
 			c.hydratelocalConntrack = true
 			return
