@@ -403,6 +403,60 @@ func TestBpfClient_UpdatePodStateEbpfMapsMissingMap(t *testing.T) {
 	}
 }
 
+func TestBpfClient_CreatePodStateEbpfEntryIfNotExistsMissingMap(t *testing.T) {
+	// Same hazard as the update path, on the function that seeds the entry in the first place.
+	// A missing pod_state entry is exactly what makes the datapath drop every packet, so an
+	// unnoticed failure here is at least as damaging as a failed update.
+	tests := []struct {
+		name           string
+		podIdentifier  string
+		ingressPgmInfo goelf.BpfData
+		egressPgmInfo  goelf.BpfData
+		wantErrSubstr  string
+	}{
+		{
+			name:          "ingress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			ingressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 45},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_INGRESS_POD_STATE_MAP,
+		},
+		{
+			name:          "egress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			egressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 49},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_EGRESS_POD_STATE_MAP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, BPFContext{
+				ingressPgmInfo: tt.ingressPgmInfo,
+				egressPgmInfo:  tt.egressPgmInfo,
+			})
+
+			gotErr := testBpfClient.CreatePodStateEbpfEntryIfNotExists(tt.podIdentifier,
+				POD_STATE_MAP_KEY, DEFAULT_ALLOW)
+
+			assert.Error(t, gotErr)
+			assert.Contains(t, gotErr.Error(), tt.wantErrSubstr)
+
+			_, stillCached := testBpfClient.policyEndpointeBPFContext.Load(tt.podIdentifier)
+			assert.False(t, stillCached, "stale bpf context should be evicted after a pod state entry create failure")
+		})
+	}
+}
+
 func TestCheckAndUpdateBPFBinaries(t *testing.T) {
 	testBpfBinaries := []string{TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY}
 

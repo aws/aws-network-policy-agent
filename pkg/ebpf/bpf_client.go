@@ -1221,22 +1221,47 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 	// CreateMapEntry uses BPF_NOEXIST and the SDK swallows EEXIST as nil,
 	// so repeated calls are no-ops and this function stays idempotent.
 	if ingressProgInfo.Program.ProgFD != 0 {
-		mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		mapToUpdate, found := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress-no-map").Inc()
+			ingressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_INGRESS_POD_STATE_MAP, podIdentifier)
+			log().Errorf("Ingress Pod State entry create failed: %v", ingressErr)
+		} else if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
 			log().Errorf("Ingress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress").Inc()
 			ingressErr = fmt.Errorf("ingress pod state entry create: %w", err)
 		}
 	}
 	if egressProgInfo.Program.ProgFD != 0 {
-		mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		mapToUpdate, found := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("createPodStateEntry-egress-no-map").Inc()
+			egressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_EGRESS_POD_STATE_MAP, podIdentifier)
+			log().Errorf("Egress Pod State entry create failed: %v", egressErr)
+		} else if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
 			log().Errorf("Egress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-egress").Inc()
 			egressErr = fmt.Errorf("egress pod state entry create: %w", err)
 		}
 	}
-	return errors.Join(ingressErr, egressErr)
+
+	err := errors.Join(ingressErr, egressErr)
+	if err != nil {
+		l.evictBPFContextAfterPodStateFailure(podIdentifier, "entry create")
+	}
+	return err
+}
+
+// evictBPFContextAfterPodStateFailure drops the cached BPFContext for podIdentifier after a
+// pod state map write has failed. The context holds raw descriptors, and FD numbers are
+// recycled after a program reload, so a cached map FD can come to refer to a non-map object
+// -- the kernel rejects that with EINVAL, and retrying against the same handle can never
+// recover. A pod state write failure is already outage-grade (the datapath drops packets
+// when the entry is missing), so discard the context and let the next reconcile reload the
+// program and re-derive fresh descriptors.
+func (l *bpfClient) evictBPFContextAfterPodStateFailure(podIdentifier string, op string) {
+	l.policyEndpointeBPFContext.Delete(podIdentifier)
+	log().Errorf("Evicted bpf context for podIdentifier %s after pod state %s failure; probes will be reloaded on the next reconcile", podIdentifier, op)
 }
 
 // UpdatePodStateEbpfMaps writes the pod-state value (DEFAULT_ALLOW,
@@ -1304,14 +1329,7 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 
 	err := errors.Join(ingressErr, egressErr)
 	if err != nil {
-		// The cached BPFContext holds raw descriptors. FD numbers are recycled after a program
-		// reload, so a cached map FD can come to refer to a non-map object -- the kernel rejects
-		// that with EINVAL, and retrying against the same handle can never recover. A pod_state
-		// write failure is already outage-grade (the datapath drops packets when the entry is
-		// missing), so evict the context and let the next reconcile reload the program and
-		// re-derive fresh descriptors.
-		l.policyEndpointeBPFContext.Delete(podIdentifier)
-		log().Errorf("Evicted bpf context for podIdentifier %s after pod state map write failure; probes will be reloaded on the next reconcile", podIdentifier)
+		l.evictBPFContextAfterPodStateFailure(podIdentifier, "map update")
 	}
 	return err
 }
