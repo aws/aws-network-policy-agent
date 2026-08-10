@@ -88,8 +88,8 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-	__u64 val; // pod state, set via GET_CT_VAL
-	__u64 last_seen; // bpf_ktime_get_ns() of the last datapath hit; used by userspace GC to skip reused flows
+	__u64 val; // the pod's network policy and cluster policy state pair
+	__u64 last_seen; // monotonic ns when the datapath last saw this flow
 };
 
 struct data_t {
@@ -431,10 +431,10 @@ int handle_ingress(struct __sk_buff *skb)
 		if (flow_val != NULL) {
 			// If the pod state matches, allow the packet
 			if (flow_val->val == ct_pod_state_val) {
-				// In a BPF program, bpf_map_lookup_elem returns a pointer into the
-				// map's value memory, so this store updates the live map entry in
-				// place. No bpf_map_update_elem is needed. Refreshing last_seen here
-				// is what lets the userspace GC tell a reused flow from a stale one.
+				// bpf_map_lookup_elem returns a pointer into the map's value
+				// memory, so this store updates the entry in place and no
+				// bpf_map_update_elem is needed. Refreshing last_seen here is
+				// what lets the userspace GC tell a reused flow from a stale one.
 				flow_val->last_seen = bpf_ktime_get_ns();
 				return BPF_OK;
 			}
@@ -463,7 +463,7 @@ int handle_ingress(struct __sk_buff *skb)
 		reverse_flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &reverse_flow_key);
 
 		if (reverse_flow_val != NULL) {
-			// Write-through the map value pointer (see forward-flow note above).
+			// Stored in place through the map value pointer, as above.
 			reverse_flow_val->last_seen = bpf_ktime_get_ns();
 			return BPF_OK;
 		}

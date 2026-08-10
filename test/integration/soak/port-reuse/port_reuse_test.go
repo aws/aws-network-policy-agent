@@ -66,11 +66,9 @@ const (
 	soakWarmup       = 90 * time.Second
 	npaLogPath       = "/host/var/log/aws-routed-eni/network-policy-agent.log"
 
-	// ~3k conn/sec aggregate. Each replica cycles its own ~28k ephemeral-port range
-	// (itertools.cycle is per-process), so a port comes back around every ~28s per
-	// pod — the port range has to recycle on a timescale comparable to a cleanup
-	// walk for a flow to be at risk at all. Raising these further loads the node
-	// hard enough to disturb liveness probes.
+	// ~3k conn/sec aggregate. Each replica cycles its own ~28k ephemeral-port
+	// range, so a port comes back around every ~28s per pod. Raising these
+	// further loads the node hard enough to disturb liveness probes.
 	reuserReplicas     = 3
 	reuserThreads      = 4
 	reuserSleepPerConn = "0.004"
@@ -91,24 +89,23 @@ const (
 	// A near-idle victim leaves too few return flows in the conntrack map for the
 	// soak to observe anything, so the rate is well above one request per second.
 	victimThreads  = 8
-	victimSleep    = "0.02" // per-thread pause between requests; ~200 req/sec aggregate in practice
+	victimSleep    = "0.02" // per-thread pause between requests; ~200 req/sec aggregate
 	victimPipPkg   = "requests==2.32.3"
 	victimSAName   = "victim-lister"
 	victimRoleName = "victim-pod-lister"
 	victimBindName = "victim-pod-lister-binding"
 
-	// The agent's flow-event line differs by family: IPv4 logs "Verdict DENY", IPv6
-	// "Verdict: DENY" (pkg/ebpf/events/events.go). Match both, or the detector is
-	// silently blind on one family while every other gate reports a healthy run.
-	// Shared by the log-reader's grep and the Go matcher so they cannot drift.
+	// The agent's flow-event line differs by family: IPv4 logs "Verdict DENY",
+	// IPv6 "Verdict: DENY" (pkg/ebpf/events/events.go), so match both. Shared by
+	// the log-reader's grep and the Go matcher so they cannot drift.
 	denyLogPattern = "Verdict:? DENY"
 	cleanupLogLine = "Done cleanup of conntrack map"
 
 	logReadAttempts = 4 // total attempts per log read (1 initial + 3 retries, ~12s of backoff)
 	// How long the cleanup-event stream may go quiet before the log-reader is
-	// treated as no longer following the log. One event per cleanup period, so this
-	// must cover the largest period a run might use (default 300s) plus jitter; a
-	// threshold tuned to a short period fails runs where cleanup is just infrequent.
+	// treated as no longer following the log. There is one event per cleanup
+	// period, so this has to cover the largest period a run might use (default
+	// 300s) plus jitter.
 	maxCleanupGap = 12 * time.Minute
 	// A pass is only meaningful if the run watched for most of the soak.
 	minPollCoverage = 80.0
@@ -118,12 +115,9 @@ var denyLogRE = regexp.MustCompile(denyLogPattern)
 
 var _ = Describe("Source Port Reuse [PortReuse][Soak]", func() {
 
-	// isV6 selects the address family for the workload. The conntrack path under
-	// test is family-independent, so the same soak runs on either. The family is
-	// derived from the address the reuser will actually dial rather than from the
-	// --ip-family flag: if the two disagreed, the reuser would open sockets of the
-	// wrong family and every connection would fail, leaving the soak with no load
-	// to observe.
+	// Derive the socket family from the address the reuser will actually dial
+	// rather than from the --ip-family flag. If the two disagreed the reuser
+	// would open sockets of the wrong family and every connection would fail.
 	isV6 := func(addr string) bool {
 		ip := net.ParseIP(addr)
 		return ip != nil && ip.To4() == nil
@@ -143,10 +137,9 @@ var _ = Describe("Source Port Reuse [PortReuse][Soak]", func() {
 	)
 
 	AfterEach(func() {
-		// Best-effort teardown: delete errors are deliberately ignored so one
-		// failure cannot stop the rest from being cleaned up, and so a teardown
-		// hiccup does not mask the spec's own result. The suite drops the whole
-		// namespace afterwards regardless.
+		// Best-effort teardown: delete errors are ignored so one failure cannot
+		// stop the rest from being cleaned up, or mask the spec's own result. The
+		// suite drops the whole namespace afterwards regardless.
 		if checkPod != nil {
 			_ = fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
 		}
@@ -541,14 +534,15 @@ func buildLogReaderPod(node string, watchedIPs []string) *v1.Pod {
 	}
 }
 
-// eventCounts returns how many Verdict DENY events and completed conntrack cleanup
-// passes the log-reader has forwarded to its stdout since the run began, or (-1, -1)
-// if the read failed so the caller can skip that poll rather than read it as data.
+// eventCounts returns how many Verdict DENY events and completed conntrack
+// cleanup passes the log-reader has forwarded to its stdout since the run began.
+// Returns (-1, -1) if the read failed, so the caller can skip that poll rather
+// than read it as data.
 //
-// The reader starts tailing at the end of the log, so its stdout only ever contains
-// this run's events and no baselining is needed. A log read proved far more reliable
-// than exec'ing a grep under this workload, but it reaches the kubelet by the same
-// apiserver proxy, so it can still fail — hence the retries and the sentinel.
+// The reader starts tailing at the end of the log, so its stdout only ever
+// contains this run's events and no baselining is needed. The read reaches the
+// kubelet through the apiserver proxy and can fail under this workload, hence
+// the retries and the sentinel.
 func eventCounts(checkPod *v1.Pod) (denies int, cleanups int) {
 	var lastErr error
 	for attempt := 0; attempt < logReadAttempts; attempt++ {
@@ -602,9 +596,8 @@ func statsCounts(ns, appLabel string) (int, int) {
 		if lerr != nil {
 			continue
 		}
-		// Both are cumulative counters, so only the last STATS line for this pod
-		// is meaningful. Track them per pod and add once; summing every line
-		// would multiply-count the running totals.
+		// Both are cumulative counters, so only the last STATS line for a pod is
+		// meaningful. Summing every line would multiply-count the running totals.
 		podOK, podErr := 0, 0
 		for _, ln := range strings.Split(logs, "\n") {
 			if v, found := lastCounter(ln, "ok="); found {
@@ -646,11 +639,10 @@ func getServiceClusterIP(ns, name string) string {
 	return svc.Spec.ClusterIP
 }
 
-// buildReuserDeployment builds the SO_REUSEADDR port-reuser amplifier: each replica
-// runs reuserThreads threads opening short-lived TCP connections to the echo VIP,
-// binding a cycled ephemeral port with SO_REUSEADDR to force reuse of TIME_WAIT
-// ports. This is what makes the conntrack-cleanup snapshot go stale fast enough to
-// exercise this path. See reuserReplicas for how the rate was chosen.
+// buildReuserDeployment builds the port-reuser load generator: each replica runs
+// reuserThreads threads opening short-lived TCP connections to the echo VIP,
+// binding a cycled ephemeral port with SO_REUSEADDR to force reuse of ports in
+// TIME_WAIT. See reuserReplicas for how the rate was chosen.
 func buildReuserDeployment(node, target string, v6 bool) *appsv1.Deployment {
 	replicas := int32(reuserReplicas)
 	family, bindAddr := "AF_INET", ""

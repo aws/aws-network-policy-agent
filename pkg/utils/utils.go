@@ -572,13 +572,15 @@ type ConntrackKey struct {
 	Ifindex     uint32
 }
 
+// ConntrackVal mirrors struct conntrack_value in the TC programs. The layout
+// must stay in sync with the C definition.
 type ConntrackVal struct {
-	Value    uint64 // pod state, set via GET_CT_VAL in the datapath
-	LastSeen uint64 // bpf_ktime_get_ns() of the last datapath hit
+	Value    uint64 // the pod's network policy and cluster policy state pair
+	LastSeen uint64 // monotonic ns when the datapath last saw this flow
 }
 
-// KtimeGetNs returns CLOCK_MONOTONIC nanoseconds, the clock bpf_ktime_get_ns()
-// reads. It must stay CLOCK_MONOTONIC to remain comparable with BPF timestamps.
+// KtimeGetNs returns CLOCK_MONOTONIC nanoseconds. This is the clock
+// bpf_ktime_get_ns() reads, so values are comparable with BPF timestamps.
 func KtimeGetNs() (uint64, error) {
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
