@@ -853,3 +853,101 @@ func TestFWRuleProcessor_ComputeClusterPolicyMapEntriesFromEndpointRules_IPv6_No
 		})
 	}
 }
+
+// maxPrefixLenForFamily returns the largest legal prefix length for the
+// cluster's address family (32 for IPv4 keys, 128 for IPv6 keys).
+func maxPrefixLenForFamily(enableIPv6 bool) uint32 {
+	if enableIPv6 {
+		return 128
+	}
+	return 32
+}
+
+func TestComputeMapEntries_WrongFamilyExceptFiltered(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port443 int32 = 443
+
+	tests := []struct {
+		name       string
+		nodeIP     string
+		hostMask   string
+		enableIPv6 bool
+		rules      []EbpfFirewallRules
+	}{
+		{
+			name:       "IPv6 except on IPv4 cluster",
+			nodeIP:     "10.1.1.1",
+			hostMask:   "/32",
+			enableIPv6: false,
+			rules: []EbpfFirewallRules{
+				{
+					IPCidr: "10.2.0.0/16",
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+				},
+				{
+					IPCidr: "::/0",
+					Except: []v1alpha1.NetworkAddress{"100::/64", "fe80::/10"},
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+				},
+			},
+		},
+		{
+			name:       "IPv4 except on IPv6 cluster",
+			nodeIP:     "2001:db8:abcd:0012::1",
+			hostMask:   "/128",
+			enableIPv6: true,
+			rules: []EbpfFirewallRules{
+				{
+					IPCidr: "2001:db8::/32",
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+				},
+				{
+					IPCidr: "0.0.0.0/0",
+					Except: []v1alpha1.NetworkAddress{"10.0.0.0/8", "192.168.0.0/16"},
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6).
+				ComputeMapEntriesFromEndpointRules(tt.rules)
+			assert.NoError(t, err)
+
+			maxLen := maxPrefixLenForFamily(tt.enableIPv6)
+			for key := range got {
+				assert.GreaterOrEqual(t, len(key), 4, "key too short: %x", []byte(key))
+				prefixLen := binary.LittleEndian.Uint32([]byte(key)[0:4])
+				assert.LessOrEqualf(t, prefixLen, maxLen,
+					"produced a key with prefix length %d (> %d) - wrong-family except leaked: %x",
+					prefixLen, maxLen, []byte(key))
+			}
+		})
+	}
+}
+
+func TestComputeMapEntries_SameFamilyExceptRetained(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port443 int32 = 443
+
+	nodeIP := "10.1.1.1"
+	rules := []EbpfFirewallRules{
+		{
+			IPCidr: "10.0.0.0/8",
+			Except: []v1alpha1.NetworkAddress{"10.10.0.0/16"},
+			L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+		},
+	}
+
+	got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).
+		ComputeMapEntriesFromEndpointRules(rules)
+	assert.NoError(t, err)
+
+	// Expect the except CIDR 10.10.0.0/16 to be present as its own key.
+	_, exceptNet, _ := net.ParseCIDR("10.10.0.0/16")
+	wantKey := string(utils.ComputeTrieKey(*exceptNet, false))
+	_, ok := got[wantKey]
+	assert.Truef(t, ok, "same-family except 10.10.0.0/16 was not added to the map")
+}

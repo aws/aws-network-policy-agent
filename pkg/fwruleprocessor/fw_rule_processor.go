@@ -87,11 +87,6 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	sortFirewallRulesByPrefixLength(firewallRules, f.hostMask)
 
 	for _, firewallRule := range firewallRules {
-		// Keep track of except CIDRs to handle later
-		for _, exceptCidr := range firewallRule.Except {
-			exceptCidrs[string(exceptCidr)] = struct{}{}
-		}
-
 		var cidrL4Info []v1alpha1.Port
 
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
@@ -113,6 +108,11 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
+		}
+
+		// Track this rule's except CIDRs to handle later.
+		for _, exceptCidr := range firewallRule.Except {
+			exceptCidrs[string(exceptCidr)] = struct{}{}
 		}
 
 		// If no L4 specified add catch all entry
