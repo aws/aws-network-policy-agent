@@ -863,7 +863,7 @@ func maxPrefixLenForFamily(enableIPv6 bool) uint32 {
 	return 32
 }
 
-func TestComputeMapEntries_WrongFamilyExceptFiltered(t *testing.T) {
+func TestFWRuleProcessor_ComputeMapEntriesFromEndpointRules_WrongFamilyExceptFiltered(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
 	var port443 int32 = 443
 
