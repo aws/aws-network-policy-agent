@@ -891,3 +891,13 @@ func TestIsMissingFilterError(t *testing.T) {
 		})
 	}
 }
+
+func TestKtimeGetNs(t *testing.T) {
+	t1, err := KtimeGetNs()
+	assert.NoError(t, err)
+	assert.NotZero(t, t1, "KtimeGetNs should return non-zero monotonic time")
+
+	t2, err := KtimeGetNs()
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, t2, t1, "KtimeGetNs must be monotonically non-decreasing")
+}
