@@ -33,6 +33,10 @@ type MockBpfClient struct {
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
 
+	// BPFContextRegistered controls the IsBPFContextRegistered return value.
+	// Defaults to false; set true to simulate a pod whose probes are still attached.
+	BPFContextRegistered bool
+
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules

@@ -21,12 +21,18 @@ func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod,
 	return podsToBeCleanedUp
 }
 
-// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy
+// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy.
+// targetPodIdentifiers covers every identifier the policy selects cluster-wide, so it can be
+// large under churn
 func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, resourceName string, targetPodIdentifiers []string) []string {
 	var stalePodIdentifiers []string
 	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(GetParentNPNameFromPEName(resourceName)); ok {
+		targetSet := make(map[string]struct{}, len(targetPodIdentifiers))
+		for _, podIdentifier := range targetPodIdentifiers {
+			targetSet[podIdentifier] = struct{}{}
+		}
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
-			if !slices.Contains(targetPodIdentifiers, podIdentifier) {
+			if _, selected := targetSet[podIdentifier]; !selected {
 				stalePodIdentifiers = append(stalePodIdentifiers, podIdentifier)
 			}
 		}
