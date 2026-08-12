@@ -163,6 +163,86 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.policyEndpointSelectorMap))
 
 	})
+
+	t.Run("Reconcile cleans up non-local pod identifiers on pod churn and PE delete", func(t *testing.T) {
+		mockClient := mock_client.NewMockClient(ctrl)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+
+		remotePod1 := policyendpoint.PodEndpoint{
+			HostIP:    "2.2.2.2",
+			PodIP:     "10.1.2.1",
+			Name:      "deployment1rs-1",
+			Namespace: namespace,
+		}
+		remotePod2 := policyendpoint.PodEndpoint{
+			HostIP:    "2.2.2.2",
+			PodIP:     "10.1.2.2",
+			Name:      "deployment2rs-1",
+			Namespace: namespace,
+		}
+
+		currentPE := getPolicyEndpoint("allow-all-egress", namespace, []policyendpoint.PodEndpoint{remotePod1})
+		peDeleted := false
+
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+				if peDeleted {
+					return apierrors.NewNotFound(schema.GroupResource{Group: networking.SchemeGroupVersion.Group, Resource: ""}, "")
+				}
+				*pe = currentPE
+				return nil
+			},
+		).AnyTimes()
+
+		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				if peDeleted {
+					*list = policyendpoint.PolicyEndpointList{}
+				} else {
+					*list = policyendpoint.PolicyEndpointList{
+						Items: []policyendpoint.PolicyEndpoint{currentPE},
+					}
+				}
+				return nil
+			},
+		).AnyTimes()
+
+		req := controllerruntime.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      currentPE.GetName(),
+				Namespace: currentPE.GetNamespace(),
+			},
+		}
+
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), req)
+		assert.Nil(t, err)
+
+		// Non-local pod identifiers are tracked so a pod of the same replicaset
+		// landing on this node later gets policies applied at launch
+		val, ok := policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+		val, ok = policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		assert.True(t, ok)
+		assert.True(t, lo.Contains(val.([]string), "deployment1rs@my-namespace"))
+
+		// Rollout on the remote node: old replicaset replaced by a new one
+		currentPE = getPolicyEndpoint("allow-all-egress", namespace, []policyendpoint.PodEndpoint{remotePod2})
+		_, err = policyEndpointReconciler.Reconcile(context.TODO(), req)
+		assert.Nil(t, err)
+
+		_, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
+		assert.False(t, ok)
+		_, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment2rs@my-namespace")
+		assert.True(t, ok)
+
+		peDeleted = true
+		_, err = policyEndpointReconciler.Reconcile(context.TODO(), req)
+		assert.Nil(t, err)
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.networkPolicyToPodIdentifierMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.podIdentifierToPolicyEndpointMap))
+		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.policyEndpointSelectorMap))
+	})
 }
 
 func getPolicyEndpoint(npName string, namespace string, podEndpoints []policyendpoint.PodEndpoint) policyendpoint.PolicyEndpoint {
@@ -789,7 +869,7 @@ func TestDeriveTargetPods(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotActivePods, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
+			gotActivePods, _, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
 				&tt.policyendpoint, tt.parentPEList)
 			assert.Equal(t, tt.want.activePods, gotActivePods)
 		})
