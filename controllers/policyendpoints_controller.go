@@ -363,13 +363,25 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 	// Restore baseline state directly — this handles the case where stale pruning already
 	// removed the entry before cleanupPod runs.
 	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); !ok {
+		// Only restore baseline for a pod whose probes are still attached. If the BPF
+		// context is already gone there is nothing to restore, Skip it.
+		if !r.GeteBPFClient().IsBPFContextRegistered(podIdentifier) {
+			log().Infof("No entry in podIdentifierToPolicyEndpointMap and no BPF context for podIdentifier: %s. Pod already torn down, nothing to restore", podIdentifier)
+			return nil
+		}
 		state := DEFAULT_ALLOW
 		if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
 			state = DEFAULT_DENY
 		}
 		log().Infof("No entry in podIdentifierToPolicyEndpointMap for podIdentifier: %s. Restoring pod_state to baseline, networkPolicyMode: %s",
 			podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
-		return r.updateeBPFMaps(podIdentifier, nil, nil, state)
+
+		if err := r.updateeBPFMaps(podIdentifier, nil, nil, state); err != nil {
+			// Log, don't requeue. This could happen in cases where the pod is torn down while the cleanup is in progress
+			log().Errorf("Baseline restore failed for podIdentifier %s, ignoring requeue to clean the rules: %v",
+				podIdentifier, err)
+		}
+		return nil
 	}
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
@@ -600,7 +612,8 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	// node, so non-local identifiers that are no longer selected are flagged stale and
 	// pruned from podIdentifierToPolicyEndpointMap. (Tracking only local identifiers would
 	// leave non-local ones unprunable.)
-	stalePodIdentifiers := r.deriveStalePodIdentifiers(ctx, resourceName, allSelectedPodIdentifiersSlice)
+	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.networkPolicyToPodIdentifierMap,
+		resourceName, allSelectedPodIdentifiersSlice)
 
 	for _, policyEndpointResource := range parentPEList {
 		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource,
@@ -618,7 +631,8 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	// still runs when the NP was fully deleted (empty parentPEList) or its PE slices were
 	// renamed/re-sliced - cases the exact-PE-name delete inside the loop would miss.
 	for _, podIdentifier := range stalePodIdentifiers {
-		r.deleteParentNPFromPodIdentifierMap(ctx, podIdentifier, parentNP)
+		utils.DeleteParentNPFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
+			&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP)
 	}
 
 	// Track every identifier this Network Policy selects (any node) so the next reconcile
@@ -724,28 +738,6 @@ func (r *PolicyEndpointsReconciler) updatePodIdentifierToPEMap(ctx context.Conte
 	return
 }
 
-func (r *PolicyEndpointsReconciler) deriveStalePodIdentifiers(ctx context.Context, resourceName string,
-	targetPodIdentifiers []string) []string {
-
-	var stalePodIdentifiers []string
-	if currentPodIdentifiers, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(resourceName)); ok {
-		for _, podIdentifier := range currentPodIdentifiers.([]string) {
-			stalePodIdentifier := true
-			for _, pe := range targetPodIdentifiers {
-				if pe == podIdentifier {
-					//Nothing to do if this PE is already tracked against this podIdentifier
-					stalePodIdentifier = false
-					break
-				}
-			}
-			if stalePodIdentifier {
-				stalePodIdentifiers = append(stalePodIdentifiers, podIdentifier)
-			}
-		}
-	}
-	return stalePodIdentifiers
-}
-
 func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx context.Context, podIdentifier string,
 	policyEndpoint string) {
 	r.podIdentifierToPolicyEndpointMapMutex.Lock()
@@ -754,30 +746,6 @@ func (r *PolicyEndpointsReconciler) deletePolicyEndpointFromPodIdentifierMap(ctx
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
 		for _, policyEndpointName := range policyEndpointList.([]string) {
 			if policyEndpointName == policyEndpoint {
-				continue
-			}
-			currentPEList = append(currentPEList, policyEndpointName)
-		}
-		if len(currentPEList) == 0 {
-			r.podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
-		} else {
-			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentPEList)
-		}
-	}
-}
-
-// deleteParentNPFromPodIdentifierMap removes every PolicyEndpoint belonging to the given parent
-// NP from the pod identifier's tracked PE list, deleting the entry once empty. Matching by
-// parent NP name (rather than an exact PE name) means it cleans up even when the PE slices are
-// gone (full NP delete) or were renamed/re-sliced.
-func (r *PolicyEndpointsReconciler) deleteParentNPFromPodIdentifierMap(ctx context.Context, podIdentifier string,
-	parentNP string) {
-	r.podIdentifierToPolicyEndpointMapMutex.Lock()
-	defer r.podIdentifierToPolicyEndpointMapMutex.Unlock()
-	var currentPEList []string
-	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		for _, policyEndpointName := range policyEndpointList.([]string) {
-			if utils.GetParentNPNameFromPEName(policyEndpointName) == parentNP {
 				continue
 			}
 			currentPEList = append(currentPEList, policyEndpointName)

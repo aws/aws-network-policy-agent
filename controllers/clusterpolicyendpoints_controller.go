@@ -365,7 +365,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
 		r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
 		log().Infof("No CPEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
-		return newTargetPods, podIdentifiers, podsToBeCleanedUp
+		// Fall through to update the podIdentifierToClusterPolicyEndpointMap and clusterNetworkPolicyToPodIdentifierMap below, so stale identifiers are pruned
 	}
 
 	// Extract names for later use
@@ -394,11 +394,13 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	// podIdentifierToClusterPolicyEndpointMap.
 	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, resourceName, allSelectedPodIdentifiersSlice)
 
-	for _, ClusterPolicyEndpointResource := range parentCPEList {
+	for _, clusterPolicyEndpointResource := range parentCPEList {
 		if len(newTargetPods) > 0 {
-			r.ClusterPolicyEndpointSelectorMap.Store(ClusterPolicyEndpointResource, newTargetPods)
+			log().Infof("Update target pods for CPE Object Name %s with Total pods: %d", clusterPolicyEndpointResource, len(newTargetPods))
+			r.ClusterPolicyEndpointSelectorMap.Store(clusterPolicyEndpointResource, newTargetPods)
 		} else {
-			r.ClusterPolicyEndpointSelectorMap.Delete(ClusterPolicyEndpointResource)
+			log().Infof("No more target pods so deleting the entry in CPE selector map for Name %s", clusterPolicyEndpointResource)
+			r.ClusterPolicyEndpointSelectorMap.Delete(clusterPolicyEndpointResource)
 		}
 	}
 
@@ -466,8 +468,24 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 	// Restore baseline state directly — this handles the case where stale pruning already
 	// removed the entry before cleanupClusterPolicyPod runs.
 	if _, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); !ok {
+		// Only restore baseline for a pod whose probes are still attached. If the BPF
+		// context is already gone (CNI DEL tore it down for a deleted pod), there is
+		// nothing to restore. Skip it.
+		if !r.ebpfClient.IsBPFContextRegistered(podIdentifier) {
+			log().Infof("No entry in podIdentifierToClusterPolicyEndpointMap and no BPF context for podIdentifier: %s. Pod already torn down, nothing to restore", podIdentifier)
+			return nil
+		}
+
 		log().Infof("No entry in podIdentifierToClusterPolicyEndpointMap for podIdentifier: %s. Restoring cluster policy pod_state to baseline", podIdentifier)
-		return r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil)
+		if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
+			// Log, don't requeue - the context existed but the write failed, meaning the pod
+			// is being torn down, and deriveTargetPodsForParentCNP has already rewritten the
+			// maps the stale set comes from so a requeue could not re-derive this cleanup.
+			// See the equivalent comment in cleanupPod (policyendpoints_controller.go).
+			log().Errorf("Cluster policy baseline restore failed for podIdentifier %s, not requeuing (pod is being torn down, and a requeue cannot re-derive this cleanup): %v",
+				podIdentifier, err)
+		}
+		return nil
 	}
 
 	clusterPolicyIngressRules, clusterPolicyEgressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, clusterPolicyEndpoint, isDeleteFlow)

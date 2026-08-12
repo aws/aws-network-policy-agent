@@ -1659,3 +1659,94 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 	assert.NotEmpty(t, mockBpf.LastIngressRules)
 	assert.NotEmpty(t, mockBpf.LastEgressRules)
 }
+
+// When a pod's identifier is absent from podIdentifierToPolicyEndpointMap AND its BPF
+// context is already gone (the pod was deleted, CNI DEL tore down its probes), cleanupPod
+// must be a no-op: it must NOT attempt any eBPF map writes (which would fail with
+// "no bpf context registered" and fail the reconcile, delaying policy programming for live
+// pods). Regression test for the high-churn deleted-pod race.
+func TestCleanupPod_PodAlreadyTornDownSkipsWrites(t *testing.T) {
+	namespace := "my-namespace"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	// BPFContextRegistered defaults to false -> pod already torn down.
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+
+	// Note: podIdentifierToPolicyEndpointMap intentionally has NO entry for this pod
+	// (stale pruning already removed it before cleanupPod runs).
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "task-uuid1-abcd", Namespace: namespace},
+		PodIP:          "10.3.3.3",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	assert.NoError(t, err)
+
+	// No eBPF map writes should have been attempted.
+	assert.NotContains(t, mockBpf.CallLog, "UpdateEbpfMaps")
+	assert.NotContains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
+}
+
+// When a pod's identifier is absent from podIdentifierToPolicyEndpointMap but its BPF
+// context is still registered (the pod is alive and was merely deselected from its last
+// policy), cleanupPod must restore the baseline pod_state via eBPF map writes.
+func TestCleanupPod_DeselectedLivePodRestoresBaseline(t *testing.T) {
+	namespace := "my-namespace"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{BPFContextRegistered: true}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+
+	// No entry in podIdentifierToPolicyEndpointMap -> no policy tracks this pod anymore,
+	// but the pod is still alive (context registered) so baseline must be restored.
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	assert.NoError(t, err)
+
+	// Baseline restore writes the maps (updateeBPFMaps -> UpdateEbpfMaps + UpdatePodStateEbpfMaps).
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps")
+	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
+}
+
+// A failed baseline restore must not be returned as an error. Reaching the restore means the
+// BPF context existed, so a write failure means the pod is being torn down underneath us. A
+// requeue could not recover it either way: deriveTargetPodsForParentNP rewrites the maps the
+// stale set is derived from before cleanupPod runs, so the next reconcile derives an empty
+// stale set and never revisits this identifier - while the returned error would skip rule
+// programming for the live pods in the same batch.
+func TestCleanupPod_BaselineRestoreFailureDoesNotRequeue(t *testing.T) {
+	namespace := "my-namespace"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	// Context registered, so the restore is attempted - but the map write fails.
+	mockBpf := &ebpf.MockBpfClient{
+		BPFContextRegistered: true,
+		UpdateEbpfMapsErr:    errors.New("no bpf context registered for pod"),
+	}
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+
+	targetPod := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace},
+		PodIP:          "10.1.1.1",
+	}
+
+	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	assert.NoError(t, err, "a failed baseline restore must not fail the reconcile")
+
+	// The restore was genuinely attempted - this is not the already-torn-down skip path.
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps")
+}
