@@ -136,10 +136,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			_, alreadyInTrie := nonHostCIDRs[string(firewallRule.IPCidr)]
 			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule
 			if !alreadyInTrie {
-				_, ipNet, _ := net.ParseCIDR(string(firewallRule.IPCidr))
-				if ipNet != nil {
-					containmentTrie.insert(string(firewallRule.IPCidr), ipNet)
-				}
+				containmentTrie.insert(string(firewallRule.IPCidr))
 			}
 		}
 	}

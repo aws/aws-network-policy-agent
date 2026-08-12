@@ -12,23 +12,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func mustCIDR(t *testing.T, cidr string) *net.IPNet {
-	t.Helper()
-	_, ipNet, err := net.ParseCIDR(cidr)
-	assert.NoError(t, err)
-	return ipNet
-}
-
 func insertAll(t *testing.T, trie *cidrTrie, cidrs ...string) {
 	t.Helper()
 	for _, c := range cidrs {
-		trie.insert(c, mustCIDR(t, c))
+		trie.insert(c)
 	}
 }
 
 func TestCIDRTrie_Insert_NilIPNet(t *testing.T) {
 	trie := newCIDRTrie()
-	trie.insert("10.0.0.0/8", nil)
+	trie.insert("not-a-cidr")
 	assert.Empty(t, trie.findContainingKeys(net.ParseIP("10.1.2.3")))
 }
 
@@ -129,10 +122,7 @@ func portSet(ports []v1alpha1.Port) []string {
 func buildTrie(ruleMap map[string]EbpfFirewallRules) *cidrTrie {
 	trie := newCIDRTrie()
 	for cidr := range ruleMap {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil && ipNet != nil {
-			trie.insert(cidr, ipNet)
-		}
+		trie.insert(cidr)
 	}
 	return trie
 }

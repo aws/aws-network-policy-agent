@@ -46,9 +46,10 @@ func (t *cidrTrie) rootFor(isV6 bool) *cidrTrieNode {
 // prefix bits. The key is stored at the node corresponding to the last prefix bit,
 // so findContainingKeys can collect it when traversing an address that falls within
 // this prefix.
-func (t *cidrTrie) insert(cidrStr string, ipNet *net.IPNet) {
-	if ipNet == nil {
-		log().Debugf("cidrTrie.insert: skipping key %q: nil ipNet", cidrStr)
+func (t *cidrTrie) insert(cidrStr string) {
+	_, ipNet, err := net.ParseCIDR(cidrStr)
+	if err != nil || ipNet == nil {
+		log().Debugf("cidrTrie.insert: skipping key %q: parse error: %v", cidrStr, err)
 		return
 	}
 	ip, isV6 := normalizeIP(ipNet.IP)
