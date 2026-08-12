@@ -1314,9 +1314,19 @@ func (l *bpfClient) isEBPFProbeAttached(podName string, podNamespace string) (bo
 	return ingress, egress
 }
 
+// IsBPFContextRegistered reports whether a BPF context still exists for podIdentifier.
+// The context is created at probe-attach time and removed by DeleteBPFProbes on CNI DEL
+// (when the prog FD isn't shared). Callers use this to tell "pod still alive, probes
+// attached" from "pod already torn down" so they can skip map writes that would otherwise
+// fail with "no bpf context registered".
+func (l *bpfClient) IsBPFContextRegistered(podIdentifier string) bool {
+	_, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	return ok
+}
+
 // isFirstPodInPodIdentifierLocked reports whether podIdentifier is missing an ingress
 // or egress program on this node. Callers must hold the podIdentifier lock.
-func (l *bpfClient) isFirstPodInPodIdentifierLocked(podIdentifier string) bool {
+func (l *bpfClient) isFirstPodInPodIdentifierLocked(podIdentifier string) bool {>>>>>>> 1daadc1 (Fixes memory leak in the PodIdentifierToPolicyEndpoint map)
 	firstPodInPodIdentifier := false
 	if value, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
 		log().Info("No map instance found")

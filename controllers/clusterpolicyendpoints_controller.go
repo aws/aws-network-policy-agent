@@ -463,11 +463,13 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	// podIdentifierToClusterPolicyEndpointMap.
 	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, resourceName, allSelectedPodIdentifiersSlice)
 
-	for _, ClusterPolicyEndpointResource := range parentCPEList {
+	for _, clusterPolicyEndpointResource := range parentCPEList {
 		if len(newTargetPods) > 0 {
-			r.ClusterPolicyEndpointSelectorMap.Store(ClusterPolicyEndpointResource, newTargetPods)
+			log().Infof("Update target pods for CPE Object Name %s with Total pods: %d", clusterPolicyEndpointResource, len(newTargetPods))
+			r.ClusterPolicyEndpointSelectorMap.Store(clusterPolicyEndpointResource, newTargetPods)
 		} else {
-			r.ClusterPolicyEndpointSelectorMap.Delete(ClusterPolicyEndpointResource)
+			log().Infof("No more target pods so deleting the entry in CPE selector map for Name %s", clusterPolicyEndpointResource)
+			r.ClusterPolicyEndpointSelectorMap.Delete(clusterPolicyEndpointResource)
 		}
 	}
 

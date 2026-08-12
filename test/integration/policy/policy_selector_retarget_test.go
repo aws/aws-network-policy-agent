@@ -30,9 +30,15 @@ Sequence:
 var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 
 	const (
-		deployReadyTimeout = 2 * time.Minute
-		bpfSettleInterval  = 15 * time.Second
+		bpfSettleInterval = 15 * time.Second
+		// Unprivileged port: the busybox test image runs as a non-root user and cannot
+		// bind 80. Kept as a constant so the servers and the prober can't drift apart.
+		retargetPort = 8080
 	)
+
+	// busybox `nc -l` serves one connection and exits, and `-e` is not available in all
+	// busybox builds - so re-listen in a loop instead. Same shape as except_block_test.go.
+	listenLoop := fmt.Sprintf("while true; do nc -l -p %d; done", retargetPort)
 
 	var (
 		deployA, deployB, deployProber *appsv1.Deployment
@@ -51,7 +57,7 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 			Container(manifest.NewBusyBoxContainerBuilder().
 				ImageRepository(fw.Options.TestImageRegistry).
 				Command([]string{"/bin/sh", "-c"}).
-				Args([]string{"nc -lk -p 80 -e echo ok"}).
+				Args([]string{listenLoop}).
 				Build()).
 			Build()
 		deployA, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, deployA)
@@ -65,7 +71,7 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 			Container(manifest.NewBusyBoxContainerBuilder().
 				ImageRepository(fw.Options.TestImageRegistry).
 				Command([]string{"/bin/sh", "-c"}).
-				Args([]string{"nc -lk -p 80 -e echo ok"}).
+				Args([]string{listenLoop}).
 				Build()).
 			Build()
 		deployB, err = fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, deployB)
@@ -121,8 +127,8 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A is blocked and pod B is unaffected")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP)).To(Equal("BLOCKED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP)).To(Equal("CONNECTED"))
+		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
+		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("CONNECTED"))
 
 		By("Updating policy P's selector to target pod B instead of pod A")
 		Eventually(func() error {
@@ -136,8 +142,8 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A recovered to allow and pod B is now blocked")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP)).To(Equal("CONNECTED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP)).To(Equal("BLOCKED"))
+		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("CONNECTED"))
+		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
 
 		By("Creating a new policy Q that re-targets pod A")
 		policyQ = &network.NetworkPolicy{
@@ -151,8 +157,8 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A is blocked again by Q and pod B remains blocked by P")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP)).To(Equal("BLOCKED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP)).To(Equal("BLOCKED"))
+		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
+		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
 	})
 })
 
@@ -163,8 +169,8 @@ func getSinglePod(appLabel string) v1.Pod {
 	return pods[0]
 }
 
-func retargetConnect(proberPodName, ip string) string {
-	cmd := fmt.Sprintf("nc -z -w3 %s 80 && echo CONNECTED || echo BLOCKED", ip)
+func retargetConnect(proberPodName, ip string, port int) string {
+	cmd := fmt.Sprintf("nc -z -w3 %s %d && echo CONNECTED || echo BLOCKED", ip, port)
 	out, err := fw.PodManager.ExecInPod(namespace, proberPodName, []string{"/bin/sh", "-c", cmd})
 	Expect(err).ToNot(HaveOccurred(), "retargetConnect exec failed")
 	if strings.Contains(out, "CONNECTED") {
