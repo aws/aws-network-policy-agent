@@ -392,7 +392,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	// diff cover every identifier this CNP selects on any node, so non-local identifiers
 	// that are no longer selected are flagged stale and pruned from
 	// podIdentifierToClusterPolicyEndpointMap.
-	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, resourceName, allSelectedPodIdentifiersSlice)
+	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, parentCNP, allSelectedPodIdentifiersSlice)
 
 	for _, clusterPolicyEndpointResource := range parentCPEList {
 		if len(newTargetPods) > 0 {

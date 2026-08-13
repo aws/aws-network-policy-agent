@@ -7,47 +7,56 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestGetNetworkPolicyIdentifier(t *testing.T) {
+	first := GetNetworkPolicyIdentifier("policy-with-hyphen", "namespace")
+	second := GetNetworkPolicyIdentifier("policy", "with-hyphen-namespace")
+
+	assert.Equal(t, "policy-with-hyphen/namespace", first)
+	assert.Equal(t, "policy/with-hyphen-namespace", second)
+	assert.NotEqual(t, first, second)
+}
+
 func TestDeriveStalePodIdentifiers(t *testing.T) {
 	tests := []struct {
 		name string
-		// stored is the previous snapshot in networkPolicyToPodIdentifierMap, keyed by parent NP
+		// stored is the previous snapshot in networkPolicyToPodIdentifierMap, keyed by policy identifier
 		stored               map[string][]string
-		resourceName         string
+		policyIdentifier     string
 		targetPodIdentifiers []string
 		want                 []string
 	}{
 		{
 			name:                 "no previous snapshot for this NP",
 			stored:               map[string][]string{},
-			resourceName:         "np-abcd",
+			policyIdentifier:     "np/ns",
 			targetPodIdentifiers: []string{"rs1@ns"},
 			want:                 nil,
 		},
 		{
 			name:                 "all previously selected identifiers still selected",
-			stored:               map[string][]string{"np": {"rs1@ns", "rs2@ns"}},
-			resourceName:         "np-abcd",
+			stored:               map[string][]string{"np/ns": {"rs1@ns", "rs2@ns"}},
+			policyIdentifier:     "np/ns",
 			targetPodIdentifiers: []string{"rs1@ns", "rs2@ns"},
 			want:                 nil,
 		},
 		{
 			name:                 "identifier no longer selected is stale",
-			stored:               map[string][]string{"np": {"rs1@ns", "churned@ns"}},
-			resourceName:         "np-abcd",
+			stored:               map[string][]string{"np/ns": {"rs1@ns", "churned@ns"}},
+			policyIdentifier:     "np/ns",
 			targetPodIdentifiers: []string{"rs1@ns"},
 			want:                 []string{"churned@ns"},
 		},
 		{
 			name:                 "empty current set makes every previous identifier stale (full NP delete)",
-			stored:               map[string][]string{"np": {"rs1@ns", "rs2@ns"}},
-			resourceName:         "np-abcd",
+			stored:               map[string][]string{"np/ns": {"rs1@ns", "rs2@ns"}},
+			policyIdentifier:     "np/ns",
 			targetPodIdentifiers: nil,
 			want:                 []string{"rs1@ns", "rs2@ns"},
 		},
 		{
 			name:                 "only this NP's snapshot is consulted",
-			stored:               map[string][]string{"np": {"rs1@ns"}, "other-np": {"rs9@ns"}},
-			resourceName:         "np-abcd",
+			stored:               map[string][]string{"np/ns": {"rs1@ns"}, "other-np/ns": {"rs9@ns"}},
+			policyIdentifier:     "np/ns",
 			targetPodIdentifiers: nil,
 			want:                 []string{"rs1@ns"},
 		},
@@ -59,7 +68,7 @@ func TestDeriveStalePodIdentifiers(t *testing.T) {
 			for k, v := range tt.stored {
 				m.Store(k, v)
 			}
-			got := DeriveStalePodIdentifiers(&m, tt.resourceName, tt.targetPodIdentifiers)
+			got := DeriveStalePodIdentifiers(&m, tt.policyIdentifier, tt.targetPodIdentifiers)
 			assert.ElementsMatch(t, tt.want, got)
 		})
 	}

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -177,7 +178,11 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	parentNP := utils.GetParentNPNameFromPEName(req.NamespacedName.Name)
 	resourceName := req.NamespacedName.Name
 	resourceNamespace := req.NamespacedName.Namespace
-	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+	targetPods, podIdentifiers, podsToBeCleanedUp, err := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+	if err != nil {
+		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
+		return err
+	}
 
 	r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 
@@ -249,11 +254,15 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	resourceNamespace := policyEndpoint.Namespace
 	resourceName := policyEndpoint.Name
 
-	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+	targetPods, podIdentifiers, podsToBeCleanedUp, err := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+	if err != nil {
+		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
+		return err
+	}
 
 	// Check if we need to remove this policy against any existing pods against which this policy
 	// is currently active. podIdentifiers will have the pod identifiers of the targetPods from the derived PEs
-	err := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers, false)
+	err = r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers, false)
 	if err != nil {
 		log().Errorf("failed to update policy enforcement status for existing pods: %v", err)
 		return err
@@ -554,13 +563,17 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(podIdentifier string,
 }
 
 func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
-	parentNP, resourceNamespace, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod) {
+	parentNP, resourceNamespace, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod, error) {
 	var targetPods, podsToBeCleanedUp, currentPods []npatypes.Pod
 	var allSelectedPodIdentifiersSlice []string        // all identifiers this NP selects (any node)
 	podIdentifiers := make(map[string]bool)            // node-local only
 	allSelectedPodIdentifiers := make(map[string]bool) // all identifiers this NP selects (any node) - dedupe across PEs
 
-	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
+	parentPEList, err := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	log().Infof("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
 
 	policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(resourceName,
@@ -592,6 +605,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 				continue
 			}
 		}
+
 		log().Infof("Processing PE Name %s", policyEndpointResourceName)
 		currentTargetPods, currentPodIdentifiers, currentAllSelectedPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
 		log().Infof("Adding to current targetPods Total pods: %d", len(currentTargetPods))
@@ -612,8 +626,9 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	// node, so non-local identifiers that are no longer selected are flagged stale and
 	// pruned from podIdentifierToPolicyEndpointMap. (Tracking only local identifiers would
 	// leave non-local ones unprunable.)
+	policyIdentifier := utils.GetNetworkPolicyIdentifier(parentNP, resourceNamespace)
 	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.networkPolicyToPodIdentifierMap,
-		resourceName, allSelectedPodIdentifiersSlice)
+		policyIdentifier, allSelectedPodIdentifiersSlice)
 
 	for _, policyEndpointResource := range parentPEList {
 		policyEndpointIdentifier := utils.GetPolicyEndpointIdentifier(policyEndpointResource,
@@ -639,14 +654,14 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	// can diff against it and prune identifiers (including non-local ones) that are no
 	// longer selected.
 	if len(allSelectedPodIdentifiersSlice) == 0 {
-		r.networkPolicyToPodIdentifierMap.Delete(utils.GetParentNPNameFromPEName(resourceName))
+		r.networkPolicyToPodIdentifierMap.Delete(policyIdentifier)
 	} else {
-		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), allSelectedPodIdentifiersSlice)
+		r.networkPolicyToPodIdentifierMap.Store(policyIdentifier, allSelectedPodIdentifiersSlice)
 	}
 	if len(currentPods) > 0 {
 		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods, podIdentifiers)
 	}
-	return targetPods, podIdentifiers, podsToBeCleanedUp
+	return targetPods, podIdentifiers, podsToBeCleanedUp, nil
 }
 
 // Derives list of local pods the policy endpoint resource selects.
@@ -779,15 +794,20 @@ func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ct
 		Complete(r)
 }
 
-func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.Context, parentNP, resourceNamespace string) []string {
+func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.Context, parentNP, resourceNamespace string) ([]string, error) {
 	var parentPolicyEndpointList []string
 
 	policyEndpointList := &policyk8sawsv1.PolicyEndpointList{}
 	if err := r.k8sClient.List(ctx, policyEndpointList, &client.ListOptions{
 		Namespace: resourceNamespace,
 	}); err != nil {
+		// If no PolicyEndpoint resources are found, we return an empty list. It does not return with an error
 		log().Errorf("Unable to list PolicyEndpoints err: %v", err)
-		return nil
+		return nil, fmt.Errorf(
+			"list PolicyEndpoints in namespace %q: %w",
+			resourceNamespace,
+			err,
+		)
 	}
 
 	for _, policyEndpoint := range policyEndpointList.Items {
@@ -796,7 +816,7 @@ func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.
 			log().Debugf("Found another PE resource for the parent NP name %s", policyEndpoint.Name)
 		}
 	}
-	return parentPolicyEndpointList
+	return parentPolicyEndpointList, nil
 }
 
 func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {

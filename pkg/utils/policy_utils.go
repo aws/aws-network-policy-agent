@@ -21,12 +21,18 @@ func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod,
 	return podsToBeCleanedUp
 }
 
+// GetNetworkPolicyIdentifier returns an injective in-memory key for a namespaced
+// NetworkPolicy. "/" cannot appear in either Kubernetes name component.
+func GetNetworkPolicyIdentifier(policyName, policyNamespace string) string {
+	return policyName + "/" + policyNamespace
+}
+
 // DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy.
 // targetPodIdentifiers covers every identifier the policy selects cluster-wide, so it can be
-// large under churn
-func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, resourceName string, targetPodIdentifiers []string) []string {
+// large under churn.
+func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, policyIdentifier string, targetPodIdentifiers []string) []string {
 	var stalePodIdentifiers []string
-	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(GetParentNPNameFromPEName(resourceName)); ok {
+	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(policyIdentifier); ok {
 		targetSet := make(map[string]struct{}, len(targetPodIdentifiers))
 		for _, podIdentifier := range targetPodIdentifiers {
 			targetSet[podIdentifier] = struct{}{}

@@ -79,7 +79,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		})
 
 		assert.Nil(t, err)
-		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("allow-all-egress", "my-namespace"))
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "deployment1rs@my-namespace"))
 
@@ -125,7 +125,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		})
 
 		assert.Nil(t, err)
-		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("allow-all-egress", "my-namespace"))
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "deployment1rs@my-namespace"))
 
@@ -290,10 +290,105 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 
 	// networkPolicyToPodIdentifierMap now tracks the cluster-wide set; it must be
 	// a single NP entry holding exactly the 3 live identifiers, not churn history.
-	val, ok := r.networkPolicyToPodIdentifierMap.Load("allow-all-egress")
+	val, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("allow-all-egress", "my-namespace"))
 	assert.True(t, ok)
 	assert.Equal(t, 3, len(val.([]string)),
 		"networkPolicyToPodIdentifierMap should track only currently-selected identifiers")
+}
+
+func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testing.T) {
+	const (
+		policyName = "default-deny"
+		namespaceA = "team-a"
+		namespaceB = "team-b"
+		nodeIP     = "1.1.1.1"
+	)
+
+	podA := policyendpoint.PodEndpoint{
+		HostIP:    "2.2.2.2",
+		PodIP:     "10.2.1.1",
+		Name:      "workload-a-1",
+		Namespace: namespaceA,
+	}
+	podB := policyendpoint.PodEndpoint{
+		HostIP:    "3.3.3.3",
+		PodIP:     "10.3.1.1",
+		Name:      "workload-b-1",
+		Namespace: namespaceB,
+	}
+
+	policyEndpointA := getPolicyEndpoint(policyName, namespaceA, []policyendpoint.PodEndpoint{podA})
+	policyEndpointA.Name = policyName + "-aaaa"
+	policyEndpointB := getPolicyEndpoint(policyName, namespaceB, []policyendpoint.PodEndpoint{podB})
+	policyEndpointB.Name = policyName + "-bbbb"
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
+
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			switch key {
+			case types.NamespacedName{Name: policyEndpointA.Name, Namespace: namespaceA}:
+				*currentPE = policyEndpointA
+			case types.NamespacedName{Name: policyEndpointB.Name, Namespace: namespaceB}:
+				*currentPE = policyEndpointB
+			default:
+				return fmt.Errorf("unexpected PolicyEndpoint get: %s", key)
+			}
+			return nil
+		},
+	).AnyTimes()
+
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			if len(opts) != 1 {
+				return fmt.Errorf("expected one ListOption, got %d", len(opts))
+			}
+			switch opts[0].Namespace {
+			case namespaceA:
+				*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{policyEndpointA}}
+			case namespaceB:
+				*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{policyEndpointB}}
+			default:
+				return fmt.Errorf("unexpected PolicyEndpoint list namespace: %s", opts[0].Namespace)
+			}
+			return nil
+		},
+	).AnyTimes()
+
+	for _, pe := range []policyendpoint.PolicyEndpoint{policyEndpointA, policyEndpointB} {
+		_, err := r.Reconcile(context.Background(), controllerruntime.Request{
+			NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace},
+		})
+		assert.NoError(t, err)
+	}
+
+	for _, want := range []struct {
+		namespace     string
+		podIdentifier string
+		peName        string
+	}{
+		{namespace: namespaceA, podIdentifier: utils.GetPodIdentifier(podA.Name, podA.Namespace), peName: policyEndpointA.Name},
+		{namespace: namespaceB, podIdentifier: utils.GetPodIdentifier(podB.Name, podB.Namespace), peName: policyEndpointB.Name},
+	} {
+		snapshot, ok := r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(policyName, want.namespace))
+		assert.True(t, ok, "missing reverse snapshot for namespace %s", want.namespace)
+		if ok {
+			assert.ElementsMatch(t, []string{want.podIdentifier}, snapshot.([]string))
+		}
+
+		policyEndpoints, ok := r.podIdentifierToPolicyEndpointMap.Load(want.podIdentifier)
+		assert.True(t, ok, "missing forward mapping for namespace %s", want.namespace)
+		if ok {
+			assert.Contains(t, policyEndpoints.([]string), want.peName)
+		}
+	}
+
+	assert.Equal(t, 2, sizeOfSyncMap(&r.networkPolicyToPodIdentifierMap))
+	assert.Equal(t, 2, sizeOfSyncMap(&r.podIdentifierToPolicyEndpointMap))
 }
 
 func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
