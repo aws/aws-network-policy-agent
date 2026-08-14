@@ -156,6 +156,22 @@ func TestLoadBPFProgram(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// A partial map set: non-empty, valid progFD, but the pod state map is
+			// absent. Indexing it later would yield a zero-valued BpfMap with FD 0
+			// and every write would fail with EINVAL, so the load must be rejected.
+			name: "program loaded without the pod state map",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 7},
+					Maps: map[string]goebpfmaps.BpfMap{
+						utils.TC_INGRESS_MAP:                {MapFD: 100},
+						utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 102},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name: "program loaded with invalid FD",
 			loadReturn: map[string]goelf.BpfData{
 				pinPath: {

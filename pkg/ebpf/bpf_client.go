@@ -996,6 +996,23 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
 	}
 
+	// A non-empty map set is not sufficient: the SDK has been observed returning a
+	// program with a valid FD and a map set that is short one entry. Indexing a map
+	// that is absent yields a zero-valued BpfMap whose FD is 0, and the kernel rejects
+	// a write to FD 0 with EINVAL. On the pod state map that failure is silent and
+	// unrecoverable -- the pod never gets its state entry, so the datapath drops its
+	// traffic -- so reject the load here and let the caller retry for a complete
+	// program instead of caching a context that can never satisfy a write.
+	podStateMapName := utils.TC_INGRESS_POD_STATE_MAP
+	if direction == "egress" {
+		podStateMapName = utils.TC_EGRESS_POD_STATE_MAP
+	}
+	if _, found := bpfData.Maps[podStateMapName]; !found {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-MissingPodStateMap").Inc()
+		return nil, -1, fmt.Errorf("program loaded without required map %s for pod %s direction %s progFD %d (loaded maps: %d)",
+			podStateMapName, podIdentifier, direction, progFD, len(bpfData.Maps))
+	}
+
 	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
 
 	return progInfo, progFD, nil
@@ -1253,12 +1270,13 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 }
 
 // evictBPFContextAfterPodStateFailure drops the cached BPFContext for podIdentifier after a
-// pod state map write has failed. The context holds raw descriptors, and FD numbers are
-// recycled after a program reload, so a cached map FD can come to refer to a non-map object
-// -- the kernel rejects that with EINVAL, and retrying against the same handle can never
-// recover. A pod state write failure is already outage-grade (the datapath drops packets
-// when the entry is missing), so discard the context and let the next reconcile reload the
-// program and re-derive fresh descriptors.
+// pod state map write has failed. The cached context can hold a program whose map set is
+// incomplete, and every write against that same context fails identically, so an in-process
+// retry cannot recover on its own. The PolicyEndpoint reconciler is the case that needs this:
+// it requeues with backoff and re-reads the cached context rather than reloading the program,
+// so without eviction it would retry the same unusable handles indefinitely. A pod state write
+// failure is already outage-grade (the datapath drops packets when the entry is missing), so
+// discard the context and let the next reconcile reload the program and re-derive its maps.
 func (l *bpfClient) evictBPFContextAfterPodStateFailure(podIdentifier string, op string) {
 	l.policyEndpointeBPFContext.Delete(podIdentifier)
 	log().Errorf("Evicted bpf context for podIdentifier %s after pod state %s failure; probes will be reloaded on the next reconcile", podIdentifier, op)
