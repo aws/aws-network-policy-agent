@@ -6,7 +6,7 @@ import (
 
 type cidrTrieNode struct {
 	children [2]*cidrTrieNode
-	cidrKeys []string
+	cidrKey  string
 }
 
 // cidrTrie keeps IPv4 and IPv6 in separate sub-tries to avoid cross-family prefix collisions.
@@ -65,6 +65,9 @@ func (t *cidrTrie) insert(cidrStr string) {
 	}
 
 	if !isV6 && bits == 128 {
+		// v4-mapped IPv6 CIDR (e.g. ::ffff:10.0.0.0/104): normalizeIP converted
+		// the IP to 4-byte v4 form, but the mask still reports 128-bit width.
+		// Subtract the 96-bit v6 prefix to get the effective v4 prefix length.
 		ones -= 96
 	}
 
@@ -85,7 +88,9 @@ func (t *cidrTrie) insert(cidrStr string) {
 		}
 		node = node.children[bit]
 	}
-	node.cidrKeys = append(node.cidrKeys, cidrStr)
+	// Store the canonical form (host bits masked) so the key matches
+	// what the caller uses in the nonHostCIDRs map.
+	node.cidrKey = ipNet.String()
 }
 
 // findContainingKeys walks the trie from root to leaf along the bits of ip,
@@ -100,8 +105,8 @@ func (t *cidrTrie) findContainingKeys(ip net.IP) []string {
 	}
 
 	node := t.rootFor(isV6)
-	if len(node.cidrKeys) > 0 {
-		result = append(result, node.cidrKeys...)
+	if node.cidrKey != "" {
+		result = append(result, node.cidrKey)
 	}
 
 	maxBits := len(ipBytes) * 8
@@ -115,8 +120,8 @@ func (t *cidrTrie) findContainingKeys(ip net.IP) []string {
 		}
 		node = node.children[bit]
 
-		if len(node.cidrKeys) > 0 {
-			result = append(result, node.cidrKeys...)
+		if node.cidrKey != "" {
+			result = append(result, node.cidrKey)
 		}
 	}
 

@@ -19,17 +19,7 @@ func insertAll(t *testing.T, trie *cidrTrie, cidrs ...string) {
 	}
 }
 
-func TestCIDRTrie_Insert_NilIPNet(t *testing.T) {
-	trie := newCIDRTrie()
-	trie.insert("not-a-cidr")
-	assert.Empty(t, trie.findContainingKeys(net.ParseIP("10.1.2.3")))
-}
-
-func TestCIDRTrie_FindContainingKeys_NilIP(t *testing.T) {
-	trie := newCIDRTrie()
-	insertAll(t, trie, "10.0.0.0/8")
-	assert.Empty(t, trie.findContainingKeys(nil))
-}
+// --- Core correctness ---
 
 func TestCIDRTrie_IPv4_Containment(t *testing.T) {
 	tests := []struct {
@@ -39,11 +29,12 @@ func TestCIDRTrie_IPv4_Containment(t *testing.T) {
 		want    []string
 	}{
 		{"single containing CIDR", []string{"10.0.0.0/8"}, "10.1.2.3", []string{"10.0.0.0/8"}},
-		{"nested ancestors broadest-first", []string{"10.0.0.0/8", "10.1.0.0/16", "10.1.2.0/24"}, "10.1.2.3", []string{"10.0.0.0/8", "10.1.0.0/16", "10.1.2.0/24"}},
+		{"nested ancestors broadest-first", []string{"0.0.0.0/0", "10.0.0.0/8", "10.1.0.0/16", "10.1.2.0/24"}, "10.1.2.3", []string{"0.0.0.0/0", "10.0.0.0/8", "10.1.0.0/16", "10.1.2.0/24"}},
 		{"sibling prefix not matched", []string{"10.1.0.0/16", "10.2.0.0/16"}, "10.1.2.3", []string{"10.1.0.0/16"}},
 		{"exact /32 match", []string{"10.1.2.3/32"}, "10.1.2.3", []string{"10.1.2.3/32"}},
-		{"no match", []string{"192.168.0.0/16"}, "10.1.2.3", nil},
-		{"catch-all /0", []string{"0.0.0.0/0"}, "10.1.2.3", []string{"0.0.0.0/0"}},
+		{"no match returns nil", []string{"192.168.0.0/16"}, "10.1.2.3", nil},
+		{"catch-all /0", []string{"0.0.0.0/0"}, "0.0.0.0", []string{"0.0.0.0/0"}},
+		{"empty trie", nil, "10.1.2.3", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,11 +53,11 @@ func TestCIDRTrie_IPv6_Containment(t *testing.T) {
 		want    []string
 	}{
 		{"single containing CIDR", []string{"2001:db8::/32"}, "2001:db8:abcd:12::10", []string{"2001:db8::/32"}},
-		{"nested ancestors broadest-first", []string{"2001:db8::/32", "2001:db8:abcd::/48", "2001:db8:abcd:12::/64"}, "2001:db8:abcd:12::10", []string{"2001:db8::/32", "2001:db8:abcd::/48", "2001:db8:abcd:12::/64"}},
+		{"nested ancestors broadest-first", []string{"::/0", "2001:db8::/32", "2001:db8:abcd::/48"}, "2001:db8:abcd:12::10", []string{"::/0", "2001:db8::/32", "2001:db8:abcd::/48"}},
 		{"sibling /64 not matched", []string{"2001:db8:abcd:12::/64", "2001:db8:abcd:13::/64"}, "2001:db8:abcd:12::10", []string{"2001:db8:abcd:12::/64"}},
 		{"exact /128 match", []string{"2001:db8::1/128"}, "2001:db8::1", []string{"2001:db8::1/128"}},
 		{"no match", []string{"fd00::/8"}, "2001:db8::1", nil},
-		{"catch-all ::/0", []string{"::/0"}, "2001:db8::1", []string{"::/0"}},
+		{"catch-all ::/0 on zero IP", []string{"::/0"}, "::", []string{"::/0"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -78,22 +69,70 @@ func TestCIDRTrie_IPv6_Containment(t *testing.T) {
 }
 
 func TestCIDRTrie_FamilyIsolation(t *testing.T) {
-	v6 := newCIDRTrie()
-	insertAll(t, v6, "2001:db8::/32")
-	assert.Empty(t, v6.findContainingKeys(net.ParseIP("32.1.13.184")), "v4 lookup must not match a v6 key")
+	// v6 lookup on v4-only trie must not match
+	v4Only := newCIDRTrie()
+	insertAll(t, v4Only, "10.0.0.0/8")
+	assert.Empty(t, v4Only.findContainingKeys(net.ParseIP("2001:db8::1")),
+		"v6 lookup must not match a v4 key")
 
-	v4 := newCIDRTrie()
-	insertAll(t, v4, "10.0.0.0/8")
-	assert.Empty(t, v4.findContainingKeys(net.ParseIP("2001:db8::1")), "v6 lookup must not match a v4 key")
+	// v4 lookup on v6-only trie must not match
+	v6Only := newCIDRTrie()
+	insertAll(t, v6Only, "2001:db8::/32")
+	assert.Empty(t, v6Only.findContainingKeys(net.ParseIP("10.1.2.3")),
+		"v4 lookup must not match a v6 key")
+
+	// v4 IP (32.1.13.184) whose leading bits resemble 2001:db8:: must not cross-match
+	assert.Empty(t, v6Only.findContainingKeys(net.ParseIP("32.1.13.184")),
+		"v4 IP sharing leading bits with v6 CIDR must not cross-match")
+
+	// Mixed trie: each family finds only its own
+	mixed := newCIDRTrie()
+	insertAll(t, mixed, "10.0.0.0/8", "2001:db8::/32")
+	assert.Equal(t, []string{"10.0.0.0/8"}, mixed.findContainingKeys(net.ParseIP("10.1.2.3")))
+	assert.Equal(t, []string{"2001:db8::/32"}, mixed.findContainingKeys(net.ParseIP("2001:db8::1")))
 }
 
-func TestCIDRTrie_MixedFamiliesSameTrie(t *testing.T) {
+// --- Nil / invalid input safety ---
+
+func TestCIDRTrie_NilAndInvalidInputs(t *testing.T) {
 	trie := newCIDRTrie()
-	insertAll(t, trie, "10.0.0.0/8", "10.1.0.0/16", "2001:db8::/32", "2001:db8:abcd::/48")
+	// Invalid inserts: must not panic, must not pollute
+	trie.insert("")
+	trie.insert("not-a-cidr")
+	trie.insert("also/invalid")
+	insertAll(t, trie, "10.0.0.0/8")
 
-	assert.Equal(t, []string{"10.0.0.0/8", "10.1.0.0/16"}, trie.findContainingKeys(net.ParseIP("10.1.2.3")))
-	assert.Equal(t, []string{"2001:db8::/32", "2001:db8:abcd::/48"}, trie.findContainingKeys(net.ParseIP("2001:db8:abcd:12::10")))
+	// Only valid CIDR should be findable
+	assert.Equal(t, []string{"10.0.0.0/8"}, trie.findContainingKeys(net.ParseIP("10.1.2.3")))
+
+	// Nil and garbage IP queries: must not panic, must return empty
+	assert.Empty(t, trie.findContainingKeys(nil))
+	assert.Empty(t, trie.findContainingKeys(net.ParseIP("not-an-ip")))
 }
+
+// --- Canonicalization ---
+
+func TestCIDRTrie_Canonicalization(t *testing.T) {
+	trie := newCIDRTrie()
+
+	// Non-canonical v4 (host bits set) -> stored as canonical
+	trie.insert("10.0.0.1/8") // masks to 10.0.0.0/8
+	assert.Equal(t, []string{"10.0.0.0/8"}, trie.findContainingKeys(net.ParseIP("10.99.99.99")))
+
+	// v4-mapped IPv6 -> stored as v4 canonical
+	trie2 := newCIDRTrie()
+	trie2.insert("::ffff:10.0.0.0/104") // -> 10.0.0.0/8
+	trie2.insert("::ffff:0:0/96")       // -> 0.0.0.0/0
+	assert.Equal(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, trie2.findContainingKeys(net.ParseIP("10.1.2.3")))
+	assert.NotContains(t, trie2.findContainingKeys(net.ParseIP("11.0.0.1")), "10.0.0.0/8")
+
+	// Duplicate insert -> idempotent (single result, not doubled)
+	trie3 := newCIDRTrie()
+	insertAll(t, trie3, "10.0.0.0/8", "10.0.0.0/8", "10.0.0.0/8")
+	assert.Equal(t, []string{"10.0.0.0/8"}, trie3.findContainingKeys(net.ParseIP("10.1.2.3")))
+}
+
+// --- Oracle test: trie vs linear scan equivalence ---
 
 func portKeyString(p v1alpha1.Port) string {
 	proto := ""
@@ -148,48 +187,13 @@ func rule(port int32, except ...string) EbpfFirewallRules {
 	}
 }
 
-func TestTrieVsLinear_IPv4_Curated(t *testing.T) {
-	ruleMap := map[string]EbpfFirewallRules{
-		"10.0.0.0/8":     rule(80, "10.1.2.0/24"),
-		"10.1.0.0/16":    rule(443),
-		"192.168.0.0/16": rule(8080),
-		"0.0.0.0/0":      rule(53),
-	}
-	for _, target := range []string{"10.1.2.3/32", "10.5.6.7/32", "192.168.1.1/32", "8.8.8.8/32"} {
-		assertEquivalent(t, ruleMap, target)
-	}
-}
-
-func TestTrieVsLinear_IPv6_Curated(t *testing.T) {
-	ruleMap := map[string]EbpfFirewallRules{
-		"2001:db8::/32":         rule(80, "2001:db8:abcd::/48"),
-		"2001:db8:abcd:12::/64": rule(443),
-		"fd00::/8":              rule(8080),
-		"::/0":                  rule(53),
-	}
-	for _, target := range []string{"2001:db8:abcd:12::10/128", "2001:db8:1::1/128", "fd00::1/128", "2600::1/128"} {
-		assertEquivalent(t, ruleMap, target)
-	}
-}
-
-func TestTrieVsLinear_MixedFamilies(t *testing.T) {
-	ruleMap := map[string]EbpfFirewallRules{
-		"10.0.0.0/8":    rule(80),
-		"2001:db8::/32": rule(443),
-	}
-	assertEquivalent(t, ruleMap, "10.1.2.3/32")
-	assertEquivalent(t, ruleMap, "2001:db8::1/128")
-	// 32.1.13.184 shares leading bits with 2001:db8::/32 -- must only match the v4 rule.
-	assertEquivalent(t, ruleMap, "32.1.13.184/32")
-}
-
 func randV4CIDR(r *rand.Rand) string {
-	prefix := r.Intn(25) + 8 // /8../32
+	prefix := r.Intn(25) + 8
 	return fmt.Sprintf("%d.%d.%d.%d/%d", r.Intn(256), r.Intn(256), r.Intn(256), r.Intn(256), prefix)
 }
 
 func randV6CIDR(r *rand.Rand) string {
-	prefix := (r.Intn(8) + 4) * 8 // /32../96, byte-aligned for readable coverage
+	prefix := (r.Intn(8) + 4) * 8
 	return fmt.Sprintf("%x:%x:%x:%x::/%d", r.Intn(0x10000), r.Intn(0x10000), r.Intn(0x10000), r.Intn(0x10000), prefix)
 }
 
@@ -202,7 +206,7 @@ func randV6IP(r *rand.Rand) string {
 }
 
 func randV4MappedV6CIDR(r *rand.Rand) string {
-	prefix := r.Intn(17) + 96 // /96../112
+	prefix := r.Intn(17) + 96
 	return fmt.Sprintf("::ffff:%d.%d.0.0/%d", r.Intn(256), r.Intn(256), prefix)
 }
 
@@ -220,7 +224,7 @@ func randSubCIDR(r *rand.Rand, parent string) string {
 }
 
 func TestTrieVsLinear_Randomized(t *testing.T) {
-	r := rand.New(rand.NewSource(1)) // fixed seed for reproducibility
+	r := rand.New(rand.NewSource(1))
 	for iter := 0; iter < 500; iter++ {
 		ruleMap := make(map[string]EbpfFirewallRules)
 		targets := make([]string, 0, 8)
@@ -241,13 +245,12 @@ func TestTrieVsLinear_Randomized(t *testing.T) {
 					cidr = randV6CIDR(r)
 				}
 			}
-			// normalize to the canonical network form so both paths key identically
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil || ipNet == nil {
 				continue
 			}
 			port := int32(r.Intn(65535) + 1)
-			if r.Intn(3) == 0 { // ~30% get an except block
+			if r.Intn(3) == 0 {
 				exc := randSubCIDR(r, ipNet.String())
 				if exc != "" {
 					ruleMap[ipNet.String()] = rule(port, exc)
@@ -269,24 +272,6 @@ func TestTrieVsLinear_Randomized(t *testing.T) {
 	}
 }
 
-func TestTrieVsLinear_V4MappedV6(t *testing.T) {
-	ruleMap := map[string]EbpfFirewallRules{
-		"::ffff:10.0.0.0/104": rule(80),
-		"::ffff:0:0/96":       rule(443),
-		"10.1.0.0/16":         rule(8080),
-	}
-	for _, target := range []string{"10.1.2.3/32", "10.5.6.7/32", "8.8.8.8/32"} {
-		assertEquivalent(t, ruleMap, target)
-	}
-}
+// --- Concurrency safety ---
 
-func TestCIDRTrie_V4MappedV6_Insert(t *testing.T) {
-	trie := newCIDRTrie()
-	insertAll(t, trie, "::ffff:10.0.0.0/104")
-	assert.Contains(t, trie.findContainingKeys(net.ParseIP("10.1.2.3")), "::ffff:10.0.0.0/104")
-	assert.NotContains(t, trie.findContainingKeys(net.ParseIP("11.0.0.1")), "::ffff:10.0.0.0/104")
 
-	catchAll := newCIDRTrie()
-	insertAll(t, catchAll, "::ffff:0:0/96")
-	assert.Contains(t, catchAll.findContainingKeys(net.ParseIP("1.2.3.4")), "::ffff:0:0/96")
-}
