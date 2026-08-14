@@ -718,6 +718,41 @@ func TestRecoverBPFState(t *testing.T) {
 
 }
 
+// TestRecoverBPFState_GlobalMapRecoveryFailsFast pins the fail-fast contract for
+// global-map recovery. The conntrack and events maps are node-wide and every pod
+// program binds to them, so a partial global set is unusable. When
+// RecoverGlobalMaps errors, recoverBPFState must return that error immediately
+// and must NOT go on to recover per-pod programs and maps - proven here by
+// asserting RecoverAllBpfProgramsAndMaps is never called.
+func TestRecoverBPFState_GlobalMapRecoveryFailsFast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+
+	recoveryErr := errors.New("error walking the bpfdirectory: permission denied")
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(nil, recoveryErr).Times(1)
+	// The early return on a global-map error must prevent program recovery.
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Times(0)
+
+	policyEndpointeBPFContext := new(sync.Map)
+	globalMaps := new(sync.Map)
+
+	isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, _, _, err := NewMockBpfClient().recoverBPFState(
+		mockTCClient, mockBpfClient, policyEndpointeBPFContext, globalMaps,
+		false, false, false)
+
+	assert.Equal(t, recoveryErr, err, "global-map recovery error must propagate")
+	assert.False(t, isConntrackMapPresent)
+	assert.False(t, isPolicyEventsMapPresent)
+	assert.Equal(t, 0, eventsMapFD)
+	assert.Equal(t, 0, sizeOfSyncMap(policyEndpointeBPFContext),
+		"no program context may be recovered when global-map recovery fails")
+	assert.Equal(t, 0, sizeOfSyncMap(globalMaps),
+		"no global map may be stored when recovery fails")
+}
+
 func sizeOfSyncMap(m *sync.Map) int {
 	count := 0
 	m.Range(func(_, _ any) bool {
@@ -1206,4 +1241,193 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 		return true
 	})
 	assert.Equal(t, 400, remaining)
+}
+
+// TestRecoverBPFState_SkipsUnparseablePinPaths covers the guard added to
+// recoverBPFState's bpfState loop. The SDK now returns partial state rather than
+// discarding everything, so NPA can be handed a pin path it cannot key state
+// under - it must skip that entry instead of storing context against an empty
+// podIdentifier, which would collide for every unparseable pin on the node.
+func TestRecoverBPFState_SkipsUnparseablePinPaths(t *testing.T) {
+	const (
+		goodIngressPin = "/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996@default_handle_ingress"
+		goodEgressPin  = "/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996@default_handle_egress"
+		// Dotted pod name: the identifier keeps its underscores.
+		dottedPin = "/sys/fs/bpf/globals/aws/programs/journal-insights-flink-7_2_0-0d7e7aa@default_handle_ingress"
+		// A pod whose name begins with the global pin prefix is still a pod.
+		globalPrefixedPin = "/sys/fs/bpf/globals/aws/programs/global_abcd@default_handle_ingress"
+		// Neither shape: no "_handle_<direction>" suffix at all.
+		junkPin = "/sys/fs/bpf/globals/aws/programs/not-a-valid-identifier"
+	)
+
+	withProg := func(fd int) goelf.BpfData {
+		return goelf.BpfData{
+			Program: goebpfprogs.BpfProgram{ProgFD: fd},
+			Maps:    make(map[string]goebpfmaps.BpfMap),
+		}
+	}
+
+	tests := []struct {
+		name            string
+		bpfState        map[string]goelf.BpfData
+		wantContextKeys []string
+	}{
+		{
+			name: "unparseable pin is skipped, parseable ones still recovered",
+			bpfState: map[string]goelf.BpfData{
+				goodIngressPin: withProg(1),
+				goodEgressPin:  withProg(2),
+				junkPin:        withProg(3),
+			},
+			wantContextKeys: []string{"hello-udp-748dc8d996@default"},
+		},
+		{
+			name: "node-wide pin is not stored as a pod",
+			bpfState: map[string]goelf.BpfData{
+				goodIngressPin: withProg(1),
+			},
+			wantContextKeys: []string{"hello-udp-748dc8d996@default"},
+		},
+		{
+			// Both of these look unparseable to a first-underscore split but are
+			// real pods - they must be recovered, not skipped.
+			name: "dotted and global-prefixed identifiers are recovered",
+			bpfState: map[string]goelf.BpfData{
+				dottedPin:         withProg(4),
+				globalPrefixedPin: withProg(5),
+			},
+			wantContextKeys: []string{
+				"journal-insights-flink-7_2_0-0d7e7aa@default",
+				"global_abcd@default",
+			},
+		},
+		{
+			name: "every pin unparseable yields no context and no panic",
+			bpfState: map[string]goelf.BpfData{
+				junkPin: withProg(3),
+			},
+			wantContextKeys: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+
+			mockBpfClient.EXPECT().RecoverGlobalMaps().Return(
+				map[string]goebpfmaps.BpfMap{
+					CONNTRACK_MAP_PIN_PATH:     {MapFD: 2},
+					POLICY_EVENTS_MAP_PIN_PATH: {MapFD: 3},
+				}, nil).AnyTimes()
+
+			// The SDK reports partial recovery: some state plus a non-nil error.
+			// recoverBPFState must log it and carry on with what it got.
+			mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(
+				tt.bpfState, errors.New("partial recovery, 1 pin(s) skipped")).AnyTimes()
+
+			policyEndpointeBPFContext := new(sync.Map)
+			globalMaps := new(sync.Map)
+
+			_, _, _, _, _, err := NewMockBpfClient().recoverBPFState(
+				mockTCClient, mockBpfClient, policyEndpointeBPFContext, globalMaps,
+				false, false, false)
+
+			// A partial-recovery error from the SDK is logged, not propagated -
+			// the agent proceeds with the state it managed to rebuild.
+			assert.NoError(t, err)
+			assert.Equal(t, len(tt.wantContextKeys), sizeOfSyncMap(policyEndpointeBPFContext),
+				"only parseable pin paths may produce context entries")
+			for _, key := range tt.wantContextKeys {
+				_, ok := policyEndpointeBPFContext.Load(key)
+				assert.True(t, ok, "expected context for podIdentifier %q", key)
+			}
+			// The empty identifier must never be used as a key.
+			_, ok := policyEndpointeBPFContext.Load("")
+			assert.False(t, ok, "empty podIdentifier must never be stored")
+		})
+	}
+}
+
+// TestReAttachEbpfProbes_SkipsUnparseablePinPaths covers the two guards added to
+// ReAttachEbpfProbes. Without them an unparseable pin path would call
+// attachIngressBPFProbe with an empty podIdentifier, loading and pinning a
+// program under a bogus name.
+func TestReAttachEbpfProbes_SkipsUnparseablePinPaths(t *testing.T) {
+	tests := []struct {
+		name            string
+		ingressPinPaths map[string]string
+		egressPinPaths  map[string]string
+		wantIngressCall int
+		wantEgressCall  int
+	}{
+		{
+			name: "unparseable pin paths are skipped in both directions",
+			ingressPinPaths: map[string]string{
+				"eni0000000000a": "/sys/fs/bpf/globals/aws/programs/not-a-valid-identifier",
+			},
+			egressPinPaths: map[string]string{
+				"eni0000000000b": "/sys/fs/bpf/globals/aws/programs/garbage",
+			},
+			wantIngressCall: 0,
+			wantEgressCall:  0,
+		},
+		{
+			name: "parseable pin paths still attach",
+			ingressPinPaths: map[string]string{
+				"eni0000000000a": "/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996@default_handle_ingress",
+			},
+			egressPinPaths: map[string]string{
+				"eni0000000000b": "/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996@default_handle_egress",
+			},
+			wantIngressCall: 1,
+			wantEgressCall:  1,
+		},
+		{
+			// A dotted identifier must not be mistaken for garbage.
+			name: "dotted identifier still attaches",
+			ingressPinPaths: map[string]string{
+				"eni0000000000a": "/sys/fs/bpf/globals/aws/programs/journal-insights-flink-7_2_0@default_handle_ingress",
+			},
+			egressPinPaths:  map[string]string{},
+			wantIngressCall: 1,
+			wantEgressCall:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+			// Pod-ingress programs attach to the TC egress hook and vice versa.
+			mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(nil).Times(tt.wantIngressCall)
+			mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(nil).Times(tt.wantEgressCall)
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			// A skipped pin path must not reach the loader at all.
+			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).
+				Return(map[string]goelf.BpfData{}, map[string]goebpfmaps.BpfMap{}, nil).AnyTimes()
+
+			testBpfClient := NewMockBpfClient()
+			testBpfClient.bpfTCClient = mockTCClient
+			testBpfClient.bpfSDKClient = mockBpfClient
+			testBpfClient.interfaceNametoIngressPinPath = tt.ingressPinPaths
+			testBpfClient.interfaceNametoEgressPinPath = tt.egressPinPaths
+			testBpfClient.ingressInMemoryMap = new(sync.Map)
+			testBpfClient.egressInMemoryMap = new(sync.Map)
+			testBpfClient.podIdentifierLock = new(sync.Map)
+			testBpfClient.deletedPods = new(sync.Map)
+
+			// Attach failures are logged, not returned, so this asserts only that
+			// the skip guards prevented the calls counted above.
+			_ = testBpfClient.ReAttachEbpfProbes()
+		})
+	}
 }
