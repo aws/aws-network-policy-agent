@@ -754,3 +754,102 @@ func TestFWRuleProcessor_NonCanonicalCIDRCollision(t *testing.T) {
 		}
 	}
 }
+
+func TestFWRuleProcessor_ComputeClusterPolicyMapEntriesFromEndpointRules_NodeIPAlwaysPresent(t *testing.T) {
+	nodeIP := "10.1.1.1"
+	_, nodeIPCIDR, _ := net.ParseCIDR(nodeIP + "/32")
+	nodeIPKey := string(utils.ComputeTrieKey(*nodeIPCIDR, false))
+
+	tests := []struct {
+		name          string
+		firewallRules []EbpfFirewallRules
+	}{
+		{
+			name:          "Empty rules - node IP still present",
+			firewallRules: []EbpfFirewallRules{},
+		},
+		{
+			name: "Egress-only CNP rule - node IP still present in ingress map",
+			firewallRules: []EbpfFirewallRules{
+				{
+					IPCidr:   "0.0.0.0/0",
+					Action:   "Accept",
+					Priority: 50,
+				},
+			},
+		},
+		{
+			name: "Ingress rule with specific CIDR - node IP also present",
+			firewallRules: []EbpfFirewallRules{
+				{
+					IPCidr:   "10.0.0.0/16",
+					Action:   "Accept",
+					Priority: 50,
+					L4Info: []v1alpha1.Port{
+						{
+							Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
+							Port:     Int32Ptr(80),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Rule with node IP CIDR - should be skipped but node IP entry still present",
+			firewallRules: []EbpfFirewallRules{
+				{
+					IPCidr:   "10.1.1.1/32",
+					Action:   "Accept",
+					Priority: 50,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(tt.firewallRules)
+			assert.NoError(t, err)
+
+			// The node IP key must always be present in the resulting map
+			_, nodeIPExists := got[nodeIPKey]
+			assert.True(t, nodeIPExists, "Node IP entry must always be present in cluster policy firewall map")
+		})
+	}
+}
+
+func TestFWRuleProcessor_ComputeClusterPolicyMapEntriesFromEndpointRules_IPv6_NodeIPAlwaysPresent(t *testing.T) {
+	nodeIP := "2001:db8:abcd:0012::1"
+	_, nodeIPCIDR, _ := net.ParseCIDR(nodeIP + "/128")
+	nodeIPKey := string(utils.ComputeTrieKey(*nodeIPCIDR, true))
+
+	tests := []struct {
+		name          string
+		firewallRules []EbpfFirewallRules
+	}{
+		{
+			name:          "Empty rules - IPv6 node IP still present",
+			firewallRules: []EbpfFirewallRules{},
+		},
+		{
+			name: "Egress-only CNP rule - IPv6 node IP still present",
+			firewallRules: []EbpfFirewallRules{
+				{
+					IPCidr:   "::/0",
+					Action:   "Accept",
+					Priority: 50,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewFirewallRuleProcessor(nodeIP, "/128", true).ComputeClusterPolicyMapEntriesFromEndpointRules(tt.firewallRules)
+			assert.NoError(t, err)
+
+			_, nodeIPExists := got[nodeIPKey]
+			assert.True(t, nodeIPExists, "IPv6 Node IP entry must always be present in cluster policy firewall map")
+		})
+	}
+}

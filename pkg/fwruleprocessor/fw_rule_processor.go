@@ -284,6 +284,19 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 	cidrL4Rules := make(map[string][]utils.L4Rule)
 	processedCIDRs := make([]string, 0)
 
+	// Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
+	// This ensures kubelet liveness/readiness probes are never blocked by cluster network policies.
+	_, mapKey, _ := net.ParseCIDR(f.nodeIP + f.hostMask)
+	key := utils.ComputeTrieKey(*mapKey, f.enableIPv6)
+	nodeIPL4Rule := []utils.L4Rule{
+		{
+			Action:   "Accept",
+			Priority: 0, // Highest priority — node-IP allow must not be overridden
+		},
+	}
+	value := utils.ComputeTrieValueForCPE(nodeIPL4Rule)
+	firewallMap[string(key)] = value
+
 	// Step 1: Sort by CIDR length
 	f.sortByCIDRLength(firewallRules)
 
