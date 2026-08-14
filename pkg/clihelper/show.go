@@ -38,14 +38,30 @@ func formatLastSeen(lastSeen, now uint64) string {
 // Show - Displays all loaded AWS BPF Programs and their associated maps
 func Show() error {
 
-	bpfSDKclient := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
+	bpfSDKclient := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps, GlobalMaps: utils.GlobalBPFMaps, GlobalPinPrefix: utils.GLOBAL_PIN_PREFIX})
 	bpfState, err := bpfSDKclient.GetAllBpfProgramsAndMaps()
 	if err != nil {
 		return err
 	}
 
 	for pinPath, bpfEntry := range bpfState {
-		podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		podIdentifier, progName, isGlobal := bpfSDKclient.GetProgIdentifierFromBPFPinPath(pinPath)
+		if isGlobal {
+			// Global programs are not associated with any pod, so skip them in this output
+			continue
+		}
+
+		if podIdentifier == "" {
+			fmt.Println("Skipping unrecognized pin path: ", pinPath)
+			continue
+		}
+
+		direction := ""
+		if progName == utils.TC_INGRESS_PROG {
+			direction = "ingress"
+		} else if progName == utils.TC_EGRESS_PROG {
+			direction = "egress"
+		}
 		fmt.Println("PinPath: ", pinPath)
 		line := fmt.Sprintf("Pod Identifier : %s  Direction : %s \n", podIdentifier, direction)
 		fmt.Print(line)

@@ -153,7 +153,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
-	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
+	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps, GlobalMaps: utils.GlobalBPFMaps, GlobalPinPrefix: utils.GLOBAL_PIN_PREFIX})
 	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
@@ -191,8 +191,10 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		//Log the error and move on
 		log().Errorf("Failed to recover the BPF state error: %v", err)
 		sdkAPIErr.WithLabelValues("RecoverBPFState").Inc()
+	} else {
+		log().Info("Recovery phase completed")
 	}
-	log().Info("Successfully recovered BPF state")
+
 	ebpfClient.interfaceNametoIngressPinPath = interfaceNametoIngressPinPath
 	ebpfClient.interfaceNametoEgressPinPath = interfaceNametoEgressPinPath
 
@@ -208,7 +210,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		}
 		var bpfSdkInputData goelf.BpfCustomData
 		bpfSdkInputData.FilePath = eventsProbe
-		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomPinPath = utils.GLOBAL_PIN_PREFIX
 		bpfSdkInputData.CustomMapSize = make(map[string]int)
 
 		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
@@ -411,7 +413,7 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 		if err != nil {
 			log().Errorf("failed to recover global maps %v", err)
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
-			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, nil
+			return isConntrackMapPresent, isPolicyEventsMapPresent, eventsMapFD, interfaceNametoIngressPinPath, interfaceNametoEgressPinPath, err
 		}
 		log().Infof("Total no of  global maps recovered count: %d", len(recoveredGlobalMaps))
 		for globalMapName, globalMap := range recoveredGlobalMaps {
@@ -437,11 +439,31 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 			//Log it and move on. We will overwrite and recreate the maps/programs
 			log().Errorf("BPF State Recovery failed error: %v", err)
 			sdkAPIErr.WithLabelValues("RecoverAllBpfProgramAndMaps").Inc()
+		} else {
+			log().Infof("BPF State Recovery completed successfully. Total no of probes/maps recovered count: %d", len(bpfState))
 		}
 
 		log().Infof("Number of probes/maps recovered - count: %d", len(bpfState))
 		for pinPath, bpfEntry := range bpfState {
-			podIdentifier, direction := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+			podIdentifier, progName, isGlobal := eBPFSDKClient.GetProgIdentifierFromBPFPinPath(pinPath)
+			if isGlobal {
+				// Global Programs are not supported today
+				continue
+			}
+
+			if podIdentifier == "" {
+				log().Errorf("Skipping recovered program with unrecognized pin path: %s", pinPath)
+				sdkAPIErr.WithLabelValues("recoverBPFState-bad-pinpath").Inc()
+				continue
+			}
+
+			direction := ""
+			if progName == utils.TC_INGRESS_PROG {
+				direction = "ingress"
+			} else if progName == utils.TC_EGRESS_PROG {
+				direction = "egress"
+			}
+
 			log().Infof("Recovered program Identifier: Pin Path: %s PodIdentifier: %s direction: %s", pinPath, podIdentifier, direction)
 			var peBPFContext BPFContext
 			value, ok := policyEndpointeBPFContext.Load(podIdentifier)
@@ -576,7 +598,17 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	}
 
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
-		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		podIdentifier, _, isGlobal := l.bpfSDKClient.GetProgIdentifierFromBPFPinPath(pinPath)
+		if podIdentifier == "" {
+			log().Errorf("Skipping ingress reattach for interface %s, unrecognized pin path: %s", interfaceName, pinPath)
+			sdkAPIErr.WithLabelValues("reattach-bad-pinpath").Inc()
+			continue
+		}
+		if isGlobal {
+			// Global Programs are not supported in Network Policy Agent
+			continue
+		}
+
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
 		_, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
@@ -596,7 +628,16 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	}
 
 	for interfaceName, pinPath := range l.interfaceNametoEgressPinPath {
-		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
+		podIdentifier, _, isGlobal := l.bpfSDKClient.GetProgIdentifierFromBPFPinPath(pinPath)
+		if podIdentifier == "" {
+			log().Errorf("Skipping egress reattach for interface %s, unrecognized pin path: %s", interfaceName, pinPath)
+			sdkAPIErr.WithLabelValues("reattach-bad-pinpath").Inc()
+			continue
+		}
+		if isGlobal {
+			// Global Programs are not supported in Network Policy Agent
+			continue
+		}
 		log().Infof("ReattachEbpfProbes attaching egress for %s interface %s", podIdentifier, interfaceName)
 		_, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
