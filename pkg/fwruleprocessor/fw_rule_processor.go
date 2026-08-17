@@ -216,34 +216,6 @@ func addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
 	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
-// TODO: Remove after trie validation is complete — retained only as the oracle for TestTrieVsLinear_Randomized.
-func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
-	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
-	var matchingCIDRL4Info []v1alpha1.Port
-
-	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
-	for cidr, cidrFirewallInfo := range cidrsMap {
-		_, cidrEntry, _ := net.ParseCIDR(cidr)
-		if cidrEntry.Contains(ipToCheck.IP) {
-			log().Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)
-			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
-			foundInExcept := false
-			for _, except := range cidrFirewallInfo.Except {
-				_, exceptEntry, _ := net.ParseCIDR(string(except))
-				if exceptEntry.Contains(ipToCheck.IP) {
-					foundInExcept = true
-					log().Debugf("Found IP: %s in except block %s of CIDR %s. Skipping CIDR match", firewallRule, string(except), cidr)
-					break
-				}
-			}
-			if !foundInExcept {
-				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
-			}
-		}
-	}
-	return matchingCIDRL4Info
-}
-
 func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule string,
 	trie *cidrTrie, nonHostCIDRs map[string]EbpfFirewallRules) []v1alpha1.Port {
 	var matchingCIDRL4Info []v1alpha1.Port

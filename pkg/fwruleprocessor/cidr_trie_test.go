@@ -166,6 +166,32 @@ func buildTrie(ruleMap map[string]EbpfFirewallRules) *cidrTrie {
 	return trie
 }
 
+// checkAndDeriveL4InfoFromAnyMatchingCIDRs is the original O(N) linear scan.
+// Retained here as the oracle for TestTrieVsLinear_Randomized.
+func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
+	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
+	var matchingCIDRL4Info []v1alpha1.Port
+
+	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
+	for cidr, cidrFirewallInfo := range cidrsMap {
+		_, cidrEntry, _ := net.ParseCIDR(cidr)
+		if cidrEntry.Contains(ipToCheck.IP) {
+			foundInExcept := false
+			for _, except := range cidrFirewallInfo.Except {
+				_, exceptEntry, _ := net.ParseCIDR(string(except))
+				if exceptEntry.Contains(ipToCheck.IP) {
+					foundInExcept = true
+					break
+				}
+			}
+			if !foundInExcept {
+				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
+			}
+		}
+	}
+	return matchingCIDRL4Info
+}
+
 func assertEquivalent(t *testing.T, ruleMap map[string]EbpfFirewallRules, target string) {
 	t.Helper()
 	linear := checkAndDeriveL4InfoFromAnyMatchingCIDRs(target, ruleMap)
@@ -271,7 +297,3 @@ func TestTrieVsLinear_Randomized(t *testing.T) {
 		}
 	}
 }
-
-// --- Concurrency safety ---
-
-
