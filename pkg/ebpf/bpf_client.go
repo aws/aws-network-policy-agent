@@ -249,7 +249,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
-		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, logLevel)
+		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
 			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
