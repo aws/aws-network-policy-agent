@@ -154,10 +154,10 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 	})
 
 	t.Run("sibling CPE of the same CNP does not keep stale rules alive", func(t *testing.T) {
-		// A single CNP sliced into two CPEs. The old code removed only the reconciled CPE
-		// name from the stale identifier's entry, leaving the sibling CPE behind so the entry
-		// survived and the Deny rules were re-derived instead of cleared. All of the parent's
-		// CPEs must be removed so cleanup sees an empty entry and clears the rules.
+		// A parent CNP sliced into two CPEs. When the parent stops selecting the pod, every
+		// one of its CPEs must be removed from the stale identifier's entry. Leaving a sibling
+		// CPE behind would keep the entry alive and let cleanup re-derive the parent's Deny
+		// rules instead of clearing them.
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 

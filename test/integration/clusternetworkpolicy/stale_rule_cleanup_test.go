@@ -25,19 +25,22 @@ var clusterPolicyEndpointListGVK = schema.GroupVersionKind{
 }
 
 // These tests cover the cleanup path taken when a pod stops matching a ClusterNetworkPolicy
-// while the CNP itself keeps existing - for example when the namespace label the CNP selects
-// on is removed. The ClusterPolicyEndpoints stay around but no longer list the pod, so the
-// agent has to notice that nothing selects the pod anymore and drop the rules it programmed.
-// Previously the rules survived until the pod restarted, leaving traffic denied indefinitely.
+// while the CNP itself keeps existing - the namespace label the CNP selects on is removed.
+// The ClusterPolicyEndpoints stay around but no longer list the pod, so the agent has to
+// notice that nothing selects the pod anymore and drop the rules it programmed. Toggling is
+// done on the namespace, never on the pod template: patching the pod template would trigger
+// a Deployment rollout and the new pod would be programmed from scratch, which is not the
+// scenario the fix addresses.
 var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 	Context("When a pod stops matching a ClusterNetworkPolicy but the policy still exists", func() {
 		const (
 			serverNamespace = "stale-server"
 			clientNamespace = "stale-client"
-			// Label the policies select on. Removing it is what makes the pod stop matching.
+			// Namespace-scoped label the CNP under test selects on. Removing it from the
+			// namespace makes existing pods stop matching without recreating them.
 			subjectLabelKey = "stale-cleanup-subject"
-			// Label selected by the unrelated parent CNP, used as a control: its rules must
-			// survive the cleanup of the policy under test.
+			// Namespace-scoped label the unrelated parent CNP selects on. Used as a control:
+			// its rules must survive the cleanup of the policy under test.
 			unrelatedLabelKey = "stale-cleanup-unrelated"
 		)
 
@@ -48,31 +51,6 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 			serverPodIP      string
 			clientPodName    string
 		)
-
-		// waitForServerRolloutAndRefreshIP waits until the server deployment has finished rolling
-		// out after a label patch and then re-reads the new pod's IP. Patching the pod template
-		// recreates the pod, so the previously recorded IP goes stale.
-		waitForServerRolloutAndRefreshIP := func() {
-			Eventually(func(g Gomega) {
-				observed := &appsv1.Deployment{}
-				err := fw.K8sClient.Get(ctx, types.NamespacedName{
-					Namespace: serverNamespace, Name: serverDeployment.Name,
-				}, observed)
-				g.Expect(err).ToNot(HaveOccurred())
-				g.Expect(observed.Status.ObservedGeneration).To(BeNumerically(">=", observed.Generation))
-				g.Expect(observed.Status.UpdatedReplicas).To(Equal(*serverDeployment.Spec.Replicas))
-				g.Expect(observed.Status.AvailableReplicas).To(Equal(*serverDeployment.Spec.Replicas))
-			}, 180*time.Second, 5*time.Second).Should(Succeed())
-
-			// Only one replica is expected, and the old pod is gone once the rollout completed.
-			Eventually(func(g Gomega) {
-				serverPods, err := fw.PodManager.GetPodsWithLabel(ctx, serverNamespace, "app", "stale-server")
-				g.Expect(err).ToNot(HaveOccurred())
-				g.Expect(serverPods).To(HaveLen(1))
-				g.Expect(serverPods[0].Status.PodIP).ToNot(BeEmpty())
-				serverPodIP = serverPods[0].Status.PodIP
-			}, 60*time.Second, 5*time.Second).Should(Succeed())
-		}
 
 		// reachable reports whether the client pod can reach the server pod on 8080.
 		reachable := func() bool {
@@ -105,38 +83,60 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 			return names
 		}
 
-		// denyAllIngressFrom builds a Deny-all-ingress CNP selecting pods carrying labelKey.
+		// denyAllIngressFrom builds a Deny-all-ingress CNP whose subject is every pod in a
+		// namespace carrying labelKey. Removing labelKey from the namespace makes existing pods
+		// stop matching without recreating them.
 		denyAllIngressFrom := func(name, labelKey string, priority int32) *unstructured.Unstructured {
+			// Ingress "from" peers only support namespaces/pods; an empty matchLabels selects all.
 			ingressRule := manifest.NewClusterIngressRuleBuilder().
 				Name("deny-all-ingress").
 				Action("Deny").
 				BuildIngressRule([]map[string]interface{}{
-					manifest.NewNetworksPeer([]string{matchAllCIDR}),
+					manifest.NewNamespacesPeer(map[string]string{}),
 				})
 
 			return manifest.NewClusterNetworkPolicyBuilder().
 				Name(name).
 				Priority(priority).
 				Tier("Admin").
-				SubjectPods(
-					map[string]string{"kubernetes.io/metadata.name": serverNamespace},
-					map[string]string{labelKey: "yes"},
-				).
+				SubjectNamespaces(map[string]string{labelKey: "yes"}).
 				AddIngressRule(ingressRule).
 				Build()
 		}
 
+		// removeNamespaceLabel strips a label from the server namespace. Namespace labels are
+		// mutable (unlike Deployment selectors) and changing them does not restart pods, so the
+		// stale-eBPF cleanup path is what has to react.
+		removeNamespaceLabel := func(labelKey string) {
+			patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:null}}}`, labelKey))
+			ns := &v1.Namespace{ObjectMeta: metaV1.ObjectMeta{Name: serverNamespace}}
+			err := fw.K8sClient.Patch(ctx, ns, client.RawPatch(types.StrategicMergePatchType, patch))
+			Expect(err).ToNot(HaveOccurred())
+		}
+
 		BeforeAll(func() {
-			By("Creating the server and client namespaces", func() {
-				for _, ns := range []string{serverNamespace, clientNamespace} {
-					err := fw.K8sClient.Create(ctx, &v1.Namespace{
-						ObjectMeta: metaV1.ObjectMeta{
-							Name:   ns,
-							Labels: map[string]string{"kubernetes.io/metadata.name": ns},
+			By("Creating the server namespace with the subject and unrelated labels", func() {
+				err := fw.K8sClient.Create(ctx, &v1.Namespace{
+					ObjectMeta: metaV1.ObjectMeta{
+						Name: serverNamespace,
+						Labels: map[string]string{
+							"kubernetes.io/metadata.name": serverNamespace,
+							subjectLabelKey:               "yes",
+							unrelatedLabelKey:             "yes",
 						},
-					})
-					Expect(err).ToNot(HaveOccurred())
-				}
+					},
+				})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("Creating the client namespace", func() {
+				err := fw.K8sClient.Create(ctx, &v1.Namespace{
+					ObjectMeta: metaV1.ObjectMeta{
+						Name:   clientNamespace,
+						Labels: map[string]string{"kubernetes.io/metadata.name": clientNamespace},
+					},
+				})
+				Expect(err).ToNot(HaveOccurred())
 			})
 
 			By("Creating the server and client deployments", func() {
@@ -146,16 +146,12 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 					Args([]string{"while true; do { echo 'HTTP/1.1 200 OK\n\nServer Response'; } | nc -l -p 8080; done"}).
 					Build()
 
-				// The server carries both subject labels from the start. The policies select on
-				// them, so removing a label is what makes the pod stop matching that policy.
 				serverDeployment = manifest.NewDefaultDeploymentBuilder().
 					Namespace(serverNamespace).
 					Name("stale-server").
 					Replicas(1).
 					Container(serverContainer).
 					AddLabel("app", "stale-server").
-					AddLabel(subjectLabelKey, "yes").
-					AddLabel(unrelatedLabelKey, "yes").
 					Build()
 
 				created, err := fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, serverDeployment)
@@ -235,12 +231,8 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 					parentUnderTest, len(cpesUnderTest), cpesUnderTest)
 			})
 
-			By("Removing the label so the server pod stops matching the CNP under test", func() {
-				patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"labels":{%q:null}}}}}`, subjectLabelKey))
-				err := fw.K8sClient.Patch(ctx, serverDeployment, client.RawPatch(types.StrategicMergePatchType, patch))
-				Expect(err).ToNot(HaveOccurred())
-
-				waitForServerRolloutAndRefreshIP()
+			By("Removing the subject label from the namespace so the server pod stops matching the CNP under test", func() {
+				removeNamespaceLabel(subjectLabelKey)
 			})
 
 			By("Verifying the CNP under test still exists with its ClusterPolicyEndpoints", func() {
@@ -260,11 +252,7 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 			})
 
 			By("Removing the unrelated label so no CNP selects the server pod anymore", func() {
-				patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"labels":{%q:null}}}}}`, unrelatedLabelKey))
-				err := fw.K8sClient.Patch(ctx, serverDeployment, client.RawPatch(types.StrategicMergePatchType, patch))
-				Expect(err).ToNot(HaveOccurred())
-
-				waitForServerRolloutAndRefreshIP()
+				removeNamespaceLabel(unrelatedLabelKey)
 			})
 
 			By("Verifying traffic is restored once nothing selects the pod", func() {
