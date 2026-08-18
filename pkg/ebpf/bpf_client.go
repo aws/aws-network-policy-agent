@@ -1271,15 +1271,23 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 
 // evictBPFContextAfterPodStateFailure drops the cached BPFContext for podIdentifier after a
 // pod state map write has failed. The cached context can hold a program whose map set is
-// incomplete, and every write against that same context fails identically, so an in-process
-// retry cannot recover on its own. The PolicyEndpoint reconciler is the case that needs this:
-// it requeues with backoff and re-reads the cached context rather than reloading the program,
-// so without eviction it would retry the same unusable handles indefinitely. A pod state write
-// failure is already outage-grade (the datapath drops packets when the entry is missing), so
-// discard the context and let the next reconcile reload the program and re-derive its maps.
+// incomplete, and every write against that same context fails identically, so retrying
+// against the same cache entry can never recover. A pod state write failure is already
+// outage-grade -- the datapath drops packets while the entry is missing -- so discarding the
+// context is the cheaper risk: it forces the next attempt to program this podIdentifier to
+// reload the program and re-derive its maps instead of reusing the bad handles.
+//
+// Eviction is not itself a retry, and the callers differ in whether one follows. The
+// PolicyEndpoint and ClusterPolicyEndpoint reconcilers requeue with backoff and re-read the
+// context, so they recover; they are the case that needs eviction, because without it they
+// would retry the same unusable handles indefinitely. The RPC handler propagates the error to
+// the CNI, which fails the ADD and lets kubelet retry the sandbox. ReAttachEbpfProbes only
+// logs and continues, so nothing re-programs that podIdentifier until the next policy change
+// or agent restart; eviction still helps there by turning a poisoned cache entry into an
+// absent one, but it does not close that gap.
 func (l *bpfClient) evictBPFContextAfterPodStateFailure(podIdentifier string, op string) {
 	l.policyEndpointeBPFContext.Delete(podIdentifier)
-	log().Errorf("Evicted bpf context for podIdentifier %s after pod state %s failure; probes will be reloaded on the next reconcile", podIdentifier, op)
+	log().Errorf("Evicted bpf context for podIdentifier %s after pod state %s failure; cached program handles are discarded, so the next attempt to program this podIdentifier will reload them", podIdentifier, op)
 }
 
 // UpdatePodStateEbpfMaps writes the pod-state value (DEFAULT_ALLOW,
