@@ -1339,14 +1339,14 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 		if !found {
 			sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate-no-map").Inc()
 			egressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_EGRESS_POD_STATE_MAP, podIdentifier)
-			log().Errorf("Egress Map update failed: %v", egressErr)
+			log().Errorf("Egress Pod State Map update failed: %v", egressErr)
 		} else {
 			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
 			start := time.Now()
 			egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
 			sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
 			if egressErr != nil {
-				log().Errorf("Egress Map update failed: %v", egressErr)
+				log().Errorf("Egress Pod State Map update failed: %v", egressErr)
 				sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
 				egressErr = fmt.Errorf("egress pod state map write: %w", egressErr)
 			}
