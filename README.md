@@ -26,6 +26,14 @@ Please refer to [EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguid
 ### Network Policy Agent Configuration flags
 ---
 
+#### `apiserver`
+
+Type: String
+
+Default: empty
+
+Overrides the Kubernetes API server URL from the in-cluster configuration or kubeconfig. The existing authentication and TLS configuration are preserved. This can be used to provide an API server endpoint that does not depend on kube-proxy programming the Kubernetes Service ClusterIP.
+
 #### `enable-network-policy`
 
 Type: Boolean

@@ -14,10 +14,12 @@ import (
 )
 
 const (
+	flagAPIServer           = "apiserver"
 	flagKubeconfig          = "kubeconfig"
 	flagMetricsBindAddr     = "metrics-bind-addr"
 	flagHealthProbeBindAddr = "health-probe-bind-addr"
 
+	defaultAPIServer              = ""
 	defaultKubeconfig             = ""
 	defaultWatchNamespace         = corev1.NamespaceAll
 	defaultMetricsAddr            = ":8162"
@@ -36,6 +38,8 @@ type RuntimeConfig struct {
 }
 
 func (c *RuntimeConfig) BindFlags(fs *pflag.FlagSet) {
+	fs.StringVar(&c.APIServer, flagAPIServer, defaultAPIServer,
+		"URL of the Kubernetes API server. Overrides the API server from the in-cluster config or kubeconfig.")
 	fs.StringVar(&c.KubeConfig, flagKubeconfig, defaultKubeconfig,
 		"Path to the kubeconfig file containing authorization and API server information.")
 	fs.StringVar(&c.MetricsBindAddress, flagMetricsBindAddr, defaultMetricsAddr,
@@ -56,6 +60,9 @@ func BuildRestConfig(rtCfg RuntimeConfig) (*rest.Config, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if rtCfg.APIServer != "" {
+		restCFG.Host = rtCfg.APIServer
 	}
 	restCFG.QPS = defaultQPS
 	restCFG.Burst = defaultBurst
