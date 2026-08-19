@@ -76,6 +76,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	cidrsMap := make(map[string]EbpfFirewallRules)
 	exceptCidrs := make(map[string]struct{})
 	nonHostCIDRs := make(map[string]EbpfFirewallRules)
+	containmentTrie := newCIDRTrie()
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	_, mapKey, _ := net.ParseCIDR(f.nodeIP + f.hostMask)
@@ -125,17 +126,18 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
 			firewallRule.Except = append(firewallRule.Except, existingFirewallRuleInfo.Except...)
 		} else {
-			// Check if the /m entry is part of any /n CIDRs that we've encountered so far
-			// If found, we need to include the port and protocol combination against the current entry as well since
-			// we use LPM TRIE map and the /m will always win out.
-			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRs(string(firewallRule.IPCidr), nonHostCIDRs)
+			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(string(firewallRule.IPCidr), containmentTrie, nonHostCIDRs)
 			if len(cidrL4Info) > 0 {
 				firewallRule.L4Info = append(firewallRule.L4Info, cidrL4Info...)
 			}
 		}
 		cidrsMap[string(firewallRule.IPCidr)] = firewallRule
 		if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
+			_, alreadyInTrie := nonHostCIDRs[string(firewallRule.IPCidr)]
 			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule
+			if !alreadyInTrie {
+				containmentTrie.insert(string(firewallRule.IPCidr))
+			}
 		}
 	}
 
@@ -214,28 +216,32 @@ func addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
 	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
-func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
-	cidrsMap map[string]EbpfFirewallRules) []v1alpha1.Port {
+func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule string,
+	trie *cidrTrie, nonHostCIDRs map[string]EbpfFirewallRules) []v1alpha1.Port {
 	var matchingCIDRL4Info []v1alpha1.Port
 
-	_, ipToCheck, _ := net.ParseCIDR(firewallRule)
-	for cidr, cidrFirewallInfo := range cidrsMap {
-		_, cidrEntry, _ := net.ParseCIDR(cidr)
-		if cidrEntry.Contains(ipToCheck.IP) {
-			log().Debugf("Found CIDR match or IP: %s in CIDR: %s", firewallRule, cidr)
-			// If CIDR contains IP, check if it is part of any except block under CIDR. If yes, do not include cidrL4Info
-			foundInExcept := false
-			for _, except := range cidrFirewallInfo.Except {
-				_, exceptEntry, _ := net.ParseCIDR(string(except))
-				if exceptEntry.Contains(ipToCheck.IP) {
-					foundInExcept = true
-					log().Debugf("Found IP: %s in except block %s of CIDR %s. Skipping CIDR match", firewallRule, string(except), cidr)
-					break
-				}
+	_, ipToCheck, err := net.ParseCIDR(firewallRule)
+	if err != nil || ipToCheck == nil {
+		return matchingCIDRL4Info
+	}
+
+	containingKeys := trie.findContainingKeys(ipToCheck.IP)
+
+	for _, cidrKey := range containingKeys {
+		cidrFirewallInfo, ok := nonHostCIDRs[cidrKey]
+		if !ok {
+			continue
+		}
+		foundInExcept := false
+		for _, except := range cidrFirewallInfo.Except {
+			_, exceptEntry, _ := net.ParseCIDR(string(except))
+			if exceptEntry != nil && exceptEntry.Contains(ipToCheck.IP) {
+				foundInExcept = true
+				break
 			}
-			if !foundInExcept {
-				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
-			}
+		}
+		if !foundInExcept {
+			matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
 		}
 	}
 	return matchingCIDRL4Info
