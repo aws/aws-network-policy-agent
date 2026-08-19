@@ -22,13 +22,9 @@ with src_ip=victim to write a conntrack entry on the attacker's veth. On ingress
 to the victim, the reverse-flow lookup now includes skb->ifindex which won't match
 the attacker's veth ifindex, so the poisoned entry is never found.
 
-Runs on IPv4 and IPv6 clusters. The datapath is the same shape in both families:
-tc.v4egress/tc.v6egress write the conntrack key with skb->ifindex and
-tc.v4ingress/tc.v6ingress build the reverse-flow key with it, so the attack and
-the assertions carry over unchanged. Only the forged frame differs — EtherType
-and L3 header — and every address the specs handle comes from the pods
-themselves, so the family is read off those addresses rather than off the
---ip-family flag.
+Runs on IPv4 and IPv6: both datapaths write the conntrack key with skb->ifindex
+and look the reverse flow up with it, so only the forged frame differs by family.
+The family comes from the pod IPs, not from the --ip-family flag.
 */
 var _ = Describe("Conntrack Poisoning Prevention", func() {
 
@@ -53,16 +49,8 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 					Name: "nginx", Image: "public.ecr.aws/nginx/nginx:latest",
 					Ports:   []v1.ContainerPort{{ContainerPort: victimPort}},
 					Command: []string{"sh", "-c"},
-					// The stock image's default server block is `listen 80;`, which
-					// binds IPv4 only — on an IPv6 cluster every connection to the
-					// victim would be refused, so the [Regression] spec would fail and
-					// the security specs would report BLOCKED without the datapath
-					// having decided anything. This server block listens on both
-					// families so the same manifest works either way.
-					//
 					// printf '%s' rather than printf <conf>: as a format string, the
-					// config's \n would be expanded and any future % treated as a
-					// conversion. Passing it as an argument writes it verbatim.
+					// config's \n would be expanded and any % treated as a conversion.
 					Args: []string{fmt.Sprintf(
 						"printf '%%s' %s > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
 						shellQuote(victimConf))},
@@ -104,8 +92,7 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 		Expect(err).ToNot(HaveOccurred())
 		attackerIP = attackerPod.Status.PodIP
 		Expect(attackerIP).ToNot(BeEmpty(), "attacker pod must have an IP to spoof from")
-		// A cross-family pair would make every spec meaningless: the forged frame
-		// and the connection would never share a 5-tuple with each other.
+		// A cross-family pair would never share a 5-tuple, so no spec would mean anything.
 		Expect(isV6(attackerIP)).To(Equal(isV6(victimIP)),
 			"victim and attacker must share an IP family for the poisoned key to line up")
 
@@ -187,36 +174,28 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 	})
 })
 
-// The one port the victim actually serves on, so it is also the port the
-// [Regression] spec expects to reach and the port the nginx config binds in
-// both families.
+// The only port the victim serves on, so also the only one [Regression] can reach.
 const victimPort = 80
 
-// victimConf listens on both families, see the victim container's Args.
+// The stock image's default server block is `listen 80;`, which binds IPv4 alone:
+// on an IPv6 cluster every connection would be refused, so [Regression] would fail
+// and the security specs would report BLOCKED with the datapath never consulted.
 var victimConf = fmt.Sprintf(
 	"server { listen %d; listen [::]:%d; location / { return 200 \"ok\\n\"; } }",
 	victimPort, victimPort)
 
-// isV6 reports whether addr is an IPv6 address. The family is derived from the
-// addresses the pods were actually given rather than from the --ip-family flag:
-// if the two disagreed, the forged frame and the connection would be built for
-// a family the pods don't run, and every spec would report BLOCKED for the wrong
-// reason.
 func isV6(addr string) bool {
 	ip := net.ParseIP(addr)
 	return ip != nil && ip.To4() == nil
 }
 
-// shellQuote wraps s in single quotes for `sh -c`, escaping any embedded quotes,
-// so a config can be passed through a shell without the shell reinterpreting it.
+// shellQuote wraps s in single quotes for `sh -c`, escaping any embedded quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// tryConnect opens a TCP connection from pod to ip:port, optionally from a fixed
-// source port so the caller can line the connection up with a poisoned conntrack
-// entry. The socket family follows the target address, so the same helper works
-// in either family.
+// tryConnect connects from pod to ip:port, optionally from a fixed source port so
+// the caller can line the connection up with a poisoned conntrack entry.
 func tryConnect(ns, pod, ip string, port, srcPort int) string {
 	family, anyAddr := "AF_INET", "0.0.0.0"
 	if isV6(ip) {
@@ -256,15 +235,12 @@ func sendPoison(ns, pod, victimIP, attackerIP string, vPort, aPort int) string {
 	return out
 }
 
-// poisonFrame forges the frame sendPoison writes to the attacker's veth. Only
-// the EtherType and the L3 header vary by family (%[2]s and %[6]s); the TCP
-// header and the send are identical, because what the datapath keys on is the
-// 5-tuple and not any L4 checksum.
+// Only the EtherType and the L3 header vary by family (%[2]s and %[6]s); the TCP
+// header is shared because the datapath keys on the 5-tuple, not on L4 checksums.
 //
-// The interface is resolved from the route to the victim rather than from a
-// hardcoded off-cluster address so the lookup works in either family, and the
-// MAC is read from sysfs rather than through an AF_INET ioctl, which would tie
-// the frame to the IPv4 stack in a pod that may only hold an IPv6 address.
+// Both lookups are deliberately family-agnostic: the interface comes from the route
+// to the victim rather than a hardcoded off-cluster address, and the MAC from sysfs
+// rather than an AF_INET ioctl, which needs an IPv4 stack the pod may not have.
 const poisonFrame = `import socket,struct,subprocess
 iface=subprocess.check_output(['ip','route','get','%[1]s']).decode().split('dev ')[1].split()[0]
 sock=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(%[2]s));sock.bind((iface,0))
@@ -275,8 +251,7 @@ src=socket.inet_pton(socket.%[4]s,'%[1]s');dst=socket.inet_pton(socket.%[4]s,'%[
 tcp=struct.pack('!HHLLBBHHH',%[7]d,%[8]d,0,0,5<<4,0x12,65535,0,0)
 sock.send(eth+ip+tcp);print('POISON_SENT');sock.close()`
 
-// IPv4: 20-byte header, and its own checksum has to be filled in — pack once to
-// checksum over the header, then repack with the result.
+// IPv4 carries a header checksum, so pack once to checksum over, then repack.
 const poisonIPv4Hdr = `def cksum(d):
  if len(d)&1:d+=b'\x00'
  s=sum(struct.unpack('!'+str(len(d)//2)+'H',d));s=(s>>16)+(s&0xffff);s+=s>>16
@@ -284,9 +259,8 @@ const poisonIPv4Hdr = `def cksum(d):
 ip=struct.pack('!BBHHHBBH4s4s',0x45,0,40,0x1234,0,64,6,0,src,dst)
 ip=struct.pack('!BBHHHBBH4s4s',0x45,0,40,0x1234,0,64,6,cksum(ip),src,dst)`
 
-// IPv6: 40-byte fixed header with no checksum. 6<<28 is version 6 with traffic
-// class and flow label zero; then payload length 20 (the TCP header alone), next
-// header 6 (TCP) and hop limit 64.
+// No checksum in IPv6. 6<<28 is version 6, zero traffic class and flow label; then
+// payload length 20 (the TCP header alone), next header 6 (TCP), hop limit 64.
 const poisonIPv6Hdr = `ip=struct.pack('!IHBB16s16s',6<<28,20,6,64,src,dst)`
 
 func poisonScript(victimIP, attackerIP string, vPort, aPort int) string {
