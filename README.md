@@ -32,7 +32,9 @@ Type: String
 
 Default: empty
 
-Overrides the Kubernetes API server URL from the in-cluster configuration or kubeconfig. The existing authentication and TLS configuration are preserved. This can be used to provide an API server endpoint that does not depend on kube-proxy programming the Kubernetes Service ClusterIP.
+Overrides the Kubernetes API server URL from the in-cluster configuration or kubeconfig. The value must be an HTTPS URL without a path, query, fragment, or user information. It takes precedence over the API server derived from `KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT`.
+
+The existing credentials and certificate authority are preserved, so the configured hostname must be covered by the Kubernetes API server's serving certificate. The endpoint must also be routable and resolvable without cluster networking; for example, an EKS cluster API endpoint can avoid waiting for kube-proxy to program the Kubernetes Service ClusterIP. The deployment layer is responsible for supplying this flag, and the value must be updated if the cluster API endpoint changes.
 
 #### `enable-network-policy`
 
