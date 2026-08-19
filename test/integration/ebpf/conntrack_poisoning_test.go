@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
@@ -72,7 +73,10 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 			Spec: v1.PodSpec{
 				Containers: []v1.Container{{
 					Name: "attacker", Image: "public.ecr.aws/docker/library/python:3.11-slim",
-					Command: []string{"bash", "-c", "apt-get update -qq && apt-get install -y -qq iproute2 >/dev/null 2>&1 && sleep infinity"},
+					// Idle: the pod reports Running as soon as its command starts, so
+					// anything installed here would still be in flight when the first
+					// spec execs, and a failed download would kill the container.
+					Command: []string{"sleep", "infinity"},
 					SecurityContext: &v1.SecurityContext{
 						Capabilities: &v1.Capabilities{
 							Add: []v1.Capability{"NET_RAW"},
@@ -116,7 +120,15 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 			},
 		}
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, egressPolicy)).To(Succeed())
-		time.Sleep(15 * time.Second)
+
+		By("Waiting until the deny-all is enforced")
+		// Enforcement is eventually consistent, so this is polled rather than slept
+		// past: programming that lands late would otherwise be indistinguishable from
+		// the bypass the specs below exist to catch.
+		Eventually(func() (string, error) {
+			return tryConnect(namespace, "attacker", victimIP, victimPort, 0)
+		}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal(blocked),
+			"deny-all never took effect on the victim")
 	})
 
 	AfterEach(func() {
@@ -135,22 +147,31 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 	})
 
 	It("should block conntrack poisoning via AF_PACKET [Security][CVE]", func() {
-		By("Verifying baseline: deny-all blocks attacker->victim")
-		Expect(tryConnect(namespace, "attacker", victimIP, victimPort, 0)).To(Equal("BLOCKED"))
-
 		By("Sending spoofed AF_PACKET frame to poison conntrack map")
-		out := sendPoison(namespace, "attacker", victimIP, attackerIP, victimPort, 31337)
-		Expect(out).To(ContainSubstring("POISON_SENT"))
+		Eventually(func() (string, error) {
+			return sendPoison(namespace, "attacker", victimIP, attackerIP, victimPort, 31337)
+		}, utils.ProbeTimeout, utils.ProbeInterval).Should(ContainSubstring("POISON_SENT"))
 
 		By("Verifying exploit is BLOCKED (ifindex mismatch prevents cross-pod lookup)")
-		Expect(tryConnect(namespace, "attacker", victimIP, victimPort, 31337)).To(Equal("BLOCKED"))
+		// Consistently, not Eventually: a path that opens for even one probe is the
+		// vulnerability, and Eventually would pass on any later probe that closed.
+		Consistently(func() (string, error) {
+			return tryConnect(namespace, "attacker", victimIP, victimPort, 31337)
+		}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal(blocked))
 	})
 
 	It("should block multi-port poisoning attempts [Security]", func() {
 		for _, port := range []int{80, 443, 8080, 3306} {
-			sendPoison(namespace, "attacker", victimIP, attackerIP, port, 40000+port)
-			result := tryConnect(namespace, "attacker", victimIP, port, 40000+port)
-			Expect(result).To(Equal("BLOCKED"), fmt.Sprintf("port %d bypass", port))
+			// Asserted per port: a frame that never left would make the check below
+			// pass with no attack mounted.
+			Eventually(func() (string, error) {
+				return sendPoison(namespace, "attacker", victimIP, attackerIP, port, 40000+port)
+			}, utils.ProbeTimeout, utils.ProbeInterval).Should(ContainSubstring("POISON_SENT"),
+				fmt.Sprintf("port %d poison not sent", port))
+			Consistently(func() (string, error) {
+				return tryConnect(namespace, "attacker", victimIP, port, 40000+port)
+			}, utils.StabilityWindow, utils.ProbeInterval).Should(Equal(blocked),
+				fmt.Sprintf("port %d bypass", port))
 		}
 	})
 
@@ -168,22 +189,39 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 			},
 		}
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, allowPolicy)).To(Succeed())
-		time.Sleep(10 * time.Second)
-		Expect(tryConnect(namespace, "attacker", victimIP, victimPort, 0)).To(Equal("CONNECTED"))
+		// Polled for the same reason the deny-all is: an allow rule that arrives late
+		// would read as the ifindex key breaking legitimate traffic.
+		Eventually(func() (string, error) {
+			return tryConnect(namespace, "attacker", victimIP, victimPort, 0)
+		}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal(connected))
 		fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, allowPolicy)
 	})
 })
 
-// The only port the victim serves on, so also the only one [Regression] can reach.
-const victimPort = 80
+const (
+	// The only port the victim serves on, so also the only one [Regression] can reach.
+	victimPort = 80
 
-// The stock image's default server block is `listen 80;`, which binds IPv4 alone:
-// on an IPv6 cluster every connection would be refused, so [Regression] would fail
-// and the security specs would report BLOCKED with the datapath never consulted.
+	// Probe verdicts. PodManager.TCPProbe's OPEN/CLOSE cannot be used here: nc has no
+	// source-port binding, and these probes have to leave from the port named in the
+	// forged frame for the poisoned entry to be the one looked up.
+	connected = "CONNECTED"
+	blocked   = "BLOCKED"
+
+	// Attempts per exec, see execInPod.
+	execAttempts = 3
+)
+
+// victimConf listens on both families: the stock image's `listen 80;` binds IPv4
+// alone, so on an IPv6 cluster every connection would be refused, failing
+// [Regression] and passing the security specs with the datapath never consulted.
 var victimConf = fmt.Sprintf(
 	"server { listen %d; listen [::]:%d; location / { return 200 \"ok\\n\"; } }",
 	victimPort, victimPort)
 
+// isV6 reads the family off an address the pods actually hold, rather than the
+// --ip-family flag, so a flag that disagrees with the cluster cannot leave the
+// specs probing and forging for a family nothing is running.
 func isV6(addr string) bool {
 	ip := net.ParseIP(addr)
 	return ip != nil && ip.To4() == nil
@@ -195,14 +233,18 @@ func shellQuote(s string) string {
 }
 
 // tryConnect connects from pod to ip:port, optionally from a fixed source port so
-// the caller can line the connection up with a poisoned conntrack entry.
-func tryConnect(ns, pod, ip string, port, srcPort int) string {
+// the caller can line the connection up with a poisoned conntrack entry. Shaped for
+// Eventually/Consistently: the verdict and the exec error are returned separately so
+// neither caller has to read a failed exec as a verdict.
+func tryConnect(ns, pod, ip string, port, srcPort int) (string, error) {
 	family, anyAddr := "AF_INET", "0.0.0.0"
 	if isV6(ip) {
 		family, anyAddr = "AF_INET6", "::"
 	}
 	bind := ""
 	if srcPort > 0 {
+		// SO_REUSEADDR because a probe that connected leaves the source port in
+		// TIME_WAIT, and Consistently reuses it on its next poll.
 		bind = fmt.Sprintf("s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('%s',%d));", anyAddr, srcPort)
 	}
 	script := fmt.Sprintf(`import socket;s=socket.socket(socket.%s,socket.SOCK_STREAM);s.settimeout(3);%s
@@ -212,12 +254,14 @@ except:
  print('BLOCKED')
 finally:
  s.close()`, family, bind, ip, port)
-	out, err := fw.PodManager.ExecInPod(ns, pod, []string{"python3", "-c", script})
-	Expect(err).ToNot(HaveOccurred(), "tryConnect exec failed")
-	if strings.Contains(out, "CONNECTED") {
-		return "CONNECTED"
+	out, err := execInPod(ns, pod, "tryConnect", script)
+	if err != nil {
+		return "", err
 	}
-	return "BLOCKED"
+	if strings.Contains(out, connected) {
+		return connected, nil
+	}
+	return blocked, nil
 }
 
 // sendPoison sends a spoofed AF_PACKET frame: src=victimIP:vPort -> dst=attackerIP:aPort.
@@ -228,45 +272,68 @@ finally:
 // When the attacker later connects to victimIP:vPort from aPort, the victim's ingress
 // builds a reverse-flow key with ifindex=victim_veth. Since attacker_veth != victim_veth,
 // the poisoned entry is never found and policy evaluation proceeds normally (denied).
-func sendPoison(ns, pod, victimIP, attackerIP string, vPort, aPort int) string {
-	out, err := fw.PodManager.ExecInPod(ns, pod,
-		[]string{"python3", "-c", poisonScript(victimIP, attackerIP, vPort, aPort)})
-	Expect(err).ToNot(HaveOccurred(), "sendPoison exec failed")
-	return out
+func sendPoison(ns, pod, victimIP, attackerIP string, vPort, aPort int) (string, error) {
+	return execInPod(ns, pod, "sendPoison", poisonScript(victimIP, attackerIP, vPort, aPort))
 }
 
-// Only the EtherType and the L3 header vary by family (%[2]s and %[6]s); the TCP
-// header is shared because the datapath keys on the 5-tuple, not on L4 checksums.
-//
-// Both lookups are deliberately family-agnostic: the interface comes from the route
-// to the victim rather than a hardcoded off-cluster address, and the MAC from sysfs
-// rather than an AF_INET ioctl, which needs an IPv4 stack the pod may not have.
-const poisonFrame = `import socket,struct,subprocess
-iface=subprocess.check_output(['ip','route','get','%[1]s']).decode().split('dev ')[1].split()[0]
-sock=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(%[2]s));sock.bind((iface,0))
-mac=bytes.fromhex(open('/sys/class/net/'+iface+'/address').read().strip().replace(':',''))
-eth=b'\xff\xff\xff\xff\xff\xff'+mac+%[3]s
-src=socket.inet_pton(socket.%[4]s,'%[1]s');dst=socket.inet_pton(socket.%[4]s,'%[5]s')
-%[6]s
-tcp=struct.pack('!HHLLBBHHH',%[7]d,%[8]d,0,0,5<<4,0x12,65535,0,0)
-sock.send(eth+ip+tcp);print('POISON_SENT');sock.close()`
+// execInPod runs a python script in the pod, retrying the exec itself. Exec reaches
+// the kubelet through the apiserver and fails transiently under load; a Consistently
+// that took that for a verdict would report a bypass that never happened.
+func execInPod(ns, pod, what, script string) (string, error) {
+	var out string
+	var err error
+	for attempt := 1; attempt <= execAttempts; attempt++ {
+		out, err = fw.PodManager.ExecInPod(ns, pod, []string{"python3", "-c", script})
+		if err == nil {
+			return out, nil
+		}
+		GinkgoWriter.Printf("%s exec attempt %d/%d failed: %v\n", what, attempt, execAttempts, err)
+		time.Sleep(utils.PollIntervalShort)
+	}
+	return "", err
+}
 
-// IPv4 carries a header checksum, so pack once to checksum over, then repack.
-const poisonIPv4Hdr = `def cksum(d):
+// The forged frame, one script per family because the interface lookup, EtherType,
+// address family and L3 header all differ; only the TCP header is shared, since the
+// datapath keys on the 5-tuple and not on any L4 checksum.
+//
+// The interface is the device of the family's default route, read from /proc so the
+// image needs neither iproute2 nor an install step, and the MAC comes from sysfs
+// rather than an AF_INET ioctl that assumes an IPv4 stack. Picking the sole non-lo
+// interface would be wrong: pods on an IPv6 cluster also carry the egress-CNI's
+// v4if0.
+const poisonV4Script = `import socket,struct
+iface=next(f[0] for f in (l.split() for l in open('/proc/net/route')) if f[1]=='00000000')
+sock=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0800));sock.bind((iface,0))
+mac=bytes.fromhex(open('/sys/class/net/'+iface+'/address').read().strip().replace(':',''))
+eth=b'\xff\xff\xff\xff\xff\xff'+mac+b'\x08\x00'
+src=socket.inet_pton(socket.AF_INET,'%[1]s');dst=socket.inet_pton(socket.AF_INET,'%[2]s')
+def cksum(d):
  if len(d)&1:d+=b'\x00'
  s=sum(struct.unpack('!'+str(len(d)//2)+'H',d));s=(s>>16)+(s&0xffff);s+=s>>16
  return ~s&0xffff
 ip=struct.pack('!BBHHHBBH4s4s',0x45,0,40,0x1234,0,64,6,0,src,dst)
-ip=struct.pack('!BBHHHBBH4s4s',0x45,0,40,0x1234,0,64,6,cksum(ip),src,dst)`
+ip=struct.pack('!BBHHHBBH4s4s',0x45,0,40,0x1234,0,64,6,cksum(ip),src,dst)
+tcp=struct.pack('!HHLLBBHHH',%[3]d,%[4]d,0,0,5<<4,0x12,65535,0,0)
+sock.send(eth+ip+tcp);print('POISON_SENT');sock.close()`
 
-// No checksum in IPv6. 6<<28 is version 6, zero traffic class and flow label; then
-// payload length 20 (the TCP header alone), next header 6 (TCP), hop limit 64.
-const poisonIPv6Hdr = `ip=struct.pack('!IHBB16s16s',6<<28,20,6,64,src,dst)`
+// IPv6 has no header checksum. 6<<28 is version 6 with zero traffic class and flow
+// label; then payload length 20 (the TCP header alone), next header 6, hop limit 64.
+// lo is skipped because it carries a ::/0 route of its own.
+const poisonV6Script = `import socket,struct
+iface=next(f[-1] for f in (l.split() for l in open('/proc/net/ipv6_route')) if f[0]=='0'*32 and f[1]=='00' and f[-1]!='lo')
+sock=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x86DD));sock.bind((iface,0))
+mac=bytes.fromhex(open('/sys/class/net/'+iface+'/address').read().strip().replace(':',''))
+eth=b'\xff\xff\xff\xff\xff\xff'+mac+b'\x86\xdd'
+src=socket.inet_pton(socket.AF_INET6,'%[1]s');dst=socket.inet_pton(socket.AF_INET6,'%[2]s')
+ip=struct.pack('!IHBB16s16s',6<<28,20,6,64,src,dst)
+tcp=struct.pack('!HHLLBBHHH',%[3]d,%[4]d,0,0,5<<4,0x12,65535,0,0)
+sock.send(eth+ip+tcp);print('POISON_SENT');sock.close()`
 
 func poisonScript(victimIP, attackerIP string, vPort, aPort int) string {
-	ethProto, ethType, family, l3 := "0x0800", `b'\x08\x00'`, "AF_INET", poisonIPv4Hdr
+	script := poisonV4Script
 	if isV6(victimIP) {
-		ethProto, ethType, family, l3 = "0x86DD", `b'\x86\xdd'`, "AF_INET6", poisonIPv6Hdr
+		script = poisonV6Script
 	}
-	return fmt.Sprintf(poisonFrame, victimIP, ethProto, ethType, family, attackerIP, l3, vPort, aPort)
+	return fmt.Sprintf(script, victimIP, attackerIP, vPort, aPort)
 }
