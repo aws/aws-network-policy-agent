@@ -159,7 +159,7 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 	})
 
 	It("should block multi-port poisoning attempts [Security]", func() {
-		for _, port := range []int{80, 443, 8080, 3306} {
+		for _, port := range poisonPorts {
 			// Per port: a frame that never left would pass the check below unattacked.
 			Eventually(func() (string, error) {
 				return sendPoison(namespace, "attacker", victimIP, attackerIP, port, 40000+port)
@@ -194,7 +194,7 @@ var _ = Describe("Conntrack Poisoning Prevention", func() {
 })
 
 const (
-	// The only port the victim serves on, so also the only one [Regression] can reach.
+	// The port the single-flow specs use.
 	victimPort = 80
 
 	// Not PodManager.TCPProbe's OPEN/CLOSE: nc cannot bind a source port, and these
@@ -205,11 +205,23 @@ const (
 	execAttempts = 3
 )
 
-// The stock image's `listen 80;` binds IPv4 alone, so on an IPv6 cluster every
+// Every port the specs attack, so a BLOCKED verdict always means policy denied a
+// port that was being served. A port with nothing behind it would report BLOCKED
+// whatever the datapath did.
+var poisonPorts = []int{victimPort, 443, 8080, 3306}
+
+// Generated from poisonPorts so the two cannot drift, and listening on both families
+// because the stock image's `listen 80;` binds IPv4 alone: on an IPv6 cluster every
 // connection would be refused and the security specs would pass unconsulted.
-var victimConf = fmt.Sprintf(
-	"server { listen %d; listen [::]:%d; location / { return 200 \"ok\\n\"; } }",
-	victimPort, victimPort)
+var victimConf = "server { " + listenDirectives() + `location / { return 200 "ok\n"; } }`
+
+func listenDirectives() string {
+	directives := make([]string, 0, len(poisonPorts))
+	for _, p := range poisonPorts {
+		directives = append(directives, fmt.Sprintf("listen %d; listen [::]:%d;", p, p))
+	}
+	return strings.Join(directives, " ") + " "
+}
 
 func isV6(addr string) bool {
 	ip := net.ParseIP(addr)
