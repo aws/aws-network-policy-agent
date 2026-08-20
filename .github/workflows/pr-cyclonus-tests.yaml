@@ -116,7 +116,9 @@ jobs:
   cyclonus:
     needs: [check-trigger, build-image]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # cyclonus alone runs ~3h; with the extra suites + cluster setup a leg can
+    # take ~4-4.5h. Cap below the 6h credential/GitHub job limit.
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +160,12 @@ jobs:
             withOIDC: true
           kubernetesNetworkConfig:
             ipFamily: ${IP_FAMILY}
+          # Newer eksctl (CI installs latest) is moving to EKS Auto Mode by
+          # default, which drops managed nodegroups + the self-managed vpc-cni
+          # addon this workflow installs/patches and runs network-policy tests
+          # against. Pin the classic (non-Auto-Mode) cluster explicitly.
+          autoModeConfig:
+            enabled: false
           addons:
             - name: vpc-cni
             - name: coredns
@@ -258,4 +266,23 @@ jobs:
           role-duration-seconds: 3600
 
       - name: Delete EKS cluster
-        run: eksctl delete cluster --name $CLUSTER_NAME --region $REGION --disable-nodegroup-eviction || echo "cluster delete failed or cluster not found"
+        # Retry real delete failures (throttling/dependencies) instead of masking
+        # them. Only a genuine ResourceNotFoundException counts as "already gone" —
+        # do NOT treat auth/throttling describe errors as deleted (that would leak
+        # clusters silently, which is exactly what this guards against).
+        run: |
+          for attempt in 1 2 3; do
+            if eksctl delete cluster --name "$CLUSTER_NAME" --region "$REGION" --disable-nodegroup-eviction; then
+              echo "cluster deleted"; exit 0
+            fi
+            if ! out=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>&1); then
+              if echo "$out" | grep -q "ResourceNotFoundException"; then
+                echo "cluster $CLUSTER_NAME not found - treating as deleted"; exit 0
+              fi
+              echo "describe-cluster error (not a not-found, will retry): $out"
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "delete attempt $attempt failed; retrying in 30s..."; sleep 30
+            fi
+          done
+          echo "ERROR: cluster $CLUSTER_NAME still exists after 3 delete attempts"; exit 1
