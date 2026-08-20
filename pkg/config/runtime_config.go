@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"net/url"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -14,10 +16,12 @@ import (
 )
 
 const (
+	flagAPIServer           = "apiserver"
 	flagKubeconfig          = "kubeconfig"
 	flagMetricsBindAddr     = "metrics-bind-addr"
 	flagHealthProbeBindAddr = "health-probe-bind-addr"
 
+	defaultAPIServer              = ""
 	defaultKubeconfig             = ""
 	defaultWatchNamespace         = corev1.NamespaceAll
 	defaultMetricsAddr            = ":8162"
@@ -36,6 +40,8 @@ type RuntimeConfig struct {
 }
 
 func (c *RuntimeConfig) BindFlags(fs *pflag.FlagSet) {
+	fs.StringVar(&c.APIServer, flagAPIServer, defaultAPIServer,
+		"URL of the Kubernetes API server. Overrides the API server from the in-cluster config or kubeconfig.")
 	fs.StringVar(&c.KubeConfig, flagKubeconfig, defaultKubeconfig,
 		"Path to the kubeconfig file containing authorization and API server information.")
 	fs.StringVar(&c.MetricsBindAddress, flagMetricsBindAddr, defaultMetricsAddr,
@@ -57,9 +63,35 @@ func BuildRestConfig(rtCfg RuntimeConfig) (*rest.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if rtCfg.APIServer != "" {
+		if err := validateAPIServer(rtCfg.APIServer); err != nil {
+			return nil, err
+		}
+		restCFG.Host = rtCfg.APIServer
+		// The kubeconfig host and TLS server name describe the same endpoint. Clear
+		// an explicit server name so TLS verifies the configured API server host.
+		restCFG.TLSClientConfig.ServerName = ""
+	}
 	restCFG.QPS = defaultQPS
 	restCFG.Burst = defaultBurst
 	return restCFG, nil
+}
+
+func validateAPIServer(apiServer string) error {
+	parsedURL, err := url.ParseRequestURI(apiServer)
+	if err != nil {
+		return fmt.Errorf("invalid Kubernetes API server URL %q: %w", apiServer, err)
+	}
+	if parsedURL.Scheme != "https" {
+		return fmt.Errorf("invalid Kubernetes API server URL %q: scheme must be https", apiServer)
+	}
+	if parsedURL.Host == "" {
+		return fmt.Errorf("invalid Kubernetes API server URL %q: host is required", apiServer)
+	}
+	if parsedURL.User != nil || parsedURL.Path != "" || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return fmt.Errorf("invalid Kubernetes API server URL %q: user info, path, query, and fragment are not supported", apiServer)
+	}
+	return nil
 }
 
 // BuildRuntimeOptions builds the options for the controller runtime based on config
