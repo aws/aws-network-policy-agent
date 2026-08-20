@@ -996,6 +996,23 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
 	}
 
+	// A non-empty map set is not sufficient: the SDK has been observed returning a
+	// program with a valid FD and a map set that is short one entry. Indexing a map
+	// that is absent yields a zero-valued BpfMap whose FD is 0, and the kernel rejects
+	// a write to FD 0 with EINVAL. On the pod state map that failure is silent and
+	// unrecoverable -- the pod never gets its state entry, so the datapath drops its
+	// traffic -- so reject the load here and let the caller retry for a complete
+	// program instead of caching a context that can never satisfy a write.
+	podStateMapName := utils.TC_INGRESS_POD_STATE_MAP
+	if direction == "egress" {
+		podStateMapName = utils.TC_EGRESS_POD_STATE_MAP
+	}
+	if _, found := bpfData.Maps[podStateMapName]; !found {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-MissingPodStateMap").Inc()
+		return nil, -1, fmt.Errorf("program loaded without required map %s for pod %s direction %s progFD %d (loaded maps: %d)",
+			podStateMapName, podIdentifier, direction, progFD, len(bpfData.Maps))
+	}
+
 	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
 
 	return progInfo, progFD, nil
@@ -1221,22 +1238,56 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 	// CreateMapEntry uses BPF_NOEXIST and the SDK swallows EEXIST as nil,
 	// so repeated calls are no-ops and this function stays idempotent.
 	if ingressProgInfo.Program.ProgFD != 0 {
-		mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		mapToUpdate, found := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress-no-map").Inc()
+			ingressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_INGRESS_POD_STATE_MAP, podIdentifier)
+			log().Errorf("Ingress Pod State entry create failed: %v", ingressErr)
+		} else if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
 			log().Errorf("Ingress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress").Inc()
 			ingressErr = fmt.Errorf("ingress pod state entry create: %w", err)
 		}
 	}
 	if egressProgInfo.Program.ProgFD != 0 {
-		mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		mapToUpdate, found := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("createPodStateEntry-egress-no-map").Inc()
+			egressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_EGRESS_POD_STATE_MAP, podIdentifier)
+			log().Errorf("Egress Pod State entry create failed: %v", egressErr)
+		} else if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
 			log().Errorf("Egress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-egress").Inc()
 			egressErr = fmt.Errorf("egress pod state entry create: %w", err)
 		}
 	}
-	return errors.Join(ingressErr, egressErr)
+
+	err := errors.Join(ingressErr, egressErr)
+	if err != nil {
+		l.evictBPFContextAfterPodStateFailure(podIdentifier, "entry create")
+	}
+	return err
+}
+
+// evictBPFContextAfterPodStateFailure drops the cached BPFContext for podIdentifier after a
+// pod state map write has failed. The cached context can hold a program whose map set is
+// incomplete, and every write against that same context fails identically, so retrying
+// against the same cache entry can never recover. A pod state write failure is already
+// outage-grade -- the datapath drops packets while the entry is missing -- so discarding the
+// context is the cheaper risk: it forces the next attempt to program this podIdentifier to
+// reload the program and re-derive its maps instead of reusing the bad handles.
+//
+// Eviction is not itself a retry, and the callers differ in whether one follows. The
+// PolicyEndpoint and ClusterPolicyEndpoint reconcilers requeue with backoff and re-read the
+// context, so they recover; they are the case that needs eviction, because without it they
+// would retry the same unusable handles indefinitely. The RPC handler propagates the error to
+// the CNI, which fails the ADD and lets kubelet retry the sandbox. ReAttachEbpfProbes only
+// logs and continues, so nothing re-programs that podIdentifier until the next policy change
+// or agent restart; eviction still helps there by turning a poisoned cache entry into an
+// absent one, but it does not close that gap.
+func (l *bpfClient) evictBPFContextAfterPodStateFailure(podIdentifier string, op string) {
+	l.policyEndpointeBPFContext.Delete(podIdentifier)
+	log().Errorf("Evicted bpf context for podIdentifier %s after pod state %s failure; cached program handles are discarded, so the next attempt to program this podIdentifier will reload them", podIdentifier, op)
 }
 
 // UpdatePodStateEbpfMaps writes the pod-state value (DEFAULT_ALLOW,
@@ -1247,7 +1298,6 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 
 	var ingressProgFD, egressProgFD int
-	var mapToUpdate goebpfmaps.BpfMap
 	var ingressErr, egressErr error
 	keyval := uint32(key)
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
@@ -1266,32 +1316,48 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 
 	if updateIngress && ingressProgInfo.Program.ProgFD != 0 {
 		ingressProgFD = ingressProgInfo.Program.ProgFD
-		mapToUpdate = ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-		log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, podStateValue.state)
-		start := time.Now()
-		ingressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
-		sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(ingressErr != nil)).Observe(msSince(start))
-		if ingressErr != nil {
+		mapToUpdate, found := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate-no-map").Inc()
+			ingressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_INGRESS_POD_STATE_MAP, podIdentifier)
 			log().Errorf("Ingress Pod State Map update failed: %v", ingressErr)
-			sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
-			ingressErr = fmt.Errorf("ingress pod state map write: %w", ingressErr)
+		} else {
+			log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, podStateValue.state)
+			start := time.Now()
+			ingressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+			sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(ingressErr != nil)).Observe(msSince(start))
+			if ingressErr != nil {
+				log().Errorf("Ingress Pod State Map update failed: %v", ingressErr)
+				sdkAPIErr.WithLabelValues("updateEbpfMap-ingress-podstate").Inc()
+				ingressErr = fmt.Errorf("ingress pod state map write: %w", ingressErr)
+			}
 		}
 	}
 	if updateEgress && egressProgInfo.Program.ProgFD != 0 {
 		egressProgFD = egressProgInfo.Program.ProgFD
-		mapToUpdate = egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-
-		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
-		start := time.Now()
-		egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
-		sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
-		if egressErr != nil {
-			log().Errorf("Egress Map update failed: %v", egressErr)
-			sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
-			egressErr = fmt.Errorf("egress pod state map write: %w", egressErr)
+		mapToUpdate, found := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
+		if !found {
+			sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate-no-map").Inc()
+			egressErr = fmt.Errorf("map %s absent from bpf context for pod %s", utils.TC_EGRESS_POD_STATE_MAP, podIdentifier)
+			log().Errorf("Egress Pod State Map update failed: %v", egressErr)
+		} else {
+			log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
+			start := time.Now()
+			egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+			sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
+			if egressErr != nil {
+				log().Errorf("Egress Pod State Map update failed: %v", egressErr)
+				sdkAPIErr.WithLabelValues("updateEbpfMap-egress-podstate").Inc()
+				egressErr = fmt.Errorf("egress pod state map write: %w", egressErr)
+			}
 		}
 	}
-	return errors.Join(ingressErr, egressErr)
+
+	err := errors.Join(ingressErr, egressErr)
+	if err != nil {
+		l.evictBPFContextAfterPodStateFailure(podIdentifier, "map update")
+	}
+	return err
 }
 
 func (l *bpfClient) isEBPFProbeAttached(podName string, podNamespace string) (bool, bool) {

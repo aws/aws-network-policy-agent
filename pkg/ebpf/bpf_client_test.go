@@ -156,6 +156,22 @@ func TestLoadBPFProgram(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// A partial map set: non-empty, valid progFD, but the pod state map is
+			// absent. Indexing it later would yield a zero-valued BpfMap with FD 0
+			// and every write would fail with EINVAL, so the load must be rejected.
+			name: "program loaded without the pod state map",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 7},
+					Maps: map[string]goebpfmaps.BpfMap{
+						utils.TC_INGRESS_MAP:                {MapFD: 100},
+						utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 102},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name: "program loaded with invalid FD",
 			loadReturn: map[string]goelf.BpfData{
 				pinPath: {
@@ -336,6 +352,123 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
 			assert.Equal(t, gotErr, tt.wantErr)
+		})
+	}
+}
+
+func TestBpfClient_UpdatePodStateEbpfMapsMissingMap(t *testing.T) {
+	// A recovered or reloaded BPFContext can carry a program whose ProgFD is set while the
+	// pod state map is absent from its Maps set. Indexing without checking presence yields a
+	// zero-valued BpfMap, so the write targets FD 0 and the kernel returns EINVAL -- which the
+	// caller used to never learn about, leaving the datapath with no pod_state entry and
+	// dropping every packet for that podIdentifier until the agent restarted.
+	tests := []struct {
+		name           string
+		podIdentifier  string
+		ingressPgmInfo goelf.BpfData
+		egressPgmInfo  goelf.BpfData
+		updateIngress  bool
+		updateEgress   bool
+		wantErrSubstr  string
+	}{
+		{
+			name:          "ingress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			ingressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 45},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			updateIngress: true,
+			wantErrSubstr: utils.TC_INGRESS_POD_STATE_MAP,
+		},
+		{
+			name:          "egress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			egressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 49},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			updateEgress:  true,
+			wantErrSubstr: utils.TC_EGRESS_POD_STATE_MAP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, BPFContext{
+				ingressPgmInfo: tt.ingressPgmInfo,
+				egressPgmInfo:  tt.egressPgmInfo,
+			})
+
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY,
+				DEFAULT_ALLOW, tt.updateIngress, tt.updateEgress)
+
+			// The failure must surface to the caller so the reconcile can retry.
+			assert.Error(t, gotErr)
+			assert.Contains(t, gotErr.Error(), tt.wantErrSubstr)
+
+			// ...and the stale context must be evicted, otherwise every later pod for this
+			// podIdentifier reuses the same dead handle and retrying can never recover.
+			_, stillCached := testBpfClient.policyEndpointeBPFContext.Load(tt.podIdentifier)
+			assert.False(t, stillCached, "stale bpf context should be evicted after a pod state map write failure")
+		})
+	}
+}
+
+func TestBpfClient_CreatePodStateEbpfEntryIfNotExistsMissingMap(t *testing.T) {
+	// Same hazard as the update path, on the function that seeds the entry in the first place.
+	// A missing pod_state entry is exactly what makes the datapath drop every packet, so an
+	// unnoticed failure here is at least as damaging as a failed update.
+	tests := []struct {
+		name           string
+		podIdentifier  string
+		ingressPgmInfo goelf.BpfData
+		egressPgmInfo  goelf.BpfData
+		wantErrSubstr  string
+	}{
+		{
+			name:          "ingress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			ingressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 45},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_INGRESS_POD_STATE_MAP,
+		},
+		{
+			name:          "egress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			egressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 49},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_EGRESS_POD_STATE_MAP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, BPFContext{
+				ingressPgmInfo: tt.ingressPgmInfo,
+				egressPgmInfo:  tt.egressPgmInfo,
+			})
+
+			gotErr := testBpfClient.CreatePodStateEbpfEntryIfNotExists(tt.podIdentifier,
+				POD_STATE_MAP_KEY, DEFAULT_ALLOW)
+
+			assert.Error(t, gotErr)
+			assert.Contains(t, gotErr.Error(), tt.wantErrSubstr)
+
+			_, stillCached := testBpfClient.policyEndpointeBPFContext.Load(tt.podIdentifier)
+			assert.False(t, stillCached, "stale bpf context should be evicted after a pod state entry create failure")
 		})
 	}
 }
