@@ -3,6 +3,10 @@ name: PR Cyclonus Tests
 on:
   issue_comment:
     types: [created]
+  # Manual trigger — run from any branch to exercise THAT branch's workflow
+  # definition (e.g. to validate this workflow on an upstream test branch
+  # before merging to main, without the /test cyclonus comment path).
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -10,11 +14,11 @@ permissions:
   pull-requests: write
   issues: write
 
-# Serialize runs per PR so overlapping `/test cyclonus` comments cannot collide
-# on the deterministic cluster name (create-vs-delete race). Queue rather than
-# cancel — cancelling mid-run would leak clusters.
+# Serialize per PR (comment path) so overlapping `/test cyclonus` comments can't
+# collide on the deterministic cluster name; dispatch runs key on run_id so each
+# is independent. Queue rather than cancel — cancelling mid-run leaks clusters.
 concurrency:
-  group: cyclonus-tests-${{ github.event.issue.number }}
+  group: cyclonus-tests-${{ github.event.issue.number || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -22,21 +26,39 @@ env:
   INSTANCE_TYPE: t3.large
 
 jobs:
-  check-trigger:
+  # Resolves the git ref to test + a unique cluster id, for BOTH triggers.
+  #  - workflow_dispatch: ref = the dispatched branch HEAD (github.sha),
+  #    cluster id = dispatch-<run_id>, no PR comment.
+  #  - issue_comment: validates commenter permission + the 40-char SHA against
+  #    the PR head (TOCTOU guard), then ref = that SHA, cluster id = pr-<num>.
+  setup:
     if: |
-      github.repository == 'aws/aws-network-policy-agent' &&
-      github.event.issue.pull_request != null &&
-      startsWith(github.event.comment.body, '/test cyclonus ')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.repository == 'aws/aws-network-policy-agent' &&
+       github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/test cyclonus '))
     runs-on: ubuntu-latest
     outputs:
-      pr-sha: ${{ steps.validate-sha.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      cluster-id: ${{ steps.resolve.outputs.cluster-id }}
+      is-comment: ${{ steps.resolve.outputs.is-comment }}
     steps:
-      - name: Validate SHA from comment
-        id: validate-sha
+      - name: Resolve ref and cluster id
+        id: resolve
         uses: actions/github-script@v7
         with:
           script: |
-            // Check triggering user has write+ permission on the repo
+            // Manual dispatch: test the branch it was dispatched on.
+            if (context.eventName === 'workflow_dispatch') {
+              core.setOutput('ref', context.sha);
+              core.setOutput('cluster-id', `dispatch-${context.runId}`);
+              core.setOutput('is-comment', 'false');
+              core.notice(`Cyclonus tests (IPv4 + IPv6) dispatched on ${context.ref} @ ${context.sha}`);
+              return;
+            }
+
+            // Comment path: require write+ permission.
             const { data: permData } = await github.rest.repos.getCollaboratorPermissionLevel({
               ...context.repo,
               username: context.actor
@@ -53,7 +75,6 @@ jobs:
 
             const comment = context.payload.comment.body.trim();
             const shaMatch = comment.match(/^\/test cyclonus ([a-f0-9]{40})$/);
-
             if (!shaMatch) {
               await github.rest.issues.createComment({
                 ...context.repo,
@@ -65,12 +86,10 @@ jobs:
             }
 
             const requestedSHA = shaMatch[1];
-
             const pr = (await github.rest.pulls.get({
               ...context.repo,
               pull_number: context.issue.number
             })).data;
-
             if (pr.head.sha !== requestedSHA) {
               await github.rest.issues.createComment({
                 ...context.repo,
@@ -81,7 +100,9 @@ jobs:
               return;
             }
 
-            core.setOutput('sha', requestedSHA);
+            core.setOutput('ref', requestedSHA);
+            core.setOutput('cluster-id', `pr-${context.issue.number}`);
+            core.setOutput('is-comment', 'true');
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
@@ -89,14 +110,14 @@ jobs:
             });
 
   build-image:
-    needs: check-trigger
+    needs: setup
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.build.outputs.image_uri }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-sha }}
+          ref: ${{ needs.setup.outputs.ref }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -111,10 +132,10 @@ jobs:
           aws-region: ${{ env.REGION }}
 
   # One leg per IP family. Each leg creates its own cluster, runs the full
-  # suite set, and posts a family-labeled results comment. fail-fast: false so
-  # an IPv6 failure does not cancel the IPv4 leg (and vice versa).
+  # suite set, and reports family-labeled results. fail-fast: false so an IPv6
+  # failure does not cancel the IPv4 leg (and vice versa).
   cyclonus:
-    needs: [check-trigger, build-image]
+    needs: [setup, build-image]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -123,12 +144,12 @@ jobs:
         ip-family: [IPv4, IPv6]
     env:
       IP_FAMILY: ${{ matrix.ip-family }}
-      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
+      CLUSTER_NAME: cyclonus-${{ needs.setup.outputs.cluster-id }}-${{ matrix.ip-family }}
       KUBECONFIG: ${{ github.workspace }}/.kube/config
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-sha }}
+          ref: ${{ needs.setup.outputs.ref }}
 
       - uses: ./.github/actions/install-dependencies
 
@@ -194,7 +215,7 @@ jobs:
           EOF
           eksctl update addon -f /tmp/addon-config.yaml --force
 
-          # Patch node agent image to PR build
+          # Patch node agent image to the built image
           kubectl set image daemonset/aws-node \
             -n kube-system \
             aws-eks-nodeagent=${{ needs.build-image.outputs.image }}
@@ -210,42 +231,49 @@ jobs:
           RUN_CLUSTER_NETWORK_POLICY_TESTS: "true"
         run: SKIP_ADDON_INSTALLATION=true ./scripts/run-cyclonus-tests.sh
 
-      - name: Post results
+      - name: Report results
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const ipFamily = '${{ matrix.ip-family }}';
+            const isComment = '${{ needs.setup.outputs.is-comment }}' === 'true';
             const failed = '${{ steps.cyclonus.outcome }}' !== 'success';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const suites = ipFamily === 'IPv6'
               ? 'cyclonus, policy, clusternetworkpolicy, strict (ebpf auto-skips on IPv6)'
               : 'cyclonus, policy, ebpf, clusternetworkpolicy, strict';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ github.event.issue.number }},
-              body: [
-                `## Cyclonus Test Results (${ipFamily}): ${failed ? '❌ Failed' : '✅ Passed'}`,
-                `- **Commit:** \`${{ needs.check-trigger.outputs.pr-sha }}\``,
-                `- **K8s Version:** ${{ steps.create.outputs.k8s-version }}`,
-                `- **Image:** \`${{ needs.build-image.outputs.image }}\``,
-                `- **Suites:** ${suites}`,
-                `- **[Full logs](${runUrl})**`
-              ].join('\n')
-            });
+            const body = [
+              `## Cyclonus Test Results (${ipFamily}): ${failed ? '❌ Failed' : '✅ Passed'}`,
+              `- **Ref:** \`${{ needs.setup.outputs.ref }}\``,
+              `- **K8s Version:** ${{ steps.create.outputs.k8s-version }}`,
+              `- **Image:** \`${{ needs.build-image.outputs.image }}\``,
+              `- **Suites:** ${suites}`,
+              `- **[Full logs](${runUrl})**`
+            ].join('\n');
+
+            // Always surface in the run summary; comment on the PR only for the comment path.
+            await core.summary.addRaw(body).write();
+            if (isComment) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+            }
             if (failed) core.setFailed(`Cyclonus tests failed (${ipFamily})`);
 
   cleanup:
-    needs: [check-trigger, cyclonus]
-    if: always() && needs.check-trigger.result == 'success'
+    needs: [setup, cyclonus]
+    if: always() && needs.setup.result == 'success'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         ip-family: [IPv4, IPv6]
     env:
-      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
+      CLUSTER_NAME: cyclonus-${{ needs.setup.outputs.cluster-id }}-${{ matrix.ip-family }}
     steps:
       - uses: actions/checkout@v4
 
