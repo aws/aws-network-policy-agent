@@ -82,6 +82,10 @@ type ClusterPolicyEndpointsReconciler struct {
 	// stale ClusterPolicyEndpoint annotations and avoid emitting artificially high
 	// E2E latency on restart
 	trackerStartTime time.Time
+	// lastObservedTriggerTimes maps CPE name (cluster-scoped, so name alone is
+	// unique) to the last last-change-trigger-time annotation value consumed,
+	// so each trigger time is observed at most once
+	lastObservedTriggerTimes sync.Map
 
 	// Maps pod Identifier to list of ClusterPolicyEndpoint resources
 	podIdentifierToClusterPolicyEndpointMap      sync.Map
@@ -124,6 +128,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ct
 
 func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx context.Context, req ctrl.Request) error {
 	log().Infof("Clean Up ClusterPolicyEndpoint resources for name: %s", req.Name)
+
+	r.lastObservedTriggerTimes.Delete(req.Name)
 
 	parentCNP := utils.GetParentNPNameFromPEName(req.Name)
 	resourceName := req.Name
@@ -173,6 +179,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		return err
 	}
 
+	programmingSucceeded := true
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
@@ -183,18 +190,20 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		err = r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
 		if err != nil {
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
+			programmingSucceeded = false
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint)
+	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingSucceeded)
 
 	return nil
 }
 
-// observeClusterPolicyProgrammingLatency reads the last-change-trigger-time annotation
-// from the ClusterPolicyEndpoint and emits the E2E latency histogram if the timestamp
-// is newer than this agent's start time.
-func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint) {
+// observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
+// the last-change-trigger-time annotation. Each annotation value is consumed
+// at most once per CPE, even when the observation is suppressed (programming
+// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint, programmingSucceeded bool) {
 	if cpe.Annotations == nil {
 		return
 	}
@@ -210,7 +219,22 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	if !triggerTime.After(r.trackerStartTime) {
 		return
 	}
+	if prev, ok := r.lastObservedTriggerTimes.Load(cpe.Name); ok && prev.(string) == triggerTimeStr {
+		return
+	}
+	// Consume before the suppression checks below: a suppressed observation
+	// must never be re-emitted (inflated) by a later resync of the same annotation.
+	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
+	if !programmingSucceeded {
+		log().Debugf("Skipping E2E cluster policy programming latency for CPE %s: programming failed", cpe.Name)
+		return
+	}
 	latency := time.Since(triggerTime).Seconds()
+	if latency < 0 {
+		// Clock skew between NPC (control plane) and this node
+		log().Debugf("Skipping negative E2E cluster policy programming latency %.3fs for CPE %s", latency, cpe.Name)
+		return
+	}
 	clusterPolicyProgrammingLatency.Observe(latency)
 	log().Debugf("E2E cluster policy programming latency: %.3fs for CPE %s", latency, cpe.Name)
 }
