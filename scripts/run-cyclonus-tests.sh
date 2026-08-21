@@ -6,6 +6,9 @@
 # KUBECONFIG: Set the variable to the cluster kubeconfig file path
 # REGION: defaults to us-west-2
 # IP_FAMILY: defaults to IPv4
+# ENABLE_STRICT_MODE: Optional, defaults to false. Runs the strict-mode suite (mutates aws-node to strict enforcement, so it runs last)
+# RUN_EBPF_TESTS: Optional, defaults to false. Runs the eBPF conntrack security suite (auto-skips on IPv6)
+# RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to false. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
 # DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
@@ -30,14 +33,30 @@ source ${DIR}/lib/tests.sh
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${SKIP_MAKE_TEST_BINARIES:="false"}"
 : "${ENABLE_STRICT_MODE:="false"}"
+: "${RUN_EBPF_TESTS:="false"}"
+: "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
-: "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=""}}"
+: "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE:=""}"
 : "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
+
+# Runs a prebuilt ginkgo suite binary against the cluster. Records any failure
+# in TEST_FAILED (instead of aborting) so the remaining suites still run.
+run_ginkgo_suite() {
+    local suite_binary="$1"
+    local timeout="${2:-15m}"
+    echo "Running ${suite_binary} (timeout ${timeout})"
+    CGO_ENABLED=0 ginkgo -v -timeout "$timeout" --no-color --fail-on-pending \
+        "$GINKGO_TEST_BUILD_DIR/$suite_binary" -- \
+        --cluster-kubeconfig="$KUBE_CONFIG_PATH" \
+        --cluster-name="$CLUSTER_NAME" \
+        --test-image-registry="$TEST_IMAGE_REGISTRY" \
+        --ip-family="$IP_FAMILY" || TEST_FAILED="true"
+}
 
 if [[ ! -z $ENDPOINT ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
@@ -97,7 +116,16 @@ else
     echo "Skipping making ginkgo test binaries"
 fi
 
-CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending $GINKGO_TEST_BUILD_DIR/policy.test -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
+run_ginkgo_suite policy.test 15m
+
+if [[ $RUN_EBPF_TESTS == "true" ]]; then
+    # eBPF conntrack security suite auto-skips on IPv6 (AF_PACKET is IPv4-only)
+    run_ginkgo_suite ebpf.test 15m
+fi
+
+if [[ $RUN_CLUSTER_NETWORK_POLICY_TESTS == "true" ]]; then
+    run_ginkgo_suite clusternetworkpolicy.test 30m
+fi
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
@@ -107,7 +135,7 @@ if [[ $ENABLE_STRICT_MODE == "true" ]]; then
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 
-    CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending $GINKGO_TEST_BUILD_DIR/strict.test -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY --ip-family=$IP_FAMILY || TEST_FAILED="true"
+    run_ginkgo_suite strict.test 15m
 
 fi
 

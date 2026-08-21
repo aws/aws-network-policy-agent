@@ -10,9 +10,15 @@ permissions:
   pull-requests: write
   issues: write
 
+# Serialize runs per PR so overlapping `/test cyclonus` comments cannot collide
+# on the deterministic cluster name (create-vs-delete race). Queue rather than
+# cancel — cancelling mid-run would leak clusters.
+concurrency:
+  group: cyclonus-tests-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 env:
   REGION: us-west-2
-  IP_FAMILY: IPv4
   INSTANCE_TYPE: t3.large
 
 jobs:
@@ -79,44 +85,8 @@ jobs:
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
-              body: `✅ Cyclonus tests triggered by @${context.actor} for \`${requestedSHA}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+              body: `✅ Cyclonus tests (IPv4 + IPv6) triggered by @${context.actor} for \`${requestedSHA}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
             });
-
-  create-cluster:
-    needs: check-trigger
-    runs-on: ubuntu-latest
-    outputs:
-      cluster-name: ${{ steps.setup.outputs.cluster-name }}
-      k8s-version: ${{ steps.setup.outputs.k8s-version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.check-trigger.outputs.pr-sha }}
-
-      - uses: ./.github/actions/install-dependencies
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
-          aws-region: ${{ env.REGION }}
-          role-duration-seconds: 21600
-
-      - name: Create EKS cluster
-        id: setup
-        run: |
-          K8S_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni --region $REGION \
-            | jq -r '[.addons[0].addonVersions[0].compatibilities[].clusterVersion] | sort_by(split(".")[1] | tonumber) | .[-2]')
-          CLUSTER_NAME="cyclonus-pr-${{ github.event.issue.number }}"
-          echo "k8s-version=$K8S_VERSION" >> $GITHUB_OUTPUT
-          echo "cluster-name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
-
-          eksctl create cluster \
-            --name $CLUSTER_NAME \
-            --region $REGION \
-            --version $K8S_VERSION \
-            --instance-types $INSTANCE_TYPE \
-            --nodes 3 \
-            --with-oidc
 
   build-image:
     needs: check-trigger
@@ -140,13 +110,22 @@ jobs:
         with:
           aws-region: ${{ env.REGION }}
 
-  run-cyclonus:
-    needs: [check-trigger, create-cluster, build-image]
-    if: always() && needs.create-cluster.result == 'success' && needs.build-image.result == 'success'
+  # One leg per IP family. Each leg creates its own cluster, runs the full
+  # suite set, and posts a family-labeled results comment. fail-fast: false so
+  # an IPv6 failure does not cancel the IPv4 leg (and vice versa).
+  cyclonus:
+    needs: [check-trigger, build-image]
     runs-on: ubuntu-latest
+    # cyclonus alone runs ~3h; with the extra suites + cluster setup a leg can
+    # take ~4-4.5h. Cap below the 6h credential/GitHub job limit.
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        ip-family: [IPv4, IPv6]
     env:
-      CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster-name }}
-      K8S_VERSION: ${{ needs.create-cluster.outputs.k8s-version }}
+      IP_FAMILY: ${{ matrix.ip-family }}
+      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
       KUBECONFIG: ${{ github.workspace }}/.kube/config
     steps:
       - uses: actions/checkout@v4
@@ -160,6 +139,47 @@ jobs:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: ${{ env.REGION }}
           role-duration-seconds: 21600
+
+      - name: Create EKS cluster (${{ matrix.ip-family }})
+        id: create
+        run: |
+          K8S_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni --region $REGION \
+            | jq -r '[.addons[0].addonVersions[0].compatibilities[].clusterVersion] | sort_by(split(".")[1] | tonumber) | .[-2]')
+          echo "k8s-version=$K8S_VERSION" >> $GITHUB_OUTPUT
+
+          # eksctl config file (rather than the bare CLI) so we can set the
+          # IP family and enable OIDC, which IPv6 clusters require.
+          cat > /tmp/cluster-config.yaml <<EOF
+          apiVersion: eksctl.io/v1alpha5
+          kind: ClusterConfig
+          metadata:
+            name: ${CLUSTER_NAME}
+            region: ${REGION}
+            version: "${K8S_VERSION}"
+          iam:
+            withOIDC: true
+          kubernetesNetworkConfig:
+            ipFamily: ${IP_FAMILY}
+          # Newer eksctl (CI installs latest) is moving to EKS Auto Mode by
+          # default, which drops managed nodegroups + the self-managed vpc-cni
+          # addon this workflow installs/patches and runs network-policy tests
+          # against. Pin the classic (non-Auto-Mode) cluster explicitly.
+          autoModeConfig:
+            enabled: false
+          addons:
+            - name: vpc-cni
+            - name: coredns
+            - name: kube-proxy
+          managedNodeGroups:
+            - name: ${CLUSTER_NAME}-ng
+              amiFamily: AmazonLinux2023
+              instanceType: ${INSTANCE_TYPE}
+              desiredCapacity: 3
+              minSize: 1
+              maxSize: 3
+          EOF
+
+          eksctl create cluster -f /tmp/cluster-config.yaml
 
       - name: Update kubeconfig
         run: |
@@ -189,9 +209,13 @@ jobs:
 
           kubectl rollout status daemonset/aws-node -n kube-system --timeout=300s
 
-      - name: Run cyclonus tests
+      - name: Run cyclonus + integration suites
         id: cyclonus
         continue-on-error: true
+        env:
+          ENABLE_STRICT_MODE: "true"
+          RUN_EBPF_TESTS: "true"
+          RUN_CLUSTER_NETWORK_POLICY_TESTS: "true"
         run: SKIP_ADDON_INSTALLATION=true ./scripts/run-cyclonus-tests.sh
 
       - name: Post results
@@ -199,28 +223,37 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const ipFamily = '${{ matrix.ip-family }}';
             const failed = '${{ steps.cyclonus.outcome }}' !== 'success';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const suites = ipFamily === 'IPv6'
+              ? 'cyclonus, policy, clusternetworkpolicy, strict (ebpf auto-skips on IPv6)'
+              : 'cyclonus, policy, ebpf, clusternetworkpolicy, strict';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: ${{ github.event.issue.number }},
               body: [
-                `## Cyclonus Test Results: ${failed ? '❌ Failed' : '✅ Passed'}`,
+                `## Cyclonus Test Results (${ipFamily}): ${failed ? '❌ Failed' : '✅ Passed'}`,
                 `- **Commit:** \`${{ needs.check-trigger.outputs.pr-sha }}\``,
-                `- **K8s Version:** ${{ needs.create-cluster.outputs.k8s-version }}`,
+                `- **K8s Version:** ${{ steps.create.outputs.k8s-version }}`,
                 `- **Image:** \`${{ needs.build-image.outputs.image }}\``,
+                `- **Suites:** ${suites}`,
                 `- **[Full logs](${runUrl})**`
               ].join('\n')
             });
-            if (failed) core.setFailed('Cyclonus tests failed');
+            if (failed) core.setFailed(`Cyclonus tests failed (${ipFamily})`);
 
   cleanup:
-    needs: [check-trigger, create-cluster, run-cyclonus]
-    if: always() && needs.create-cluster.outputs.cluster-name != ''
+    needs: [check-trigger, cyclonus]
+    if: always() && needs.check-trigger.result == 'success'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ip-family: [IPv4, IPv6]
     env:
-      CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster-name }}
+      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
     steps:
       - uses: actions/checkout@v4
 
@@ -233,4 +266,23 @@ jobs:
           role-duration-seconds: 3600
 
       - name: Delete EKS cluster
-        run: eksctl delete cluster --name $CLUSTER_NAME --region $REGION
+        # Retry real delete failures (throttling/dependencies) instead of masking
+        # them. Only a genuine ResourceNotFoundException counts as "already gone" —
+        # do NOT treat auth/throttling describe errors as deleted (that would leak
+        # clusters silently, which is exactly what this guards against).
+        run: |
+          for attempt in 1 2 3; do
+            if eksctl delete cluster --name "$CLUSTER_NAME" --region "$REGION" --disable-nodegroup-eviction; then
+              echo "cluster deleted"; exit 0
+            fi
+            if ! out=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>&1); then
+              if echo "$out" | grep -q "ResourceNotFoundException"; then
+                echo "cluster $CLUSTER_NAME not found - treating as deleted"; exit 0
+              fi
+              echo "describe-cluster error (not a not-found, will retry): $out"
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "delete attempt $attempt failed; retrying in 30s..."; sleep 30
+            fi
+          done
+          echo "ERROR: cluster $CLUSTER_NAME still exists after 3 delete attempts"; exit 1
