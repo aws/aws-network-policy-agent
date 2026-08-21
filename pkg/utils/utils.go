@@ -502,26 +502,6 @@ func IsNonHostCIDR(ipAddr string) bool {
 	return false
 }
 
-func ConvByteArrayToIP(ipInInt uint32) string {
-	hexIPString := fmt.Sprintf("%x", ipInInt)
-
-	if len(hexIPString)%2 != 0 {
-		hexIPString = "0" + hexIPString
-	}
-
-	byteData, _ := hex.DecodeString(hexIPString)
-	reverseByteData := reverseByteArray(byteData)
-
-	return strings.Trim(strings.Join(strings.Fields(fmt.Sprint(reverseByteData)), "."), "[]")
-}
-
-func reverseByteArray(input []byte) []byte {
-	if len(input) == 0 {
-		return input
-	}
-	return append(reverseByteArray(input[1:]), input[0])
-}
-
 func ConvIntToIPv4(ipaddr uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ip, ipaddr)
