@@ -110,6 +110,7 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
 	ClearDeletedPod(podNamespacedName string)
+	IsBPFContextRegistered(podIdentifier string) bool
 }
 
 type BPFContext struct {
@@ -1305,6 +1306,16 @@ func (l *bpfClient) isEBPFProbeAttached(podName string, podNamespace string) (bo
 		egress = true
 	}
 	return ingress, egress
+}
+
+// IsBPFContextRegistered reports whether a BPF context still exists for podIdentifier.
+// The context is created at probe-attach time and removed by DeleteBPFProbes on CNI DEL
+// (when the prog FD isn't shared). Callers use this to tell "pod still alive, probes
+// attached" from "pod already torn down" so they can skip map writes that would otherwise
+// fail with "no bpf context registered".
+func (l *bpfClient) IsBPFContextRegistered(podIdentifier string) bool {
+	_, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	return ok
 }
 
 func (l *bpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
