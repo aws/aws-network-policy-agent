@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -29,7 +30,6 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
-	"github.com/aws/aws-network-policy-agent/pkg/utils/imds"
 	"github.com/aws/aws-network-policy-agent/pkg/version"
 	"github.com/samber/lo"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -109,17 +109,16 @@ func main() {
 	if ctrlConfig.EnableNetworkPolicy {
 		log.Info("Network Policy is enabled, registering controllers...")
 
-		var nodeIP string
-		if !ctrlConfig.EnableIPv6 {
-			nodeIP = lo.Must1(imds.GetMetaData("local-ipv4"))
-		} else {
-			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
+		ipamdConfig := lo.Must1(getNetworkPolicyConfigsFromIpamd(ctx, log))
+
+		nodeIP, err := selectNodeIP(ipamdConfig, ctrlConfig.EnableIPv6)
+		if err != nil {
+			log.Errorf("failed to determine node IP: %v", err)
+			os.Exit(1)
 		}
 
-		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
-
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, ipamdConfig.NetworkPolicyMode, ipamdConfig.MultiNICEnabled, ctrlConfig.LogLevel, ipamdConfig.InstanceID, ipamdConfig.Region))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
@@ -207,14 +206,14 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 	return controllerConfig, nil
 }
 
-func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (string, bool, error) {
+func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (*cnirpc.NetworkPolicyAgentConfigReply, error) {
 	log.Infof("Trying to establish GRPC connection to ipamd at %s", LOCAL_IPAMD_ADDRESS)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
 	if err != nil {
 		log.Errorf("Failed to connect to ipamd at %s: %v", LOCAL_IPAMD_ADDRESS, err)
-		return "", false, err
+		return nil, err
 	}
 	defer grpcConn.Close()
 
@@ -222,13 +221,26 @@ func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (s
 	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
 	if err != nil {
 		log.Errorf("Failed to get network policy configs %v", err)
-		return "", false, err
+		return nil, err
 	}
-	log.Infof("Connected to ipamd at %s. NetworkPolicyMode: %s MultiNICEnabled: %v", LOCAL_IPAMD_ADDRESS, resp.NetworkPolicyMode, resp.MultiNICEnabled)
+	log.Infof("Connected to ipamd at %s. NetworkPolicyMode: %s MultiNICEnabled: %v NodeIPv4: %s NodeIPv6: %s InstanceID: %s Region: %s",
+		LOCAL_IPAMD_ADDRESS, resp.NetworkPolicyMode, resp.MultiNICEnabled, resp.NodeIPv4, resp.NodeIPv6, resp.InstanceID, resp.Region)
 	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
 		err = errors.New("Invalid Network Policy Mode")
 		log.Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
-		return "", false, err
+		return nil, err
 	}
-	return resp.NetworkPolicyMode, resp.MultiNICEnabled, nil
+	return resp, nil
+}
+
+// selectNodeIP returns the ipamd-supplied node IP for the configured address family.
+func selectNodeIP(ipamdConfig *cnirpc.NetworkPolicyAgentConfigReply, enableIPv6 bool) (string, error) {
+	nodeIP := ipamdConfig.NodeIPv4
+	if enableIPv6 {
+		nodeIP = ipamdConfig.NodeIPv6
+	}
+	if nodeIP == "" {
+		return "", fmt.Errorf("ipamd did not provide a node IP (EnableIPv6=%v)", enableIPv6)
+	}
+	return nodeIP, nil
 }

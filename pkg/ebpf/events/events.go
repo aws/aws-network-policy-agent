@@ -23,7 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/google/uuid"
-	"github.com/spf13/pflag"
 )
 
 var (
@@ -88,7 +87,7 @@ type ringBufferDataV6_t struct {
 	Tier       uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, logLevel string) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, logLevel string, instanceID string, region string) error {
 	// Enable logging and setup ring buffer
 	ctx := context.Background()
 	if mapFD <= 0 {
@@ -106,7 +105,7 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 	} else {
 		if enableCloudWatchLogs {
 			log().Info("Cloudwatch log support is enabled")
-			err = setupCW(ctx)
+			err = setupCW(ctx, instanceID, region)
 			if err != nil {
 				log().Errorf("unable to initialize Cloudwatch Logs for Policy events %v", err)
 				return err
@@ -118,12 +117,8 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 	return nil
 }
 
-func setupCW(ctx context.Context) error {
-	awsCloudConfig := awsWrapper.CloudConfig{}
-	fs := pflag.NewFlagSet("", pflag.ExitOnError)
-	awsCloudConfig.BindFlags(fs)
-
-	cloud, err := awsWrapper.NewCloud(ctx, awsCloudConfig)
+func setupCW(ctx context.Context, instanceID string, region string) error {
+	cloud, err := awsWrapper.NewCloud(ctx, region, instanceID)
 	if err != nil {
 		log().Errorf("unable to initialize AWS cloud session for Cloudwatch logs %v", err)
 		return err
