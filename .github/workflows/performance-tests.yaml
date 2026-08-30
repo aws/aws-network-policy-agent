@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Checkout latest commit
         uses: actions/checkout@v3
-      - name: Install Dependencies
-        uses: ./.github/actions/install-dependencies
       - uses: aws-actions/configure-aws-credentials@v3
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
@@ -27,9 +25,14 @@ jobs:
           role-duration-seconds: 3600 # 1 hour
       - name: Build and Push Network Policy Image
         id: build-and-push-image
-        uses: ./.github/actions/build-and-push-image
+        # Native amd64 build only: the performance clusters use c5.xlarge
+        # (x86_64) nodes, so the arm64 half and the multi-arch index are
+        # unnecessary. Dropping QEMU emulation cuts the build from ~12m to ~5m.
+        uses: ./.github/actions/build-and-push-image-per-arch
         with:
           aws-region: us-west-2
+          arch: amd64
+          image-tag: ${{ github.sha }}
   performance-tests:
     needs: build-image
     strategy:

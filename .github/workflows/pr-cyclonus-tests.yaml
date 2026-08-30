@@ -88,33 +88,87 @@ jobs:
               body: `✅ Cyclonus tests (IPv4 + IPv6) triggered by @${context.actor} for \`${requestedSHA}\`. [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
             });
 
+  # Both arches build in parallel on native runners (amd64 on ubuntu-latest,
+  # arm64 on ubuntu-24.04-arm), then create-manifest pushes the multi-arch
+  # index under the bare PR SHA tag. Same output as the old QEMU build,
+  # at ~5m instead of ~12m.
   build-image:
     needs: check-trigger
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.build.outputs.image_uri }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
+      # PRs opened before these actions merged check out a head that predates
+      # them; fall back to the default-branch copies so /test cyclonus keeps
+      # working on those PRs without a rebase. Only CI plumbing comes from the
+      # default branch; the image is still built from the PR's source.
+      - name: Ensure image build actions
+        run: |
+          if [[ ! -f .github/actions/build-and-push-image-per-arch/action.yaml ]]; then
+            git fetch --depth=1 origin "${{ github.event.repository.default_branch }}"
+            git checkout FETCH_HEAD -- .github/actions/build-and-push-image-per-arch .github/actions/create-multi-arch-manifest .github/actions/setup-ecr
+          fi
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: ${{ env.REGION }}
-          role-duration-seconds: 21600
+          role-duration-seconds: 3600
 
-      - name: Build and push image
-        id: build
-        uses: ./.github/actions/build-and-push-image
+      - name: Build and push image (${{ matrix.arch }})
+        uses: ./.github/actions/build-and-push-image-per-arch
         with:
           aws-region: ${{ env.REGION }}
+          arch: ${{ matrix.arch }}
+          image-tag: ${{ needs.check-trigger.outputs.pr-sha }}
+          # Isolated cache scope: this builds PR-authored code, and its cached
+          # layers must never be imported by the trusted scheduled builds.
+          cache-scope: pr-${{ matrix.arch }}
+
+  create-manifest:
+    needs: [check-trigger, build-image]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.manifest.outputs.manifest_uri }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
+
+      - name: Ensure image build actions
+        run: |
+          if [[ ! -f .github/actions/create-multi-arch-manifest/action.yaml ]]; then
+            git fetch --depth=1 origin "${{ github.event.repository.default_branch }}"
+            git checkout FETCH_HEAD -- .github/actions/create-multi-arch-manifest .github/actions/setup-ecr
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 3600
+
+      - name: Create multi-arch manifest
+        id: manifest
+        uses: ./.github/actions/create-multi-arch-manifest
+        with:
+          aws-region: ${{ env.REGION }}
+          image-tag: ${{ needs.check-trigger.outputs.pr-sha }}
 
   # One leg per IP family. Each leg creates its own cluster, runs the full
   # suite set, and posts a family-labeled results comment. fail-fast: false so
   # an IPv6 failure does not cancel the IPv4 leg (and vice versa).
   cyclonus:
-    needs: [check-trigger, build-image]
+    needs: [check-trigger, create-manifest]
     runs-on: ubuntu-latest
     # cyclonus alone runs ~3h; with the extra suites + cluster setup a leg can
     # take ~4-4.5h. Cap below the 6h credential/GitHub job limit.
@@ -205,7 +259,7 @@ jobs:
           # Patch node agent image to PR build
           kubectl set image daemonset/aws-node \
             -n kube-system \
-            aws-eks-nodeagent=${{ needs.build-image.outputs.image }}
+            aws-eks-nodeagent=${{ needs.create-manifest.outputs.image }}
 
           kubectl rollout status daemonset/aws-node -n kube-system --timeout=300s
 
@@ -237,7 +291,7 @@ jobs:
                 `## Cyclonus Test Results (${ipFamily}): ${failed ? '❌ Failed' : '✅ Passed'}`,
                 `- **Commit:** \`${{ needs.check-trigger.outputs.pr-sha }}\``,
                 `- **K8s Version:** ${{ steps.create.outputs.k8s-version }}`,
-                `- **Image:** \`${{ needs.build-image.outputs.image }}\``,
+                `- **Image:** \`${{ needs.create-manifest.outputs.image }}\``,
                 `- **Suites:** ${suites}`,
                 `- **[Full logs](${runUrl})**`
               ].join('\n')

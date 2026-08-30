@@ -1,5 +1,9 @@
 name: Build Image and Push
-description: 'Builds Multi-arch Network Policy Agent image and pushes to ECR'
+description: >-
+  DEPRECATED - superseded by build-and-push-image-per-arch and
+  create-multi-arch-manifest (native runners, no QEMU); remove once the
+  remaining consumers migrate. Builds the multi-arch image under QEMU
+  emulation and pushes to ECR.
 inputs:
   aws-region:
     description: AWS region

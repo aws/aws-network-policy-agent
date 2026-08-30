@@ -1,0 +1,44 @@
+name: Set up ECR
+description: >-
+  Logs docker in to the account's ECR registry, ensures the Network Policy
+  Agent image repository exists, and outputs the repository name and URI.
+  The caller must configure AWS credentials before using this action.
+inputs:
+  aws-region:
+    description: AWS region
+    required: true
+outputs:
+  repository:
+    description: "ECR repository name"
+    value: ${{ steps.ecr.outputs.repository }}
+  repo_uri:
+    description: "Repository URI (<registry>/<repository>)"
+    value: ${{ steps.ecr.outputs.repo_uri }}
+runs:
+  using: "composite"
+  steps:
+    - name: Login and ensure repository exists
+      id: ecr
+      shell: bash
+      env:
+        REGION: ${{ inputs.aws-region }}
+        AWS_ECR_REPO_NAME: amazon/aws-network-policy-agent
+      run: |
+        set -euo pipefail
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        AWS_ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+
+        aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$AWS_ECR_REGISTRY"
+        if ! aws ecr describe-repositories --registry-id "$AWS_ACCOUNT_ID" \
+            --repository-names "$AWS_ECR_REPO_NAME" --region "$REGION" >/dev/null 2>&1; then
+          echo "creating ECR repo with name $AWS_ECR_REPO_NAME"
+          # Tolerate losing the create race against a concurrent job, but then
+          # require the repository to exist: a swallowed create failure (e.g.
+          # missing permissions) must fail here, not at push time.
+          aws ecr create-repository --repository-name "$AWS_ECR_REPO_NAME" --region "$REGION" || true
+          aws ecr describe-repositories --registry-id "$AWS_ACCOUNT_ID" \
+            --repository-names "$AWS_ECR_REPO_NAME" --region "$REGION" >/dev/null
+        fi
+
+        echo "repository=$AWS_ECR_REPO_NAME" >> "$GITHUB_OUTPUT"
+        echo "repo_uri=$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME" >> "$GITHUB_OUTPUT"

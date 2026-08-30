@@ -10,28 +10,55 @@ permissions:
   contents: read
 
 jobs:
+  # Native per-arch builds (no QEMU): the conformance matrix runs both x86
+  # (t3.large) and Graviton (t4g.large) nodes, so both arches and the
+  # multi-arch index are required.
   build-image:
     if: github.repository == 'aws/aws-network-policy-agent'
-    runs-on: ubuntu-latest
-    outputs:
-      AWS_EKS_NODEAGENT_IMAGE: ${{steps.build-and-push-image.outputs.image_uri}}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout latest commit
         uses: actions/checkout@v3
-      - name: Install Dependencies
-        uses: ./.github/actions/install-dependencies
       - uses: aws-actions/configure-aws-credentials@v3
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: us-west-2
           role-duration-seconds: 3600 # 1 hour
-      - name: Build and Push Network Policy Image
-        id: build-and-push-image
-        uses: ./.github/actions/build-and-push-image
+      - name: Build and Push Network Policy Image (${{ matrix.arch }})
+        uses: ./.github/actions/build-and-push-image-per-arch
         with:
           aws-region: us-west-2
-  e2e-conformance-tests:
+          arch: ${{ matrix.arch }}
+          image-tag: ${{ github.sha }}
+  create-manifest:
     needs: build-image
+    if: github.repository == 'aws/aws-network-policy-agent'
+    runs-on: ubuntu-latest
+    outputs:
+      AWS_EKS_NODEAGENT_IMAGE: ${{ steps.manifest.outputs.manifest_uri }}
+    steps:
+      - name: Checkout latest commit
+        uses: actions/checkout@v3
+      - uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: us-west-2
+          role-duration-seconds: 3600 # 1 hour
+      - name: Create multi-arch manifest
+        id: manifest
+        uses: ./.github/actions/create-multi-arch-manifest
+        with:
+          aws-region: us-west-2
+          image-tag: ${{ github.sha }}
+  e2e-conformance-tests:
+    needs: create-manifest
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +82,7 @@ jobs:
           RUN_CONFORMANCE_TESTS: true
           IP_FAMILY: ${{ matrix.ip-family }}
           INSTANCE_TYPE: ${{ matrix.instance-type }}
-          AWS_EKS_NODEAGENT_IMAGE: ${{ needs.build-image.outputs.AWS_EKS_NODEAGENT_IMAGE }}
+          AWS_EKS_NODEAGENT_IMAGE: ${{ needs.create-manifest.outputs.AWS_EKS_NODEAGENT_IMAGE }}
           TEST_IMAGE_REGISTRY: ${{ secrets.TEST_IMAGE_REGISTRY }}
         run: |
           ./scripts/run-tests.sh
