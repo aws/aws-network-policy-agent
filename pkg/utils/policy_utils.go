@@ -34,6 +34,29 @@ func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, resour
 	return stalePodIdentifiers
 }
 
+// DeleteParentNPFromPodIdentifierMap removes every policy endpoint belonging to the given
+// parent network policy from a pod identifier's tracked policy endpoint list, deleting the
+// map entry once the list is empty.
+func DeleteParentNPFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, parentNP string) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	var currentList []string
+	if policyEndpointList, ok := podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		for _, policyEndpointName := range policyEndpointList.([]string) {
+			if GetParentNPNameFromPEName(policyEndpointName) == parentNP {
+				continue
+			}
+			currentList = append(currentList, policyEndpointName)
+		}
+		if len(currentList) == 0 {
+			podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
+		} else {
+			podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentList)
+		}
+	}
+}
+
 // DeletePolicyEndpointFromPodIdentifierMap removes a policy endpoint from a pod's identifier map
 func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpoint string) {
 	mutex.Lock()
