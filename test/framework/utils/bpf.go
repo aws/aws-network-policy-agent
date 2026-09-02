@@ -35,6 +35,63 @@ func BuildBPFCheckPod(namespace, nodeName string) *v1.Pod {
 	}
 }
 
+// bpffsMountPath is where BuildBPFFSReaderPod mounts the host's bpffs. It is
+// deliberately the host's own path, so callers pass the pin paths the agent uses
+// verbatim and never need to refer to this constant.
+const bpffsMountPath = "/sys/fs/bpf"
+
+// BPFFSReaderPodLabelKey and BPFFSReaderPodLabelValue label pods created by
+// BuildBPFFSReaderPod, so a caller can sweep one that outlived its own cleanup.
+// The key is deliberately not "app": a sweep by label deletes every matching pod
+// in the namespace, and "app" is reused by most specs in this suite.
+const BPFFSReaderPodLabelKey = "test.npa/role"
+const BPFFSReaderPodLabelValue = "bpffs-reader"
+
+// BuildBPFFSReaderPod creates a pod that runs command to completion on nodeName
+// with the host's bpffs mounted read-only. Callers read the result from the pod
+// log. It is used to inspect pinned BPF objects, for example reading
+// bpf_prog_info for the programs the agent has loaded.
+//
+// Unlike BuildBPFCheckPod this pod is not privileged, because reading pinned
+// objects does not need it: CAP_BPF is sufficient, and the mount can be
+// read-only since pins are only opened, never written. CAP_BPF is still
+// required rather than optional. Without it the kernel returns verified_insns
+// but zeroes xlated_prog_len and the other dump-gated fields, so a caller that
+// drops it reads plausible-looking zeros instead of failing.
+func BuildBPFFSReaderPod(namespace, nodeName, image string, command []string) *v1.Pod {
+	hostPathDir := v1.HostPathDirectory
+	allowPrivilegeEscalation := false
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("bpffs-reader-%d", time.Now().UnixNano()), Namespace: namespace,
+			Labels: map[string]string{BPFFSReaderPodLabelKey: BPFFSReaderPodLabelValue},
+		},
+		Spec: v1.PodSpec{
+			NodeName: nodeName, RestartPolicy: v1.RestartPolicyNever,
+			Containers: []v1.Container{{
+				Name: "reader", Image: image, ImagePullPolicy: v1.PullIfNotPresent,
+				Command: command,
+				SecurityContext: &v1.SecurityContext{
+					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+					Capabilities: &v1.Capabilities{
+						Drop: []v1.Capability{"ALL"},
+						Add:  []v1.Capability{"BPF"},
+					},
+				},
+				VolumeMounts: []v1.VolumeMount{
+					{Name: "host-bpffs", MountPath: bpffsMountPath, ReadOnly: true},
+				},
+			}},
+			Volumes: []v1.Volume{{
+				Name: "host-bpffs",
+				VolumeSource: v1.VolumeSource{
+					HostPath: &v1.HostPathVolumeSource{Path: bpffsMountPath, Type: &hostPathDir},
+				},
+			}},
+		},
+	}
+}
+
 // BPFState is the parsed view of `aws-eks-na-cli ebpf loaded-ebpfdata` output.
 type BPFState struct {
 	ProgIDs    map[string]int // pinPath basename -> prog ID
