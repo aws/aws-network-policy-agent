@@ -177,7 +177,11 @@ type probeSummary struct {
 
 var _ = Describe("BPF verifier complexity budget", func() {
 	const (
-		budgetServerName = "insn-budget-server"
+		// No hyphen on purpose. GetPodIdentifier drops the last hyphen-separated
+		// segment, so a name like "insn-budget-server" would yield the identifier
+		// "insn-budget@<ns>", shared with any other insn-budget-* pod. Without a
+		// hyphen the identifier is the pod name, which is unique in the namespace.
+		budgetServerName = "insnbudgetserver"
 		budgetPolicyName = "insn-budget-deny-all"
 	)
 
@@ -286,8 +290,8 @@ var _ = Describe("BPF verifier complexity budget", func() {
 		}
 
 		// Pins are per pod identifier, so the directory also holds programs for
-		// unrelated pods on this node. Name this spec's own so the check below
-		// cannot be satisfied by someone else's.
+		// other pods on this node. These two belong to this spec alone, because
+		// the server pod's name has no hyphen (see budgetServerName).
 		podID := utils.GetPodIdentifier(budgetServerName, namespace)
 		wantPins := []string{
 			filepath.Base(utils.GetBPFPinPathFromPodIdentifier(podID, "ingress")),
