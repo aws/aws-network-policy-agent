@@ -35,29 +35,21 @@ func BuildBPFCheckPod(namespace, nodeName string) *v1.Pod {
 	}
 }
 
-// bpffsMountPath is where BuildBPFFSReaderPod mounts the host's bpffs. It is
-// deliberately the host's own path, so callers pass the pin paths the agent uses
-// verbatim and never need to refer to this constant.
+// Mounted at the host's own path so callers can pass the agent's pin paths as-is.
 const bpffsMountPath = "/sys/fs/bpf"
 
-// BPFFSReaderPodLabelKey and BPFFSReaderPodLabelValue label pods created by
-// BuildBPFFSReaderPod, so a caller can sweep one that outlived its own cleanup.
-// The key is deliberately not "app": a sweep by label deletes every matching pod
-// in the namespace, and "app" is reused by most specs in this suite.
+// Not "app": callers sweep by this label, and "app" is reused across the suite.
 const BPFFSReaderPodLabelKey = "test.npa/role"
 const BPFFSReaderPodLabelValue = "bpffs-reader"
 
-// BuildBPFFSReaderPod creates a pod that runs command to completion on nodeName
-// with the host's bpffs mounted read-only. Callers read the result from the pod
-// log. It is used to inspect pinned BPF objects, for example reading
-// bpf_prog_info for the programs the agent has loaded.
+// BuildBPFFSReaderPod runs command to completion on nodeName with the host's
+// bpffs mounted read-only, for inspecting pinned BPF objects. Callers read the
+// result from the pod log.
 //
-// Unlike BuildBPFCheckPod this pod is not privileged, because reading pinned
-// objects does not need it: CAP_BPF is sufficient, and the mount can be
-// read-only since pins are only opened, never written. CAP_BPF is still
-// required rather than optional. Without it the kernel returns verified_insns
-// but zeroes xlated_prog_len and the other dump-gated fields, so a caller that
-// drops it reads plausible-looking zeros instead of failing.
+// Not privileged, unlike BuildBPFCheckPod. CAP_BPF is enough, but it is required
+// rather than optional: without it the kernel zeroes xlated_prog_len and the
+// other dump-gated fields instead of returning an error, so a caller that drops
+// it silently reads zeros.
 func BuildBPFFSReaderPod(namespace, nodeName, image string, command []string) *v1.Pod {
 	hostPathDir := v1.HostPathDirectory
 	allowPrivilegeEscalation := false
