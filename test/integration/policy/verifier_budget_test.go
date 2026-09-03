@@ -1,29 +1,12 @@
 package policy
 
-// BPF verifier complexity budget test.
+// Measures how much of the kernel's BPF verifier budget the agent's TC programs
+// consume. The verifier gives up after BPF_COMPLEXITY_LIMIT_INSNS processed
+// instructions and fails the load with E2BIG.
 //
-// The verifier abandons a program once it has processed
-// BPF_COMPLEXITY_LIMIT_INSNS instructions and fails the load with E2BIG. A
-// program that loads today can cross that ceiling after an innocuous-looking
-// change to the policy loops, and the only symptom is that policy enforcement
-// stops working on the node. This test measures how much of that budget each
-// loaded program actually consumes.
-//
-// The number that matters is bpf_prog_info.verified_insns, the verifier's own
-// processed-instruction count, not the static instruction count of the program.
-// It is only meaningful on the kernel that did the verifying, which is why this
-// is an integration test rather than a build-time check: two kernels reach
-// different counts for the same object because their pruning heuristics differ.
-//
-// Note on what this does and does not catch. The gate is a fraction of the
-// kernel's absolute limit, so it fires only once a program is close to failing
-// to load. It is a backstop, not an early warning: because verifier cost grows
-// multiplicatively with branch depth and pruning is heuristic, a change can
-// multiply the count several times over and still pass. The measured counts are
-// recorded in the spec report; nothing compares them across runs, so noticing a
-// regression below the gate means someone reading two reports side by side. A
-// checked-in baseline with a tolerance would close that gap, and its absence is
-// a deliberate choice rather than an oversight.
+// The number read here is bpf_prog_info.verified_insns, the verifier's processed
+// count, not the program's static instruction count. It is a property of the
+// kernel that did the verifying, so this has to run on a node.
 
 import (
 	"context"
@@ -46,57 +29,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// The verifier's processed-instruction ceiling, BPF_COMPLEXITY_LIMIT_INSNS in
-// include/linux/bpf.h. It is a compile-time constant with no userspace query.
-// The value was 131072 before kernel 5.2 and has been 1,000,000 since. Because
-// bpf_prog_info.verified_insns itself only exists from 5.16, every kernel on
-// which this test can read a count is already past the last change to the
-// limit, so this is exact rather than an assumption. Revisit if a kernel ever
-// raises it, in which case the limit becomes kernel-dependent and has to be
-// looked up per version.
+// BPF_COMPLEXITY_LIMIT_INSNS from include/linux/bpf.h. Userspace cannot query
+// it. It was 131072 before kernel 5.2 and 1,000,000 since, and verified_insns
+// only exists from 5.16, so every kernel this test can run on uses this value.
 const complexityLimitInsns = 1_000_000
 
-// verified_insns was added to bpf_prog_info in 5.16. On anything older the
-// kernel returns a shorter info struct and the count cannot be read at all, so
-// the spec skips rather than failing.
+// Older kernels return a bpf_prog_info that stops before verified_insns.
 const minKernelMajorForVerifiedInsns = 5
 const minKernelMinorForVerifiedInsns = 16
 
-// Fraction of the limit a single program may consume before this test fails.
-// See the note at the top of the file about what this does and does not catch.
+// Only fires once a program is close to failing to load, so treat a failure as
+// already urgent rather than as an early warning.
 const defaultBudgetFraction = 0.9
 
 const budgetFractionEnvVar = "NPA_VERIFIER_BUDGET_FRACTION"
 
-// Image for the probe pod. It is not taken from --test-image-registry, because
-// that registry holds the suite's purpose-built e2e images and the probe needs
-// something with a python3 interpreter instead. Overridable for environments
-// that cannot reach public ECR or that mirror it elsewhere. A substituted image
-// must provide python3; if it does not, the probe pod fails and its log says so.
+// Not --test-image-registry: that holds the suite's e2e images, and the probe
+// just needs a python3 interpreter.
 const probeImageEnvVar = "NPA_VERIFIER_PROBE_IMAGE"
 const defaultProbeImage = "public.ecr.aws/amazonlinux/amazonlinux:2023"
 
-// Per-attempt budget for the probe pod, including image pull. Deliberately well
-// under pinReconcileTimeout: CreateAndWaitTillPodIsCompleted returns only on
-// Succeeded or Failed, and a pod stuck in ImagePullBackOff is Pending, so it
-// polls until this context expires. If the two budgets were equal, one slow pull
-// would consume the whole retry loop and be reported as a pinning failure.
+// Must stay well under pinReconcileTimeout. A pod stuck pulling its image is
+// Pending, which CreateAndWaitTillPodIsCompleted waits out in full, so equal
+// budgets would spend the whole retry loop on one attempt.
 const probeTimeout = 75 * time.Second
 
-// Total budget for the agent to reconcile the policy and pin its programs.
 const pinReconcileTimeout = 4 * time.Minute
 const pinReconcileInterval = 20 * time.Second
 
-// insnProbeScript reads bpf_prog_info for every program pinned under the given
-// directories and prints one JSON object per program plus a JSON summary.
+// Prints one JSON object per pinned program, then a summary object.
 //
-// bpftool is not used because it does not print verified_insns: the string is
-// absent from the binary AL2023 ships (v7.1.0), so the field is read straight
-// from BPF_OBJ_GET_INFO_BY_FD. The offsets below are byte offsets into struct
-// bpf_prog_info from include/uapi/linux/bpf.h. They are stable across kernels
-// because the struct only ever grows at the tail, and they were verified
-// against a running kernel by comparing prog_id, prog_name and
-// xlated_prog_len against bpftool's output for the same programs.
+// bpftool is not used because the version AL2023 ships (v7.1.0) does not print
+// verified_insns. The offsets are byte offsets into struct bpf_prog_info from
+// include/uapi/linux/bpf.h; they are safe to hardcode because the struct only
+// grows at the tail.
 const insnProbeScript = `
 import ctypes, errno, json, os, platform, struct, sys
 
@@ -107,9 +73,8 @@ OFF_ID = 4
 OFF_XLATED_PROG_LEN = 20
 OFF_NAME, NAME_LEN = 64, 16
 OFF_VERIFIED_INSNS = 216
-# The kernel writes min(info_len, sizeof(its own struct)) bytes and reports the
-# count back, so a struct that stops short of verified_insns is detectable. That
-# happens on a kernel predating the field, and also if the fd is not a program.
+# The kernel writes min(info_len, its own struct size) and reports the count
+# back, so a struct ending before verified_insns is detectable.
 MIN_INFO_LEN = OFF_VERIFIED_INSNS + 4
 
 SYS_BPF = {"x86_64": 321, "aarch64": 280}
@@ -134,7 +99,7 @@ def prog_fd_from_pin(path):
     return fd
 
 def prog_info(fd):
-    # Oversize the buffer so the kernel reports how much of its struct it wrote.
+    # Oversized so the kernel reports how much of its struct it wrote.
     info = ctypes.create_string_buffer(512)
     # struct { __u32 bpf_fd; __u32 info_len; __aligned_u64 info; }
     attr = struct.pack("IIQ", fd, len(info), ctypes.addressof(info))
@@ -145,17 +110,16 @@ def prog_info(fd):
 
 results, errors, vanished, short = [], [], [], []
 for pin_dir in sys.argv[1:]:
+    # The agent creates this directory with its first pin, so a missing one just
+    # means nothing is loaded yet.
     if not os.path.isdir(pin_dir):
-        # Not an error: the agent creates this directory when it first pins a
-        # program, so an absent directory means nothing is loaded yet.
         continue
     for entry in sorted(os.listdir(pin_dir)):
         path = os.path.join(pin_dir, entry)
         try:
             fd = prog_fd_from_pin(path)
         except OSError as e:
-            # A pin can disappear between listdir and open when a pod
-            # terminates. That is routine on a live node, not a failure.
+            # A terminating pod can unpin between listdir and open.
             if e.errno == errno.ENOENT:
                 vanished.append(entry)
             else:
@@ -194,10 +158,9 @@ type progInsns struct {
 	XlatedInsns   int    `json:"xlated_insns"`
 }
 
-// shortInfo is a pin whose bpf_prog_info stopped before verified_insns. The
-// byte count distinguishes the causes: a length near sizeof(bpf_prog_info)
-// means a kernel older than 5.16, while a much smaller one means the fd was
-// not a program at all.
+// A pin whose bpf_prog_info ended before verified_insns. InfoLen tells the
+// causes apart: near sizeof(bpf_prog_info) means an old kernel, much smaller
+// means the pin was not a program.
 type shortInfo struct {
 	PinName string `json:"pin_name"`
 	InfoLen int    `json:"info_len"`
@@ -224,9 +187,8 @@ var _ = Describe("BPF verifier complexity budget", func() {
 		fraction     float64
 	)
 
-	// Declared before the BeforeEach that creates resources, because Ginkgo runs
-	// BeforeEach nodes in declaration order. A bad env var therefore fails before
-	// a pod or a policy exists, rather than after the server pod has come up.
+	// Ginkgo runs BeforeEach in declaration order, so keeping this first makes a
+	// bad env var fail before any resource is created.
 	BeforeEach(func() {
 		var err error
 		fraction, err = budgetFraction()
@@ -266,11 +228,8 @@ var _ = Describe("BPF verifier complexity budget", func() {
 	})
 
 	AfterEach(func() {
-		// Bound the teardown. DeleteAndWaitTillPodIsDeleted polls until its
-		// context is done and takes no timeout of its own, and the suite's ctx
-		// is context.Background(), so a pod stuck terminating would otherwise
-		// hang here until Ginkgo's suite-level timeout with no indication of
-		// which delete was responsible.
+		// The delete helpers poll until their context is done, and the suite's ctx
+		// never expires, so give teardown its own deadline.
 		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 
@@ -287,14 +246,9 @@ var _ = Describe("BPF verifier complexity budget", func() {
 			serverPod = nil
 		}
 
-		// runInsnProbe deletes its own pod on every return path, including a
-		// failed assertion, but a plain defer does not run if Ginkgo abandons the
-		// spec's goroutine on interrupt or timeout. Sweep by label so such a pod
-		// does not keep a bpffs mount alive for the rest of the suite.
-		// Own context: this sweep is the safety net for a probe pod that outlived
-		// runInsnProbe's defer, so a slow server-pod delete above must not be able
-		// to consume its budget. The cases that strand a probe pod are the same
-		// cases that make the deletes above slow.
+		// runInsnProbe deletes its own pod, but its defer does not run if Ginkgo
+		// abandons the spec's goroutine. Sweep on a separate deadline so a slow
+		// delete above cannot starve it.
 		sweepCtx, sweepCancel := context.WithTimeout(ctx, 1*time.Minute)
 		defer sweepCancel()
 
@@ -331,10 +285,9 @@ var _ = Describe("BPF verifier complexity budget", func() {
 				kernelVersion, minKernelMajorForVerifiedInsns, minKernelMinorForVerifiedInsns))
 		}
 
-		// The agent pins one program per direction per pod identifier, so the
-		// pin directory holds programs for every policy-selected pod on the
-		// node. Identify this spec's own pins so the measurement cannot be
-		// satisfied by programs belonging to unrelated pods.
+		// Pins are per pod identifier, so the directory also holds programs for
+		// unrelated pods on this node. Name this spec's own so the check below
+		// cannot be satisfied by someone else's.
 		podID := utils.GetPodIdentifier(budgetServerName, namespace)
 		wantPins := []string{
 			filepath.Base(utils.GetBPFPinPathFromPodIdentifier(podID, "ingress")),
@@ -345,21 +298,13 @@ var _ = Describe("BPF verifier complexity budget", func() {
 		var summary probeSummary
 		var vanished []string
 		By("Reading bpf_prog_info for every pinned program on the node", func() {
-			// Poll rather than sleeping a fixed interval: the wait is for the
-			// agent to reconcile the new policy and pin its programs, and how
-			// long that takes is not something this spec can predict.
 			Eventually(func(g Gomega) {
 				progs, summary = runInsnProbe(g, nodeName)
-
-				// Vanished pins are per-attempt, so accumulate them rather than
-				// letting the last attempt overwrite what earlier ones saw.
 				vanished = append(vanished, summary.Vanished...)
 
-				// A probe error or a short bpf_prog_info is structural: retrying
-				// cannot fix either, and if they are only checked after the loop
-				// then an empty progs list fails the pin check first and reports
-				// "never pinned", which is the wrong cause. StopTrying aborts
-				// immediately with the real explanation.
+				// Retrying cannot fix either of these, and leaving them until
+				// after the loop would let the pin check fail first and blame the
+				// agent for not pinning.
 				if len(summary.Errors) > 0 {
 					StopTrying(fmt.Sprintf("probe could not read pinned programs: %v",
 						summary.Errors)).Now()
@@ -381,20 +326,9 @@ var _ = Describe("BPF verifier complexity budget", func() {
 			AddReportEntry("pins-vanished-during-probe", vanished)
 		}
 
-		// Sanity-check the fields the probe reads at fixed offsets before
-		// asserting on them. Every real program has a non-zero id, a non-zero
-		// processed count and at least one instruction, so a zero here means the
-		// numbers are not what they claim to be. Two ways that happens: the
-		// struct offsets have drifted from this kernel's bpf_prog_info, or the
-		// probe lost CAP_BPF, which makes the kernel zero xlated_prog_len while
-		// still returning verified_insns. Both were observed during development,
-		// and without this check the second one reports every program as having
-		// 0 static instructions and still passes.
-		//
-		// Programs are identified by pin filename, not by prog_name: the agent
-		// loads them through a prog-load attr that carries no name, so the
-		// kernel records an empty one for all of them. An empty name here is
-		// expected, not a defect.
+		// A zero in any of these means the probe is reading the wrong offsets, or
+		// lost CAP_BPF, which makes the kernel zero xlated_prog_len while still
+		// returning verified_insns.
 		for _, p := range progs {
 			Expect(p.ProgID).To(BeNumerically(">", 0),
 				"%s reported prog_id 0, so the probe is misreading bpf_prog_info", p.PinName)
@@ -406,6 +340,8 @@ var _ = Describe("BPF verifier complexity budget", func() {
 					"offsets no longer match this kernel's bpf_prog_info.", p.PinName)
 		}
 
+		// prog_name is empty for every program: the agent's load path does not set
+		// one, so pin filename is the only identifier.
 		for _, p := range progs {
 			pct := 100 * float64(p.VerifiedInsns) / float64(complexityLimitInsns)
 			line := fmt.Sprintf("%s (id %d, name %q): %d verified insns, %.1f%% of the %d limit, %d xlated insns",
@@ -415,17 +351,15 @@ var _ = Describe("BPF verifier complexity budget", func() {
 
 			Expect(p.VerifiedInsns).To(BeNumerically("<=", budget),
 				"%s consumed %d of the %d processed-instruction limit on kernel %s (%.1f%%), over the %.0f%% budget. "+
-					"The program still loads, but the remaining headroom is too small to rely on: "+
-					"a kernel with less aggressive state pruning, or one more unrolled comparison, will fail the load with E2BIG. "+
-					"Either reduce verifier work in the policy loops or raise "+budgetFractionEnvVar+" deliberately.",
+					"It still loads, but a kernel with less aggressive pruning or one more unrolled comparison "+
+					"will fail with E2BIG. Reduce verifier work in the policy loops, or raise "+
+					budgetFractionEnvVar+" deliberately.",
 				p.PinName, p.VerifiedInsns, complexityLimitInsns, kernelVersion, pct, 100*fraction)
 		}
 	})
 })
 
-// runInsnProbe schedules a probe pod on nodeName, reads its output, and deletes
-// it. It is safe to call repeatedly: each call uses a fresh pod name and cleans
-// up after itself, so a retry does not leak pods or collide.
+// Safe to call repeatedly: each call names its pod uniquely and deletes it.
 func runInsnProbe(g Gomega, nodeName string) ([]progInsns, probeSummary) {
 	probePod := fwutils.BuildBPFFSReaderPod(namespace, nodeName, probeImage(),
 		[]string{"python3", "-c", insnProbeScript, utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY})
@@ -435,15 +369,10 @@ func runInsnProbe(g Gomega, nodeName string) ([]progInsns, probeSummary) {
 
 	_, runErr := fw.PodManager.CreateAndWaitTillPodIsCompleted(waitCtx, probePod)
 
-	// Read the log before asserting on runErr, because that is where a python
-	// traceback or a missing interpreter shows up. Without it the only signal
-	// is "pod failed to start".
+	// Fetch the log before asserting, so a python traceback survives the failure.
+	// PodLogs returns a placeholder string on error, so prefer logErr, which
+	// carries the reason the container produced no log at all.
 	out, logErr := fw.PodManager.PodLogs(namespace, probePod.Name)
-
-	// PodLogs returns a placeholder string rather than "" when it cannot open the
-	// stream, so out is only meaningful while logErr is nil. When it is not, logErr
-	// carries the API server's reason the container never produced a log, which for
-	// an unpullable image or a missing interpreter is the actual diagnosis.
 	logDetail := out
 	if logErr != nil {
 		logDetail = fmt.Sprintf("<no log: %v>", logErr)
@@ -473,11 +402,8 @@ func pinNames(progs []progInsns) []string {
 	return names
 }
 
-// kernelReportsVerifiedInsns reports whether a node kernel version string such
-// as "6.1.177" or "5.10.245-240.1.amzn2" is new enough to populate
-// bpf_prog_info.verified_insns. An unparseable version is treated as new
-// enough, so a naming scheme this does not anticipate produces a real failure
-// rather than a silent skip.
+// Handles versions like "6.1.177" and "5.10.245-240.1.amzn2". An unparseable
+// version returns true, so an unfamiliar format fails loudly instead of skipping.
 func kernelReportsVerifiedInsns(kernelVersion string) bool {
 	parts := strings.SplitN(kernelVersion, ".", 3)
 	if len(parts) < 2 {
@@ -519,9 +445,8 @@ func budgetFraction() (float64, error) {
 	return f, nil
 }
 
-// parseInsnProbeOutput splits the probe's JSON lines into per-program records
-// and the trailing summary. A missing summary means the probe died partway, so
-// the per-program records cannot be trusted to be complete.
+// A missing summary line means the probe died partway, so the records before it
+// cannot be assumed complete.
 func parseInsnProbeOutput(out string) ([]progInsns, probeSummary, error) {
 	var progs []progInsns
 	var summary probeSummary
