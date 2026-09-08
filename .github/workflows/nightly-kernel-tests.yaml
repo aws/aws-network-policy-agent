@@ -1,0 +1,148 @@
+name: Nightly AL2023 Kernel Tests
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 7 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: nightly-al2023-kernel-tests
+  cancel-in-progress: false
+
+env:
+  REGION: us-west-2
+  INSTANCE_TYPE: t3.large
+
+jobs:
+  discover:
+    if: |
+      github.repository == 'aws/aws-network-policy-agent' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: aws-actions/configure-aws-credentials@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+      - id: matrix
+        name: Discover kernel matrix
+        env:
+          # Authenticated GitHub API calls; unauthenticated requests from
+          # shared Actions runner IPs are frequently rate limited.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          matrix=$(./scripts/smoke/eks-kernel-matrix/run.sh | jq -c .)
+          jq . <<<"$matrix"
+          [[ $(jq length <<<"$matrix") -gt 0 ]]
+          echo "value=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    if: |
+      github.repository == 'aws/aws-network-policy-agent' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: aws-actions/configure-aws-credentials@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+      - id: image
+        uses: ./.github/actions/build-and-push-image
+        with:
+          aws-region: ${{ env.REGION }}
+
+  test:
+    needs: [discover, build]
+    if: github.repository == 'aws/aws-network-policy-agent'
+    runs-on: ubuntu-latest
+    # Cluster create (~25m) + test binaries + two 15m suites + cleanup check.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.discover.outputs.matrix || '[]') }}
+        ip-family: [IPv4, IPv6]
+    env:
+      IP_FAMILY: ${{ matrix.ip-family }}
+      K8S_VERSION: ${{ matrix.candidate.kubernetes_version }}
+      KERNEL_VERSION: ${{ matrix.candidate.kernel_version }}
+      KERNEL_LINE: ${{ matrix.candidate.kernel_line }}
+      AMI_ID: ${{ matrix.candidate.image_id }}
+      KUBECONFIG: ${{ github.workspace }}/.kube/config
+    steps:
+      - uses: actions/checkout@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/install-dependencies
+      - uses: aws-actions/configure-aws-credentials@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 10800
+
+      - name: Set cluster name
+        run: |
+          echo "CLUSTER_NAME=npa-nightly-k${KERNEL_LINE//./-}-${IP_FAMILY,,}-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: Create cluster
+        run: ./scripts/eks-test-cluster.sh create
+
+      - name: Verify nodes
+        run: ./scripts/eks-test-cluster.sh verify
+
+      - name: Install addon and test image
+        env:
+          NODE_AGENT_IMAGE: ${{ needs.build.outputs.image }}
+        run: ./scripts/eks-test-cluster.sh install
+
+      - name: Run kernel smoke tests
+        run: ./scripts/run-kernel-smoke-tests.sh
+
+  cleanup:
+    needs: [discover, build, test]
+    if: always() && needs.discover.result == 'success' && needs.test.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.discover.outputs.matrix || '[]') }}
+        ip-family: [IPv4, IPv6]
+    env:
+      IP_FAMILY: ${{ matrix.ip-family }}
+      KERNEL_LINE: ${{ matrix.candidate.kernel_line }}
+    steps:
+      - uses: actions/checkout@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          ref: ${{ github.sha }}
+      # Deletion needs only eksctl (aws CLI is preinstalled on runners).
+      # Deliberately not the install-dependencies composite: this job is the
+      # only independent deletion path for a failed leg, and a transient
+      # Go/Ginkgo setup failure must not leave the cluster running.
+      - name: Install eksctl
+        run: |
+          curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/
+      - uses: aws-actions/configure-aws-credentials@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          role-duration-seconds: 7200
+      - name: Delete cluster
+        run: |
+          export CLUSTER_NAME=npa-nightly-k${KERNEL_LINE//./-}-${IP_FAMILY,,}-${GITHUB_RUN_ID}
+          ./scripts/eks-test-cluster.sh delete
