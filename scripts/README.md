@@ -8,9 +8,34 @@ This package contains shell scripts and libraries used for running e2e integrati
 
 `run-cyclonus-tests.sh` - Runs cyclonus tests against an existing cluster and validates the output
 
+`run-npa-scale-tests.sh` - Churns distinct pod and policy identities in bounded batches while continuously checking allowed and denied traffic.
+
+`run-npa-soak-tests.sh` - Repeats the same bounded churn and traffic checks for a configurable duration.
+
 `update-node-agent-image.sh` - Update the node agent image in the cluster to the image specified in `AWS_EKS_NODEAGENT` parameter using helm chart.
 
+The scale and soak scripts only own their test namespaces and workloads. The
+caller owns cluster creation, Network Policy enablement, metrics collection,
+and cluster deletion. Both scripts require `KUBECONFIG`, delete any stale test
+namespace before starting, and fail if final namespace deletion fails.
+
+Scale defaults:
+
+- `NPA_SCALE_TARGETS=20`
+- `NPA_SCALE_BATCH_SIZE=5`
+- `NPA_SCALE_CYCLES=3`
+
+Soak defaults:
+
+- `NPA_SOAK_TARGETS=20`
+- `NPA_SOAK_BATCH_SIZE=5`
+- `NPA_SOAK_DURATION_SECONDS=7200`
+- `NPA_SOAK_CYCLE_SECONDS=300`
+- `NPA_SOAK_HEALTH_INTERVAL_SECONDS=60`
+
 #### Tests
+`scripts/test/scale-soak-test.sh` validates namespace safety and active-probe failure handling without a cluster.
+
 The following tests are valid to run using `run-test.sh` script, and setting the respective environment variable to true will run them:
 1. Conformance Tests - `RUN_CONFORMANCE_TESTS`
 2. Performance Tests - `RUN_PERFORMANCE_TESTS`
