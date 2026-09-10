@@ -183,6 +183,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		err = r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
 		if err != nil {
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
+			return err
 		}
 	}
 

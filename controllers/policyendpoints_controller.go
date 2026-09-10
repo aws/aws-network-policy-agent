@@ -284,6 +284,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		err = r.configureeBPFProbes(ctx, podIdentifier, targetPods, ingressRules, egressRules)
 		if err != nil {
 			log().Errorf("Error configuring eBPF Probes %v", err)
+			return err
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
