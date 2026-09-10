@@ -991,31 +991,37 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 		return nil, -1, fmt.Errorf("program loaded with invalid FD 0 for pod %s direction %s", podIdentifier, direction)
 	}
 
-	if len(bpfData.Maps) == 0 {
-		sdkAPIErr.WithLabelValues("LoadBpfFile-NoMaps").Inc()
-		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
-	}
-
-	// A non-empty map set is not sufficient: the SDK has been observed returning a
-	// program with a valid FD and a map set that is short one entry. Indexing a map
-	// that is absent yields a zero-valued BpfMap whose FD is 0, and the kernel rejects
-	// a write to FD 0 with EINVAL. On the pod state map that failure is silent and
-	// unrecoverable -- the pod never gets its state entry, so the datapath drops its
-	// traffic -- so reject the load here and let the caller retry for a complete
-	// program instead of caching a context that can never satisfy a write.
-	podStateMapName := utils.TC_INGRESS_POD_STATE_MAP
-	if direction == "egress" {
-		podStateMapName = utils.TC_EGRESS_POD_STATE_MAP
-	}
-	if _, found := bpfData.Maps[podStateMapName]; !found {
-		sdkAPIErr.WithLabelValues("LoadBpfFile-MissingPodStateMap").Inc()
-		return nil, -1, fmt.Errorf("program loaded without required map %s for pod %s direction %s progFD %d (loaded maps: %d)",
-			podStateMapName, podIdentifier, direction, progFD, len(bpfData.Maps))
+	if err := validateBPFProgramMapSet(bpfData, direction); err != nil {
+		sdkAPIErr.WithLabelValues("LoadBpfFile-IncompleteMapSet").Inc()
+		return nil, -1, fmt.Errorf("invalid BPF program for pod %s: %w", podIdentifier, err)
 	}
 
 	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
 
 	return progInfo, progFD, nil
+}
+
+// validateBPFProgramMapSet verifies that the SDK returned every map associated
+// with the requested namespaced TC program. A missing map is represented by a
+// zero-valued BpfMap when indexed later, so accepting an incomplete set would
+// defer the failure until a kernel map update.
+func validateBPFProgramMapSet(bpfData goelf.BpfData, direction string) error {
+	mapNames, ok := utils.GetBPFMapNames(direction)
+	if !ok {
+		return fmt.Errorf("unsupported BPF program direction %q", direction)
+	}
+
+	missingMapNames := make([]string, 0)
+	for _, mapName := range mapNames.Required() {
+		mapInfo, found := bpfData.Maps[mapName]
+		if !found || mapInfo.MapFD == 0 {
+			missingMapNames = append(missingMapNames, mapName)
+		}
+	}
+	if len(missingMapNames) != 0 {
+		return fmt.Errorf("incomplete map set for direction %q; missing required maps: %v", direction, missingMapNames)
+	}
+	return nil
 }
 
 // UpdateEbpfMaps writes the namespaced-policy ingress and egress firewall rule
