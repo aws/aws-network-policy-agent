@@ -17,6 +17,7 @@ import (
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
+	goebpfmetrics "github.com/aws/aws-ebpf-sdk-go/pkg/metrics"
 	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	goebpfutils "github.com/aws/aws-ebpf-sdk-go/pkg/utils"
@@ -84,6 +85,27 @@ var (
 		},
 		[]string{"fn"},
 	)
+
+	// The SDK retries BPF_PROG_LOAD on EAGAIN (verifier interrupted by a pending
+	// signal) transparently, so successful retries are
+	// invisible to sdkAPIErr. These CounterFuncs read the SDK's process-wide
+	// atomic counters so the race stays observable on the agent's /metrics.
+	sdkProgLoadEAGAINRetries = prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_aws_ebpfsdk_prog_load_eagain_retries_total",
+			Help: "Cumulative BPF_PROG_LOAD attempts retried by the SDK after the verifier returned EAGAIN",
+		},
+		func() float64 { return float64(goebpfmetrics.ProgLoadEAGAINRetries()) },
+	)
+
+	sdkProgLoadEAGAINExhausted = prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_aws_ebpfsdk_prog_load_eagain_exhausted_total",
+			Help: "Cumulative BPF_PROG_LOAD calls that exhausted all SDK retries on EAGAIN and were left unattached (enforcement gaps)",
+		},
+		func() float64 { return float64(goebpfmetrics.ProgLoadEAGAINExhausted()) },
+	)
+
 	prometheusRegistered = false
 )
 
@@ -99,6 +121,8 @@ func prometheusRegister() {
 	if !prometheusRegistered {
 		metrics.Registry.MustRegister(sdkAPILatency)
 		metrics.Registry.MustRegister(sdkAPIErr)
+		metrics.Registry.MustRegister(sdkProgLoadEAGAINRetries)
+		metrics.Registry.MustRegister(sdkProgLoadEAGAINExhausted)
 		prometheusRegistered = true
 	}
 }
@@ -114,6 +138,7 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
 	ClearDeletedPod(podNamespacedName string)
+	HasBPFContext(podIdentifier string) bool
 }
 
 type BPFContext struct {
@@ -984,6 +1009,15 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 func (l *bpfClient) ClearDeletedPod(podNamespacedName string) {
 	l.deletedPods.Delete(podNamespacedName)
+}
+
+// HasBPFContext reports whether an eBPF context is currently registered for the given
+// podIdentifier. The context is created when probes are attached and removed once the last
+// pod of the identifier leaves the node, so callers can use this to skip map updates that
+// would otherwise fail with "no bpf context registered".
+func (l *bpfClient) HasBPFContext(podIdentifier string) bool {
+	_, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	return ok
 }
 
 func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
