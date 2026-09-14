@@ -39,6 +39,9 @@ sleep() {
 
 npa_kubectl() {
     case "$*" in
+        *npa-unselected-client*)
+            echo unselected-ok
+            ;;
         *npa-allowed-client*)
             echo npa-ok
             ;;
@@ -54,6 +57,9 @@ expect_failure npa_verify_enforcement npa-scale
 
 npa_kubectl() {
     case "$*" in
+        *npa-unselected-client*)
+            echo unselected-ok
+            ;;
         *npa-allowed-client*)
             echo npa-ok
             ;;
@@ -66,6 +72,26 @@ npa_kubectl() {
     esac
 }
 npa_verify_enforcement npa-scale
+
+NPA_POLICY_MODE=strict
+npa_kubectl() {
+    case "$*" in
+        *npa-unselected-client*)
+            return 1
+            ;;
+        *npa-allowed-client*)
+            echo npa-ok
+            ;;
+        *npa-denied-client*)
+            echo NPA_PROBE_DENIED
+            ;;
+        *)
+            fail "unexpected kubectl invocation: $*"
+            ;;
+    esac
+}
+npa_verify_enforcement npa-scale
+NPA_POLICY_MODE=standard
 
 npa_kubectl() {
     case "$*" in
@@ -81,5 +107,52 @@ npa_kubectl() {
     esac
 }
 expect_failure npa_verify_enforcement npa-scale
+
+NPA_POLICY_MODE=standard
+WORKLOAD_POLICY_REMOVAL_PROBES=0
+WORKLOAD_POLICY_REMOVAL_STATUS=pending
+npa_kubectl() {
+    case "$*" in
+        "delete networkpolicy/npa-probe-policy"*)
+            ;;
+        *npa-denied-client*)
+            echo npa-ok
+            ;;
+        *)
+            fail "unexpected kubectl invocation: $*"
+            ;;
+    esac
+}
+npa_probe_policy_removal npa-scale
+[[ "$WORKLOAD_POLICY_REMOVAL_STATUS" == pass ]] ||
+    fail "standard policy-removal probe did not pass"
+
+NPA_POLICY_MODE=strict
+WORKLOAD_POLICY_REMOVAL_PROBES=0
+WORKLOAD_POLICY_REMOVAL_STATUS=pending
+strict_allow_applied=false
+npa_kubectl() {
+    case "$*" in
+        "delete networkpolicy/npa-probe-policy"*)
+            ;;
+        "apply -n npa-scale -f -"*)
+            strict_allow_applied=true
+            ;;
+        *npa-denied-client*)
+            if [[ "$strict_allow_applied" == true ]]; then
+                echo npa-ok
+            else
+                return 1
+            fi
+            ;;
+        *)
+            fail "unexpected kubectl invocation: $*"
+            ;;
+    esac
+}
+npa_probe_policy_removal npa-scale
+[[ "$WORKLOAD_POLICY_REMOVAL_STATUS" == pass ]] ||
+    fail "strict policy-removal probe did not pass"
+NPA_POLICY_MODE=standard
 
 echo "PASS"
