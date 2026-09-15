@@ -664,18 +664,18 @@ spec:
             - /bin/sh
             - -c
             - |
-              denied=0
+              attempts=0
               deadline=\$((\$(date +%s) + ${lifetime_seconds}))
               while [ "\$(date +%s)" -lt "\$deadline" ]; do
+                attempts=\$((attempts + 1))
                 if wget -qO- -T 1 "http://\${NPA_PROBE_SERVER_SERVICE_HOST}:\${NPA_PROBE_SERVER_SERVICE_PORT}/" >/dev/null 2>&1; then
-                  :
-                else
-                  denied=1
+                  echo "short-lived pod unexpectedly reached policy-denied target" >&2
+                  exit 1
                 fi
                 sleep 1
               done
-              if [ "\$denied" -ne 1 ]; then
-                echo "short-lived pod never observed policy denial" >&2
+              if [ "\$attempts" -eq 0 ]; then
+                echo "short-lived pod did not execute its policy probe" >&2
                 exit 1
               fi
           resources:
