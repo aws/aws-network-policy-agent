@@ -483,16 +483,15 @@ EOF
     mv -f -- "$temporary" "$WORKLOAD_REPORT_PATH"
 }
 
-npa_apply_churn_batch() {
-    local namespace=$1
-    local run_label=$2
-    local start=$3
-    local end=$4
+npa_render_churn_batch() {
+    local run_label=$1
+    local start=$2
+    local end=$3
     local identity
 
     for ((identity = start; identity <= end; identity++)); do
         local name="${run_label}-${identity}"
-        npa_kubectl apply -n "$namespace" -f - <<EOF
+        cat <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -528,8 +527,19 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress: []
   egress: []
+---
 EOF
     done
+}
+
+npa_apply_churn_batch() {
+    local namespace=$1
+    local run_label=$2
+    local start=$3
+    local end=$4
+
+    npa_render_churn_batch "$run_label" "$start" "$end" |
+        npa_kubectl apply -n "$namespace" -f -
 }
 
 npa_wait_for_churn() {

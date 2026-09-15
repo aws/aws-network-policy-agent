@@ -33,6 +33,16 @@ npa_cleanup_namespace npa-scale-safe
 [[ "$cleanup_args" == "delete namespace/npa-scale-safe --ignore-not-found=true --wait=true --timeout=10m" ]] ||
     fail "cleanup arguments were not safely bounded: ${cleanup_args}"
 
+rendered_churn=$(npa_render_churn_batch scale-7 1 3)
+[[ $(grep -c '^kind: Deployment$' <<<"$rendered_churn") == 3 ]] ||
+    fail "churn batch did not render three deployments"
+[[ $(grep -c '^kind: NetworkPolicy$' <<<"$rendered_churn") == 3 ]] ||
+    fail "churn batch did not render three network policies"
+grep -q 'name: scale-7-1' <<<"$rendered_churn" ||
+    fail "churn batch omitted its first identity"
+grep -q 'name: scale-7-3' <<<"$rendered_churn" ||
+    fail "churn batch omitted its last identity"
+
 sleep() {
     :
 }
