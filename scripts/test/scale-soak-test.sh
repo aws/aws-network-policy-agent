@@ -59,6 +59,57 @@ grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
 grep -q 'command: \["/bin/sh", "-c", "sleep 5"\]' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its bounded lifetime"
 
+npa_kubectl() {
+    case "$*" in
+        "apply -n npa-scale -f -")
+            cat >/dev/null
+            ;;
+        "wait job/short-lived-7 -n npa-scale --for=condition=Complete --timeout=10m")
+            ;;
+        "delete job/short-lived-7 -n npa-scale --ignore-not-found=true --wait=false --timeout=10m")
+            ;;
+        *)
+            fail "unexpected short-lived round invocation: $*"
+            ;;
+    esac
+}
+npa_run_short_lived_round npa-scale short-lived-7 50 5
+
+npa_kubectl() {
+    case "$*" in
+        "get pods -n npa-scale -l npa-test-run=short-lived-7 --no-headers")
+            ;;
+        *)
+            fail "unexpected short-lived deletion check: $*"
+            ;;
+    esac
+}
+npa_require_short_lived_deleted npa-scale short-lived-7
+
+npa_kubectl() {
+    case "$*" in
+        "get pods -n npa-scale -l npa-test-run=short-lived-7 --no-headers")
+            echo short-lived-7-pod
+            ;;
+        *)
+            fail "unexpected short-lived residue check: $*"
+            ;;
+    esac
+}
+expect_failure npa_require_short_lived_deleted npa-scale short-lived-7
+
+npa_kubectl() {
+    case "$*" in
+        "get pods -n npa-scale -l npa-test-run=short-lived-7 --no-headers")
+            return 1
+            ;;
+        *)
+            fail "unexpected short-lived verification error check: $*"
+            ;;
+    esac
+}
+expect_failure npa_require_short_lived_deleted npa-scale short-lived-7
+
 sleep() {
     :
 }
