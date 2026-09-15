@@ -48,6 +48,13 @@ grep -q 'name: npa-short-lived-policy' <<<"$rendered_short_lived_policy" ||
     fail "short-lived policy omitted its stable name"
 grep -q 'npa-test-phase: short-lived' <<<"$rendered_short_lived_policy" ||
     fail "short-lived policy omitted its pod selector"
+grep -q 'app: npa-probe-server' <<<"$rendered_short_lived_policy" ||
+    fail "short-lived policy omitted its control destination"
+grep -q 'port: 8081' <<<"$rendered_short_lived_policy" ||
+    fail "short-lived policy omitted its allowed control port"
+if grep -q 'port: 8080' <<<"$rendered_short_lived_policy"; then
+    fail "short-lived policy unexpectedly allowed its denied target port"
+fi
 
 rendered_short_lived_job=$(npa_render_short_lived_job short-lived-7 50 5)
 grep -q 'name: short-lived-7' <<<"$rendered_short_lived_job" ||
@@ -58,19 +65,23 @@ grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its completion count"
 grep -q 'NPA_PROBE_SERVER_SERVICE_HOST' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its policy probe target"
-grep -q 'short-lived pod unexpectedly reached policy-denied target' <<<"$rendered_short_lived_job" ||
+grep -q 'http://\$host:8081/' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its allowed control request"
+grep -q 'http://\$host:8080/' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its denied request"
+grep -q 'never proved allowed control plus denied target' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its policy-enforcement verdict"
 
 report_dir=$(mktemp -d)
 trap 'rm -rf -- "$report_dir"' EXIT
 WORKLOAD_REPORT_PATH="${report_dir}/workload.json"
 WORKLOAD_POLICY_SETTLE_SECONDS=10
-WORKLOAD_SHORT_LIVED_POLICY_PROBES=2000
+WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS=2000
 npa_write_workload_report
 grep -q '"policySettleSeconds": 10' "$WORKLOAD_REPORT_PATH" ||
     fail "workload report omitted its policy settle interval"
-grep -q '"shortLivedPolicyProbes": 2000' "$WORKLOAD_REPORT_PATH" ||
-    fail "workload report omitted its short-lived policy probes"
+grep -q '"shortLivedPolicyAttestations": 2000' "$WORKLOAD_REPORT_PATH" ||
+    fail "workload report omitted its short-lived policy attestations"
 
 npa_kubectl() {
     case "$*" in
