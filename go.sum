@@ -2,6 +2,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
+github.com/aws/amazon-network-policy-controller-k8s v1.1.10 h1:hHh5D57MrJCa9LMNfM+MmY2gzXHel2hRp1LWF2lmiHc=
+github.com/aws/amazon-network-policy-controller-k8s v1.1.10/go.mod h1:rYTol4SAbJ3Z5/JWk0pU9IL7MpGSl7r2qVT3L8ybAno=
 github.com/aws/amazon-vpc-cni-k8s v1.22.4 h1:040AzVL94vW4i9f8d5vz4tI83sKaxUM2KjB4nwyRw9M=
 github.com/aws/amazon-vpc-cni-k8s v1.22.4/go.mod h1:H9f69VZbroA/1ns5LtTnoMA4vAdPghcgU0tIH5FX4+s=
 github.com/aws/amazon-vpc-resource-controller-k8s v1.7.18 h1:V/h33TgtVkR/1hkYVWU8RFD8i8h5G+xZ6eX9Hr0zKpk=
