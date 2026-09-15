@@ -27,6 +27,7 @@ Scale defaults:
 - `NPA_SCALE_BATCH_SIZE=50`
 - `NPA_SCALE_CYCLES=20`
 - `NPA_SCALE_CYCLE_SECONDS=60`
+- `NPA_SCALE_POLICY_SETTLE_SECONDS=10`
 - `NPA_SCALE_SHORT_LIVED_TARGETS=50`
 - `NPA_SCALE_SHORT_LIVED_ROUNDS=40`
 - `NPA_SCALE_SHORT_LIVED_INTERVAL_SECONDS=30`
@@ -34,12 +35,14 @@ Scale defaults:
 
 The `npa-policy-churn-v2` profile keeps 100 stable policy-selected pods active.
 It first creates and deletes 50 distinct pod and NetworkPolicy identities per
-policy cycle. It then runs 50 five-second Job pods every 30 seconds, matching
-the historical 100-pod-per-minute leak reproduction without increasing peak
-cluster capacity. Each completed Job is deleted asynchronously so Kubernetes
-cleanup can overlap the remainder of the interval. Before creating the next
-round, the workload requires the previous round's pods to be gone. The workload
-fails if Job completion, deletion, or the functional probe misses the next
+policy cycle. A 10-second settle interval after the deployments become
+available keeps normal policy reconciliation out of the deletion path. It then
+runs 50 five-second Job pods every 30 seconds, matching the historical
+100-pod-per-minute leak reproduction without increasing peak cluster capacity.
+Each completed Job is deleted asynchronously so Kubernetes cleanup can overlap
+the remainder of the interval. Before creating the next round, the workload
+requires the previous round's pods to be gone. The workload fails if Job
+completion, deletion, or the functional probe misses the next
 absolute 30-second boundary. The final policy batch remains active for the
 full-load metric snapshot. Including the five functional probe pods, the
 default peak test workload is 155 concurrent pods and 3,000 churn pod creations

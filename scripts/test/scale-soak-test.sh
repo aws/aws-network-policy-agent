@@ -59,6 +59,14 @@ grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
 grep -q 'command: \["/bin/sh", "-c", "sleep 5"\]' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its bounded lifetime"
 
+report_dir=$(mktemp -d)
+trap 'rm -rf -- "$report_dir"' EXIT
+WORKLOAD_REPORT_PATH="${report_dir}/workload.json"
+WORKLOAD_POLICY_SETTLE_SECONDS=10
+npa_write_workload_report
+grep -q '"policySettleSeconds": 10' "$WORKLOAD_REPORT_PATH" ||
+    fail "workload report omitted its policy settle interval"
+
 npa_kubectl() {
     case "$*" in
         "apply -n npa-scale -f -")
