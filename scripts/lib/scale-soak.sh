@@ -83,6 +83,13 @@ npa_persist_state() {
         printf 'WORKLOAD_CHURN_PODS=%q\n' "${WORKLOAD_CHURN_PODS:-0}"
         printf 'WORKLOAD_CHURN_PODS_PER_JOB=%q\n' "${WORKLOAD_CHURN_PODS_PER_JOB:-0}"
         printf 'WORKLOAD_CYCLE_INTERVAL_SECONDS=%q\n' "${WORKLOAD_CYCLE_INTERVAL_SECONDS:-0}"
+        printf 'WORKLOAD_POLICY_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0}"
+        printf 'WORKLOAD_POLICY_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_PODS=%q\n' "${WORKLOAD_SHORT_LIVED_PODS:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_PODS_PER_ROUND=%q\n' "${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS=%q\n' "${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED:-0}"
         printf 'WORKLOAD_DURATION_SECONDS=%q\n' "${WORKLOAD_DURATION_SECONDS:-0}"
         printf 'WORKLOAD_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_ROUNDS_REQUESTED:-0}"
         printf 'WORKLOAD_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_ROUNDS_COMPLETED:-0}"
@@ -468,6 +475,13 @@ npa_write_workload_report() {
   "churnPods": ${WORKLOAD_CHURN_PODS:-0},
   "churnPodsPerJob": ${WORKLOAD_CHURN_PODS_PER_JOB:-0},
   "cycleIntervalSeconds": ${WORKLOAD_CYCLE_INTERVAL_SECONDS:-0},
+  "policyRoundsRequested": ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0},
+  "policyRoundsCompleted": ${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0},
+  "shortLivedPods": ${WORKLOAD_SHORT_LIVED_PODS:-0},
+  "shortLivedPodsPerRound": ${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0},
+  "shortLivedIntervalSeconds": ${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0},
+  "shortLivedRoundsRequested": ${WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED:-0},
+  "shortLivedRoundsCompleted": ${WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED:-0},
   "durationSeconds": ${WORKLOAD_DURATION_SECONDS:-0},
   "churnJobsRequested": ${WORKLOAD_ROUNDS_REQUESTED:-0},
   "churnJobsCompleted": ${WORKLOAD_ROUNDS_COMPLETED:-0},
@@ -591,4 +605,93 @@ npa_apply_churn() {
         npa_verify_enforcement "$namespace"
         start=$((end + 1))
     done
+}
+
+npa_render_short_lived_policy() {
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: npa-short-lived-policy
+spec:
+  podSelector:
+    matchLabels:
+      npa-test-phase: short-lived
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+EOF
+}
+
+npa_render_short_lived_job() {
+    local run_label=$1
+    local targets=$2
+    local lifetime_seconds=$3
+
+    cat <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${run_label}
+  labels:
+    npa-test-phase: short-lived
+    npa-test-run: ${run_label}
+spec:
+  parallelism: ${targets}
+  completions: ${targets}
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        npa-test-phase: short-lived
+        npa-test-run: ${run_label}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: workload
+          image: ${NPA_TEST_IMAGE}
+          command: ["/bin/sh", "-c", "sleep ${lifetime_seconds}"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+EOF
+}
+
+npa_apply_short_lived_policy() {
+    local namespace=$1
+
+    npa_render_short_lived_policy |
+        npa_kubectl apply -n "$namespace" -f -
+}
+
+npa_run_short_lived_round() {
+    local namespace=$1
+    local run_label=$2
+    local targets=$3
+    local lifetime_seconds=$4
+
+    npa_render_short_lived_job "$run_label" "$targets" "$lifetime_seconds" |
+        npa_kubectl apply -n "$namespace" -f -
+    npa_kubectl wait "job/${run_label}" \
+        -n "$namespace" \
+        --for=condition=Complete \
+        --timeout=10m
+    npa_kubectl delete "job/${run_label}" \
+        -n "$namespace" \
+        --ignore-not-found=true \
+        --wait=true \
+        --timeout=10m
+    npa_kubectl wait pod \
+        -n "$namespace" \
+        -l "npa-test-run=${run_label}" \
+        --for=delete \
+        --timeout=10m 2>/dev/null || true
+
+    if npa_kubectl get pods -n "$namespace" -l "npa-test-run=${run_label}" \
+        --no-headers 2>/dev/null | grep -q .; then
+        echo "short-lived pods remain for ${run_label}" >&2
+        return 1
+    fi
 }
