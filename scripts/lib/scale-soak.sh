@@ -87,6 +87,7 @@ npa_persist_state() {
         printf 'WORKLOAD_POLICY_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0}"
         printf 'WORKLOAD_POLICY_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0}"
         printf 'WORKLOAD_SHORT_LIVED_PODS=%q\n' "${WORKLOAD_SHORT_LIVED_PODS:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_POLICY_PROBES=%q\n' "${WORKLOAD_SHORT_LIVED_POLICY_PROBES:-0}"
         printf 'WORKLOAD_SHORT_LIVED_PODS_PER_ROUND=%q\n' "${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0}"
         printf 'WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS=%q\n' "${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0}"
         printf 'WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS=%q\n' "${WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS:-0}"
@@ -291,6 +292,9 @@ spec:
         - podSelector:
             matchLabels:
               npa-access: allowed
+        - podSelector:
+            matchLabels:
+              npa-test-phase: short-lived
       ports:
         - protocol: TCP
           port: 8080
@@ -481,6 +485,7 @@ npa_write_workload_report() {
   "policyRoundsRequested": ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0},
   "policyRoundsCompleted": ${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0},
   "shortLivedPods": ${WORKLOAD_SHORT_LIVED_PODS:-0},
+  "shortLivedPolicyProbes": ${WORKLOAD_SHORT_LIVED_POLICY_PROBES:-0},
   "shortLivedPodsPerRound": ${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0},
   "shortLivedIntervalSeconds": ${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0},
   "shortLivedMaxRoundSeconds": ${WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS:-0},
@@ -655,7 +660,24 @@ spec:
       containers:
         - name: workload
           image: ${NPA_TEST_IMAGE}
-          command: ["/bin/sh", "-c", "sleep ${lifetime_seconds}"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              denied=0
+              deadline=\$((\$(date +%s) + ${lifetime_seconds}))
+              while [ "\$(date +%s)" -lt "\$deadline" ]; do
+                if wget -qO- -T 1 "http://\${NPA_PROBE_SERVER_SERVICE_HOST}:\${NPA_PROBE_SERVER_SERVICE_PORT}/" >/dev/null 2>&1; then
+                  :
+                else
+                  denied=1
+                fi
+                sleep 1
+              done
+              if [ "\$denied" -ne 1 ]; then
+                echo "short-lived pod never observed policy denial" >&2
+                exit 1
+              fi
           resources:
             requests:
               cpu: 1m

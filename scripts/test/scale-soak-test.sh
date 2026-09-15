@@ -56,16 +56,21 @@ grep -q 'parallelism: 50' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its parallelism"
 grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its completion count"
-grep -q 'command: \["/bin/sh", "-c", "sleep 5"\]' <<<"$rendered_short_lived_job" ||
-    fail "short-lived job omitted its bounded lifetime"
+grep -q 'NPA_PROBE_SERVER_SERVICE_HOST' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its policy probe target"
+grep -q 'short-lived pod never observed policy denial' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its policy-enforcement verdict"
 
 report_dir=$(mktemp -d)
 trap 'rm -rf -- "$report_dir"' EXIT
 WORKLOAD_REPORT_PATH="${report_dir}/workload.json"
 WORKLOAD_POLICY_SETTLE_SECONDS=10
+WORKLOAD_SHORT_LIVED_POLICY_PROBES=2000
 npa_write_workload_report
 grep -q '"policySettleSeconds": 10' "$WORKLOAD_REPORT_PATH" ||
     fail "workload report omitted its policy settle interval"
+grep -q '"shortLivedPolicyProbes": 2000' "$WORKLOAD_REPORT_PATH" ||
+    fail "workload report omitted its short-lived policy probes"
 
 npa_kubectl() {
     case "$*" in

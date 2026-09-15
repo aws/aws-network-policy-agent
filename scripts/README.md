@@ -21,7 +21,7 @@ namespace before starting, and fail if final namespace deletion fails.
 
 Scale defaults:
 
-- `WORKLOAD_PROFILE_ID=npa-policy-churn-v2`
+- `WORKLOAD_PROFILE_ID=npa-policy-churn-v3`
 - `NPA_SCALE_STABLE_TARGETS=100`
 - `NPA_SCALE_TARGETS=50`
 - `NPA_SCALE_BATCH_SIZE=50`
@@ -33,12 +33,15 @@ Scale defaults:
 - `NPA_SCALE_SHORT_LIVED_INTERVAL_SECONDS=30`
 - `NPA_SCALE_SHORT_LIVED_LIFETIME_SECONDS=5`
 
-The `npa-policy-churn-v2` profile keeps 100 stable policy-selected pods active.
+The `npa-policy-churn-v3` profile keeps 100 stable policy-selected pods active.
 It first creates and deletes 50 distinct pod and NetworkPolicy identities per
 policy cycle. A 10-second settle interval after the deployments become
 available keeps normal policy reconciliation out of the deletion path. It then
 runs 50 five-second Job pods every 30 seconds, matching the historical
 100-pod-per-minute leak reproduction without increasing peak cluster capacity.
+Every short-lived pod probes the healthy fixture for its full lifetime and
+completes only after observing policy denial, proving that the pod exercised
+NPA enforcement before deletion.
 Each completed Job is deleted asynchronously so Kubernetes cleanup can overlap
 the remainder of the interval. Before creating the next round, the workload
 requires the previous round's pods to be gone. The workload fails if Job
