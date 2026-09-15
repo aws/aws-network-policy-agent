@@ -3,6 +3,7 @@ module github.com/aws/aws-network-policy-agent
 go 1.26.6
 
 require (
+	github.com/aws/amazon-network-policy-controller-k8s v1.1.10
 	github.com/aws/amazon-vpc-cni-k8s v1.22.4
 	github.com/aws/aws-ebpf-sdk-go v1.0.17
 	github.com/aws/aws-sdk-go-v2 v1.43.0

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	policyk8sawsv1alpha1 "github.com/aws/amazon-network-policy-controller-k8s/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -11,18 +12,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// clusterPolicyEndpointListGVK identifies the ClusterPolicyEndpoint list kind. The type is not
-// registered in the test scheme, so CPEs are listed as unstructured objects.
-var clusterPolicyEndpointListGVK = schema.GroupVersionKind{
-	Group:   "networking.k8s.aws",
-	Version: "v1alpha1",
-	Kind:    "ClusterPolicyEndpointList",
-}
 
 // These tests cover the cleanup path taken when a pod stops matching a ClusterNetworkPolicy
 // while the CNP itself keeps existing - the namespace label the CNP selects on is removed.
@@ -63,20 +55,15 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 			return err == nil
 		}
 
-		// listCPEsForParent returns the names of ClusterPolicyEndpoints sliced from the given
-		// parent CNP. The CPE type is not registered in the test scheme, so list it as
-		// unstructured.
+		// listCPEsForParent returns the names of ClusterPolicyEndpoints sliced from the given parent CNP.
 		listCPEsForParent := func(parent string) []string {
-			cpeList := &unstructured.UnstructuredList{}
-			cpeList.SetGroupVersionKind(clusterPolicyEndpointListGVK)
+			cpeList := &policyk8sawsv1alpha1.ClusterPolicyEndpointList{}
 			err := fw.K8sClient.List(ctx, cpeList)
 			Expect(err).ToNot(HaveOccurred())
 
 			var names []string
 			for _, cpe := range cpeList.Items {
-				refName, found, err := unstructured.NestedString(cpe.Object, "spec", "policyRef", "name")
-				Expect(err).ToNot(HaveOccurred())
-				if found && refName == parent {
+				if cpe.Spec.PolicyRef.Name == parent {
 					names = append(names, cpe.GetName())
 				}
 			}
