@@ -28,6 +28,7 @@ WORKLOAD_POLICY_ROUNDS_COMPLETED=0
 WORKLOAD_SHORT_LIVED_PODS=0
 WORKLOAD_SHORT_LIVED_PODS_PER_ROUND=$SHORT_LIVED_TARGETS
 WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS=$SHORT_LIVED_INTERVAL_SECONDS
+WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS=0
 WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED=$SHORT_LIVED_ROUNDS
 WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED=0
 WORKLOAD_DURATION_SECONDS=0
@@ -84,6 +85,7 @@ for ((cycle = 1; cycle < CYCLES; cycle++)); do
 done
 
 npa_apply_short_lived_policy "$NAMESPACE"
+short_lived_started=$(date +%s)
 for ((round = 1; round <= SHORT_LIVED_ROUNDS; round++)); do
     round_started=$(date +%s)
     run_label="short-lived-${round}"
@@ -99,10 +101,20 @@ for ((round = 1; round <= SHORT_LIVED_ROUNDS; round++)); do
     WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED=$round
     WORKLOAD_ROUNDS_COMPLETED=$((WORKLOAD_POLICY_ROUNDS_COMPLETED + WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED))
     WORKLOAD_DURATION_SECONDS=$(($(date +%s) - scale_started))
+    round_elapsed=$(($(date +%s) - round_started))
+    if ((round_elapsed > WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS)); then
+        WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS=$round_elapsed
+    fi
     npa_persist_state
 
-    next_round=$((round_started + SHORT_LIVED_INTERVAL_SECONDS))
+    next_round=$((short_lived_started + round * SHORT_LIVED_INTERVAL_SECONDS))
     remaining=$((next_round - $(date +%s)))
+    if ((remaining < 0)); then
+        WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS=$(($(date +%s) - round_started))
+        npa_persist_state
+        echo "NPA short-lived churn missed its ${SHORT_LIVED_INTERVAL_SECONDS}-second cadence in round ${round}" >&2
+        exit 1
+    fi
     if ((remaining > 0)); then
         sleep "$remaining"
     fi

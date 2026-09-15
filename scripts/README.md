@@ -36,10 +36,11 @@ The `npa-policy-churn-v2` profile keeps 100 stable policy-selected pods active.
 It first creates and deletes 50 distinct pod and NetworkPolicy identities per
 policy cycle. It then runs 50 five-second Job pods every 30 seconds, matching
 the historical 100-pod-per-minute leak reproduction without increasing peak
-cluster capacity. The final policy batch remains active for the full-load
-metric snapshot. Including the five functional probe pods, the default peak
-test workload is 155 concurrent pods and 3,000 churn pod creations across the
-run.
+cluster capacity. The workload fails if a Job round, deletion, and functional
+probe miss the next absolute 30-second boundary. The final policy batch remains
+active for the full-load metric snapshot. Including the five functional probe
+pods, the default peak test workload is 155 concurrent pods and 3,000 churn pod
+creations across the run.
 
 Soak defaults:
 
