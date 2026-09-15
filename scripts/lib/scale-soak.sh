@@ -87,7 +87,7 @@ npa_persist_state() {
         printf 'WORKLOAD_POLICY_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0}"
         printf 'WORKLOAD_POLICY_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0}"
         printf 'WORKLOAD_SHORT_LIVED_PODS=%q\n' "${WORKLOAD_SHORT_LIVED_PODS:-0}"
-        printf 'WORKLOAD_SHORT_LIVED_POLICY_PROBES=%q\n' "${WORKLOAD_SHORT_LIVED_POLICY_PROBES:-0}"
+        printf 'WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS=%q\n' "${WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS:-0}"
         printf 'WORKLOAD_SHORT_LIVED_PODS_PER_ROUND=%q\n' "${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0}"
         printf 'WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS=%q\n' "${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0}"
         printf 'WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS=%q\n' "${WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS:-0}"
@@ -265,7 +265,15 @@ spec:
       containers:
         - name: server
           image: ${NPA_TEST_IMAGE}
-          command: ["/bin/sh", "-c", "mkdir -p /www && echo npa-ok >/www/index.html && httpd -f -p 8080 -h /www"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /www-denied /www-control
+              echo npa-ok >/www-denied/index.html
+              echo npa-control >/www-control/index.html
+              httpd -p 8080 -h /www-denied
+              exec httpd -f -p 8081 -h /www-control
 ---
 apiVersion: v1
 kind: Service
@@ -275,8 +283,12 @@ spec:
   selector:
     app: npa-probe-server
   ports:
-    - port: 8080
+    - name: denied
+      port: 8080
       targetPort: 8080
+    - name: control
+      port: 8081
+      targetPort: 8081
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -298,6 +310,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 8081
 ---
 apiVersion: v1
 kind: Pod
@@ -485,7 +499,7 @@ npa_write_workload_report() {
   "policyRoundsRequested": ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0},
   "policyRoundsCompleted": ${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0},
   "shortLivedPods": ${WORKLOAD_SHORT_LIVED_PODS:-0},
-  "shortLivedPolicyProbes": ${WORKLOAD_SHORT_LIVED_POLICY_PROBES:-0},
+  "shortLivedPolicyAttestations": ${WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS:-0},
   "shortLivedPodsPerRound": ${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0},
   "shortLivedIntervalSeconds": ${WORKLOAD_SHORT_LIVED_INTERVAL_SECONDS:-0},
   "shortLivedMaxRoundSeconds": ${WORKLOAD_SHORT_LIVED_MAX_ROUND_SECONDS:-0},
@@ -628,7 +642,14 @@ spec:
       npa-test-phase: short-lived
   policyTypes: [Ingress, Egress]
   ingress: []
-  egress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: npa-probe-server
+      ports:
+        - protocol: TCP
+          port: 8081
 EOF
 }
 
@@ -664,18 +685,25 @@ spec:
             - /bin/sh
             - -c
             - |
-              attempts=0
+              host="\${NPA_PROBE_SERVER_SERVICE_HOST:?missing NPA probe service host}"
+              attested=0
               deadline=\$((\$(date +%s) + ${lifetime_seconds}))
               while [ "\$(date +%s)" -lt "\$deadline" ]; do
-                attempts=\$((attempts + 1))
-                if wget -qO- -T 1 "http://\${NPA_PROBE_SERVER_SERVICE_HOST}:\${NPA_PROBE_SERVER_SERVICE_PORT}/" >/dev/null 2>&1; then
-                  echo "short-lived pod unexpectedly reached policy-denied target" >&2
-                  exit 1
+                control=\$(wget -qO- -T 1 "http://\$host:8081/" 2>/dev/null || true)
+                if [ "\$control" = npa-control ]; then
+                  if wget -qO- -T 1 "http://\$host:8080/" >/dev/null 2>&1; then
+                    if [ "\$attested" -eq 1 ]; then
+                      echo "short-lived policy denial regressed after enforcement" >&2
+                      exit 1
+                    fi
+                  else
+                    attested=1
+                  fi
                 fi
                 sleep 1
               done
-              if [ "\$attempts" -eq 0 ]; then
-                echo "short-lived pod did not execute its policy probe" >&2
+              if [ "\$attested" -ne 1 ]; then
+                echo "short-lived pod never proved allowed control plus denied target" >&2
                 exit 1
               fi
           resources:

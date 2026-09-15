@@ -40,8 +40,11 @@ available keeps normal policy reconciliation out of the deletion path. It then
 runs 50 five-second Job pods every 30 seconds, matching the historical
 100-pod-per-minute leak reproduction without increasing peak cluster capacity.
 Every short-lived pod probes the healthy fixture for its full lifetime and
-fails if any request succeeds. A completed pod therefore observed only denied
-requests, proving that it exercised NPA enforcement before deletion.
+must observe an allowed control request on port 8081 and a denied request on
+port 8080 in the same probe cycle. Early allowed requests are tolerated while
+policy attachment converges. Once denial is observed, a later allowed request
+fails the pod. A completed pod therefore proves selective NPA enforcement
+before deletion.
 Each completed Job is deleted asynchronously so Kubernetes cleanup can overlap
 the remainder of the interval. Before creating the next round, the workload
 requires the previous round's pods to be gone. The workload fails if Job
