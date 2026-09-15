@@ -58,7 +58,7 @@ grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its completion count"
 grep -q 'NPA_PROBE_SERVER_SERVICE_HOST' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its policy probe target"
-grep -q 'short-lived pod never observed policy denial' <<<"$rendered_short_lived_job" ||
+grep -q 'short-lived pod unexpectedly reached policy-denied target' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its policy-enforcement verdict"
 
 report_dir=$(mktemp -d)
