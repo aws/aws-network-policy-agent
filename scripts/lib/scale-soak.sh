@@ -683,16 +683,21 @@ npa_run_short_lived_round() {
     npa_kubectl delete "job/${run_label}" \
         -n "$namespace" \
         --ignore-not-found=true \
-        --wait=true \
+        --wait=false \
         --timeout=10m
-    npa_kubectl wait pod \
-        -n "$namespace" \
-        -l "npa-test-run=${run_label}" \
-        --for=delete \
-        --timeout=10m 2>/dev/null || true
+}
 
-    if npa_kubectl get pods -n "$namespace" -l "npa-test-run=${run_label}" \
-        --no-headers 2>/dev/null | grep -q .; then
+npa_require_short_lived_deleted() {
+    local namespace=$1
+    local run_label=$2
+    local pods
+
+    if ! pods=$(npa_kubectl get pods -n "$namespace" -l "npa-test-run=${run_label}" \
+        --no-headers 2>/dev/null); then
+        echo "failed to verify deletion for ${run_label}" >&2
+        return 1
+    fi
+    if [[ -n $pods ]]; then
         echo "short-lived pods remain for ${run_label}" >&2
         return 1
     fi

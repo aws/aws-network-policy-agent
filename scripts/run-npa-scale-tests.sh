@@ -87,6 +87,9 @@ done
 npa_apply_short_lived_policy "$NAMESPACE"
 short_lived_started=$(date +%s)
 for ((round = 1; round <= SHORT_LIVED_ROUNDS; round++)); do
+    if ((round > 1)); then
+        npa_require_short_lived_deleted "$NAMESPACE" "short-lived-$((round - 1))"
+    fi
     round_started=$(date +%s)
     run_label="short-lived-${round}"
     echo "NPA short-lived churn ${round}/${SHORT_LIVED_ROUNDS}: creating ${SHORT_LIVED_TARGETS} ${SHORT_LIVED_LIFETIME_SECONDS}-second pod identities"
@@ -119,6 +122,7 @@ for ((round = 1; round <= SHORT_LIVED_ROUNDS; round++)); do
         sleep "$remaining"
     fi
 done
+npa_require_short_lived_deleted "$NAMESPACE" "short-lived-${SHORT_LIVED_ROUNDS}"
 
 cycle=$CYCLES
 run_label="scale-${cycle}"
