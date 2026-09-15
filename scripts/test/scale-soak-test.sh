@@ -43,6 +43,22 @@ grep -q 'name: scale-7-1' <<<"$rendered_churn" ||
 grep -q 'name: scale-7-3' <<<"$rendered_churn" ||
     fail "churn batch omitted its last identity"
 
+rendered_short_lived_policy=$(npa_render_short_lived_policy)
+grep -q 'name: npa-short-lived-policy' <<<"$rendered_short_lived_policy" ||
+    fail "short-lived policy omitted its stable name"
+grep -q 'npa-test-phase: short-lived' <<<"$rendered_short_lived_policy" ||
+    fail "short-lived policy omitted its pod selector"
+
+rendered_short_lived_job=$(npa_render_short_lived_job short-lived-7 50 5)
+grep -q 'name: short-lived-7' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its run identity"
+grep -q 'parallelism: 50' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its parallelism"
+grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its completion count"
+grep -q 'command: \["/bin/sh", "-c", "sleep 5"\]' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job omitted its bounded lifetime"
+
 sleep() {
     :
 }

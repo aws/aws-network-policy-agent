@@ -21,18 +21,25 @@ namespace before starting, and fail if final namespace deletion fails.
 
 Scale defaults:
 
+- `WORKLOAD_PROFILE_ID=npa-policy-churn-v2`
 - `NPA_SCALE_STABLE_TARGETS=100`
 - `NPA_SCALE_TARGETS=50`
 - `NPA_SCALE_BATCH_SIZE=50`
-- `NPA_SCALE_CYCLES=45`
+- `NPA_SCALE_CYCLES=20`
 - `NPA_SCALE_CYCLE_SECONDS=60`
+- `NPA_SCALE_SHORT_LIVED_TARGETS=50`
+- `NPA_SCALE_SHORT_LIVED_ROUNDS=40`
+- `NPA_SCALE_SHORT_LIVED_INTERVAL_SECONDS=30`
+- `NPA_SCALE_SHORT_LIVED_LIFETIME_SECONDS=5`
 
-The scale profile keeps 100 stable policy-selected pods active while creating
-and deleting 50 distinct pod and NetworkPolicy identities per cycle. One
-multi-object apply submits each default churn batch, avoiding per-object client
-round trips. The final churn batch remains active for the full-load metric
-snapshot. Including the five functional probe pods, the default peak test
-workload is 155 concurrent pods and 2,250 churn pod creations across the run.
+The `npa-policy-churn-v2` profile keeps 100 stable policy-selected pods active.
+It first creates and deletes 50 distinct pod and NetworkPolicy identities per
+policy cycle. It then runs 50 five-second Job pods every 30 seconds, matching
+the historical 100-pod-per-minute leak reproduction without increasing peak
+cluster capacity. The final policy batch remains active for the full-load
+metric snapshot. Including the five functional probe pods, the default peak
+test workload is 155 concurrent pods and 3,000 churn pod creations across the
+run.
 
 Soak defaults:
 
