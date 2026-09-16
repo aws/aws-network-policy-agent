@@ -106,15 +106,40 @@ GO_ENV_EBPF += CGO_CFLAGS=$(CUSTOM_CGO_CFLAGS)
 GO_ENV_EBPF += CGO_LDFLAGS=$(CUSTOM_CGO_LDFLAGS)
 
 # Version metadata injection
-GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
-EBPF_SDK_VERSION ?= $(shell go list -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null || echo "unknown")
+GO_MOD_VERSION := $(shell sed -n 's/^go //p' go.mod)
+GIT_VERSION ?= $(VERSION)
+GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || date -u +%s)
+BUILD_DATE ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+EBPF_SDK_VERSION ?= $(shell GOTOOLCHAIN=go$(GO_MOD_VERSION) go list -mod=readonly -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null || echo "unknown")
 # Freeze values so all binaries built in this make invocation get identical metadata
 GIT_VERSION := $(GIT_VERSION)
+GIT_COMMIT := $(GIT_COMMIT)
+SOURCE_DATE_EPOCH := $(SOURCE_DATE_EPOCH)
 BUILD_DATE := $(BUILD_DATE)
 EBPF_SDK_VERSION := $(EBPF_SDK_VERSION)
 VERSION_PKG := github.com/aws/aws-network-policy-agent/pkg/version
-VERSION_LDFLAGS := -X $(VERSION_PKG).GitVersion=$(GIT_VERSION) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).EbpfSDKVersion=$(EBPF_SDK_VERSION)
+VERSION_LDFLAGS := -X $(VERSION_PKG).GitVersion=$(GIT_VERSION) -X $(VERSION_PKG).GitCommit=$(GIT_COMMIT) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).EbpfSDKVersion=$(EBPF_SDK_VERSION)
+DOCKER_BUILD_METADATA_FLAGS = --build-arg git_version="$(GIT_VERSION)" \
+	--build-arg git_commit="$(GIT_COMMIT)" \
+	--build-arg build_date="$(BUILD_DATE)" \
+	--build-arg ebpf_sdk_version="$(EBPF_SDK_VERSION)"
+
+.PHONY: validate-release-metadata
+validate-release-metadata: ## Validate metadata inputs used by release builds.
+	@test -n "$(GIT_VERSION)" && test "$(GIT_VERSION)" != "unknown" || { echo "GIT_VERSION must be set"; exit 1; }
+	@case "$(GIT_VERSION)" in *dirty*) echo "GIT_VERSION must not describe a dirty tree"; exit 1;; esac
+	@printf '%s\n' "$(GIT_COMMIT)" | grep -Eq '^[0-9a-f]{40}$$' || { echo "GIT_COMMIT must be a full commit hash"; exit 1; }
+	@test "$(GIT_COMMIT)" = "$$(git rev-parse HEAD)" || { echo "GIT_COMMIT must match the checked-out commit"; exit 1; }
+	@test -n "$(BUILD_DATE)" && test "$(BUILD_DATE)" != "unknown" || { echo "BUILD_DATE must be set"; exit 1; }
+	@test "$$(date -u -d "$(BUILD_DATE)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" = "$(BUILD_DATE)" || { echo "BUILD_DATE must be UTC RFC3339"; exit 1; }
+	@test -n "$(EBPF_SDK_VERSION)" && test "$(EBPF_SDK_VERSION)" != "unknown" || { echo "EBPF_SDK_VERSION must be set"; exit 1; }
+	@test "$(EBPF_SDK_OVERRIDE)" != "y" || { echo "release builds must not use EBPF_SDK_OVERRIDE"; exit 1; }
+	@resolved_ebpf_replacement="$$(GOTOOLCHAIN=go$(GO_MOD_VERSION) go list -mod=readonly -m -f '{{with .Replace}}{{.Path}} {{.Version}} {{.Dir}}{{end}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null)" && \
+		test -z "$$resolved_ebpf_replacement" || { echo "release builds must not replace github.com/aws/aws-ebpf-sdk-go"; exit 1; }
+	@resolved_ebpf_version="$$(GOTOOLCHAIN=go$(GO_MOD_VERSION) go list -mod=readonly -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null)" && \
+		test "$$resolved_ebpf_version" = "$(EBPF_SDK_VERSION)" || { echo "EBPF_SDK_VERSION must match the selected module version"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "release metadata must be generated from a clean tree"; exit 1; }
 
 # Build using the host's Go toolchain.
 BUILD_MODE ?= -buildmode=pie
@@ -172,7 +197,17 @@ build-bpf: ## Build BPF.
 #docker-build: test ## Build docker image with the manager.
 #	docker build -t ${IMAGE_NAME} .
 docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
-	docker build -t ${IMAGE_NAME} --build-arg golang_image="$(GOLANG_IMAGE)" --build-arg base_image="$(BASE_IMAGE)" .
+	docker build -t ${IMAGE_NAME} \
+		--build-arg golang_image="$(GOLANG_IMAGE)" \
+		--build-arg base_image="$(BASE_IMAGE)" \
+		$(DOCKER_BUILD_METADATA_FLAGS) \
+		.
+
+.PHONY: validate-metadata-image
+validate-metadata-image: ## Build the production image and verify its emitted metadata.
+	$(MAKE) validate-release-metadata
+	$(MAKE) docker-build
+	./scripts/validate-metadata-image.sh "$(IMAGE_NAME)" "$(GIT_VERSION)" "$(GIT_COMMIT)" "$(BUILD_DATE)" "$(EBPF_SDK_VERSION)"
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -214,13 +249,14 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 		--cache-to=type=gha,mode=max \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
 		--build-arg base_image="$(BASE_IMAGE)" \
+		$(DOCKER_BUILD_METADATA_FLAGS) \
 		.
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
 
 
 .PHONY: multi-arch-build-and-push
-multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker image for the manager for cross-platform support
+multi-arch-build-and-push: validate-release-metadata ## Build and push docker image for the manager for cross-platform support
 
 	docker buildx build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
 		-f Dockerfile \
@@ -230,6 +266,7 @@ multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker imag
 		-t $(IMAGE):$(VERSION) \
 		--build-arg golang_image="$(GOLANG_IMAGE)" \
 		--build-arg base_image="$(BASE_IMAGE)" \
+		$(DOCKER_BUILD_METADATA_FLAGS) \
 		--push \
 		.
 

@@ -50,7 +50,7 @@ Type: Boolean
 
 Default: false
 
-Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/run/aws-routed-eni/network-policy-agent.log`).
+Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/log/aws-routed-eni/network-policy-agent.log`).
 
 This feature requires to also enable the `enable-policy-event-logs` flag.
 
@@ -124,6 +124,20 @@ Network Policy agent maintains a local conntrack cache. Ideally this should be o
 $ cat /proc/sys/net/netfilter/nf_conntrack_max
 262144
 ```
+
+### Build metadata
+
+At startup, Network Policy Agent makes one best-effort attempt to write
+`/var/log/aws-routed-eni/aws-network-policy-agent-metadata.json` on the node.
+The JSON includes the schema version, component version, full Git commit, build
+date, Go version, target platform, publication time, and selected eBPF SDK
+version. The standard EKS node support bundle collects this file.
+
+This diagnostic file is not authoritative evidence of the currently running
+image. A missing file does not prevent startup, and a downgrade to a version
+that does not publish metadata can leave an older file. Use `generatedAt`
+together with the pod's container image or managed add-on information when
+checking freshness.
 
 ## Network Policy Agent CLI
 The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.

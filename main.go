@@ -59,6 +59,8 @@ var (
 	npaSocketPath       = "/var/run/aws-node/npa.sock"
 )
 
+const metadataFilePath = "/var/log/aws-routed-eni/aws-network-policy-agent-metadata.json"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -76,6 +78,7 @@ func main() {
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
 	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
+	version.PublishMetadataAsync(metadataFilePath, os.Stderr)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
 	if ctrlConfig.EnableProfiling {

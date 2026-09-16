@@ -4,6 +4,7 @@ import "fmt"
 
 var (
 	GitVersion     = "unknown"
+	GitCommit      = "unknown"
 	BuildDate      = "unknown"
 	EbpfSDKVersion = "unknown"
 )

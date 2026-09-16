@@ -40,6 +40,8 @@ jobs:
         run: |
           make check-format
           make vet
+      - name: Validate release metadata
+        run: make validate-release-metadata
       - name: Build
         run: make build-linux
       - name: Unit test
@@ -54,17 +56,33 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
   docker-build:
     if: github.event_name == 'pull_request'
-    name: Build Docker images
-    runs-on: ubuntu-latest
+    name: Build Docker images (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout latest commit in the PR
         uses: actions/checkout@v3
       - name: Set up QEMU
+        if: matrix.arch == 'amd64'
         uses: docker/setup-qemu-action@v2
       - name: Set up Docker Buildx
+        if: matrix.arch == 'amd64'
         uses: docker/setup-buildx-action@v2
-      - name: Build Network Policy Agent images
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+      - name: Build multi-architecture Network Policy Agent images
+        if: matrix.arch == 'amd64'
         run: make docker-buildx
+      - name: Build and validate Network Policy Agent image metadata
+        run: make validate-metadata-image
   deprecated-apigroups:
     if: github.event_name == 'pull_request'
     name: Detect deprecated apiGroups
