@@ -43,26 +43,32 @@ grep -q 'name: scale-7-1' <<<"$rendered_churn" ||
 grep -q 'name: scale-7-3' <<<"$rendered_churn" ||
     fail "churn batch omitted its last identity"
 
-rendered_short_lived_policy=$(npa_render_short_lived_policy)
-grep -q 'name: npa-short-lived-policy' <<<"$rendered_short_lived_policy" ||
-    fail "short-lived policy omitted its stable name"
-grep -q 'npa-test-phase: short-lived' <<<"$rendered_short_lived_policy" ||
-    fail "short-lived policy omitted its pod selector"
-grep -q 'app: npa-probe-server' <<<"$rendered_short_lived_policy" ||
-    fail "short-lived policy omitted its control destination"
-grep -q 'port: 8081' <<<"$rendered_short_lived_policy" ||
-    fail "short-lived policy omitted its allowed control port"
-if grep -q 'port: 8080' <<<"$rendered_short_lived_policy"; then
-    fail "short-lived policy unexpectedly allowed its denied target port"
+rendered_short_lived_policies=$(npa_render_short_lived_policies)
+[[ $(grep -c '^kind: NetworkPolicy$' <<<"$rendered_short_lived_policies") == 2 ]] ||
+    fail "short-lived workload did not render two network policies"
+grep -q 'name: npa-short-lived-default-deny' <<<"$rendered_short_lived_policies" ||
+    fail "short-lived policies omitted their default-deny policy"
+grep -q 'name: npa-short-lived-policy' <<<"$rendered_short_lived_policies" ||
+    fail "short-lived policies omitted their control policy"
+[[ $(grep -c '^      npa-test-phase: short-lived$' <<<"$rendered_short_lived_policies") == 2 ]] ||
+    fail "both short-lived policies must select the churn pods"
+grep -q 'app: npa-probe-server' <<<"$rendered_short_lived_policies" ||
+    fail "short-lived policies omitted their control destination"
+grep -q 'port: 8081' <<<"$rendered_short_lived_policies" ||
+    fail "short-lived policies omitted their allowed control port"
+if grep -q 'port: 8080' <<<"$rendered_short_lived_policies"; then
+    fail "short-lived policies unexpectedly allowed their denied target port"
 fi
 
-rendered_short_lived_job=$(npa_render_short_lived_job short-lived-7 50 5)
+rendered_short_lived_job=$(npa_render_short_lived_job short-lived-7 100 5)
 grep -q 'name: short-lived-7' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its run identity"
-grep -q 'parallelism: 50' <<<"$rendered_short_lived_job" ||
+grep -q 'parallelism: 100' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its parallelism"
-grep -q 'completions: 50' <<<"$rendered_short_lived_job" ||
+grep -q 'completions: 100' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its completion count"
+grep -q '^        npa-test-phase: short-lived$' <<<"$rendered_short_lived_job" ||
+    fail "short-lived job pod label does not match both policy selectors"
 grep -q 'NPA_PROBE_SERVER_SERVICE_HOST' <<<"$rendered_short_lived_job" ||
     fail "short-lived job omitted its policy probe target"
 grep -q 'http://\$host:8081/' <<<"$rendered_short_lived_job" ||
@@ -97,7 +103,7 @@ npa_kubectl() {
             ;;
     esac
 }
-npa_run_short_lived_round npa-scale short-lived-7 50 5
+npa_run_short_lived_round npa-scale short-lived-7 100 5
 
 npa_kubectl() {
     case "$*" in

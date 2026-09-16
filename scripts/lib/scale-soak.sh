@@ -630,12 +630,28 @@ npa_apply_churn() {
     done
 }
 
-npa_render_short_lived_policy() {
+npa_render_short_lived_policies() {
     cat <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: npa-short-lived-default-deny
+  labels:
+    npa-test-phase: short-lived
+spec:
+  podSelector:
+    matchLabels:
+      npa-test-phase: short-lived
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: npa-short-lived-policy
+  labels:
+    npa-test-phase: short-lived
 spec:
   podSelector:
     matchLabels:
@@ -713,10 +729,10 @@ spec:
 EOF
 }
 
-npa_apply_short_lived_policy() {
+npa_apply_short_lived_policies() {
     local namespace=$1
 
-    npa_render_short_lived_policy |
+    npa_render_short_lived_policies |
         npa_kubectl apply -n "$namespace" -f -
 }
 
