@@ -97,7 +97,6 @@ python3 - "${metadata_file}" \
   "${expected_go_version}" \
   "${expected_platform}" \
   "${expected_ebpf_sdk_version}" <<'PY'
-import datetime
 import json
 import sys
 
@@ -123,8 +122,4 @@ for field, value in expected.items():
         raise SystemExit(
             f"{field} mismatch: got {metadata.get(field)!r}, expected {value!r}"
         )
-generated_at = metadata.get("generatedAt")
-if not isinstance(generated_at, str) or not generated_at.endswith("Z"):
-    raise SystemExit(f"generatedAt is not UTC RFC3339: {generated_at!r}")
-datetime.datetime.fromisoformat(generated_at.removesuffix("Z") + "+00:00")
 PY

@@ -24,7 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"time"
 )
 
 const (
@@ -41,7 +40,6 @@ type metadata struct {
 	BuildDate      string `json:"buildDate"`
 	GoVersion      string `json:"goVersion"`
 	Platform       string `json:"platform"`
-	GeneratedAt    string `json:"generatedAt"`
 	EbpfSDKVersion string `json:"ebpfSdkVersion"`
 }
 
@@ -62,11 +60,7 @@ func publishMetadataAsync(path string, errorOutput io.Writer, writer metadataWri
 }
 
 func writeMetadata(path string) error {
-	return writeMetadataAt(path, time.Now().UTC())
-}
-
-func writeMetadataAt(path string, generatedAt time.Time) error {
-	data, err := marshalMetadata(generatedAt)
+	data, err := marshalMetadata()
 	if err != nil {
 		return err
 	}
@@ -100,7 +94,7 @@ func writeMetadataAt(path string, generatedAt time.Time) error {
 	return nil
 }
 
-func marshalMetadata(generatedAt time.Time) ([]byte, error) {
+func marshalMetadata() ([]byte, error) {
 	record := metadata{
 		SchemaVersion:  metadataSchemaVersion,
 		Component:      metadataComponent,
@@ -109,7 +103,6 @@ func marshalMetadata(generatedAt time.Time) ([]byte, error) {
 		BuildDate:      valueOrUnknown(BuildDate),
 		GoVersion:      runtime.Version(),
 		Platform:       runtime.GOOS + "/" + runtime.GOARCH,
-		GeneratedAt:    generatedAt.UTC().Format(time.RFC3339),
 		EbpfSDKVersion: valueOrUnknown(EbpfSDKVersion),
 	}
 
