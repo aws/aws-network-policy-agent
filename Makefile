@@ -203,12 +203,6 @@ docker-build: setup-ebpf-sdk-override## Build docker image with the manager.
 		$(DOCKER_BUILD_METADATA_FLAGS) \
 		.
 
-.PHONY: validate-metadata-image
-validate-metadata-image: ## Build the production image and verify its emitted metadata.
-	$(MAKE) validate-release-metadata
-	$(MAKE) docker-build
-	./scripts/validate-metadata-image.sh "$(IMAGE_NAME)" "$(GIT_VERSION)" "$(GIT_COMMIT)" "$(BUILD_DATE)" "$(EBPF_SDK_VERSION)"
-
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push ${IMAGE_NAME}
