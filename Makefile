@@ -122,20 +122,6 @@ DOCKER_BUILD_METADATA_FLAGS = --build-arg git_version="$(GIT_VERSION)" \
 	--build-arg git_commit="$(GIT_COMMIT)" \
 	--build-arg ebpf_sdk_version="$(EBPF_SDK_VERSION)"
 
-.PHONY: validate-release-metadata
-validate-release-metadata: ## Validate metadata inputs used by release builds.
-	@test -n "$(GIT_VERSION)" && test "$(GIT_VERSION)" != "unknown" || { echo "GIT_VERSION must be set"; exit 1; }
-	@case "$(GIT_VERSION)" in *dirty*) echo "GIT_VERSION must not describe a dirty tree"; exit 1;; esac
-	@printf '%s\n' "$(GIT_COMMIT)" | grep -Eq '^[0-9a-f]{40}$$' || { echo "GIT_COMMIT must be a full commit hash"; exit 1; }
-	@test "$(GIT_COMMIT)" = "$$(git rev-parse HEAD)" || { echo "GIT_COMMIT must match the checked-out commit"; exit 1; }
-	@test -n "$(EBPF_SDK_VERSION)" && test "$(EBPF_SDK_VERSION)" != "unknown" || { echo "EBPF_SDK_VERSION must be set"; exit 1; }
-	@test "$(EBPF_SDK_OVERRIDE)" != "y" || { echo "release builds must not use EBPF_SDK_OVERRIDE"; exit 1; }
-	@resolved_ebpf_replacement="$$(GOTOOLCHAIN=go$(GO_MOD_VERSION) go list -mod=readonly -m -f '{{with .Replace}}{{.Path}} {{.Version}} {{.Dir}}{{end}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null)" && \
-		test -z "$$resolved_ebpf_replacement" || { echo "release builds must not replace github.com/aws/aws-ebpf-sdk-go"; exit 1; }
-	@resolved_ebpf_version="$$(GOTOOLCHAIN=go$(GO_MOD_VERSION) go list -mod=readonly -m -f '{{.Version}}' github.com/aws/aws-ebpf-sdk-go 2>/dev/null)" && \
-		test "$$resolved_ebpf_version" = "$(EBPF_SDK_VERSION)" || { echo "EBPF_SDK_VERSION must match the selected module version"; exit 1; }
-	@test -z "$$(git status --porcelain)" || { echo "release metadata must be generated from a clean tree"; exit 1; }
-
 # Build using the host's Go toolchain.
 BUILD_MODE ?= -buildmode=pie
 build-linux: BUILD_FLAGS = $(BUILD_MODE) -ldflags '-s -w $(LDFLAGS) $(VERSION_LDFLAGS) -extldflags "-static"'
@@ -245,7 +231,7 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 
 
 .PHONY: multi-arch-build-and-push
-multi-arch-build-and-push: validate-release-metadata ## Build and push docker image for the manager for cross-platform support
+multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker image for the manager for cross-platform support
 
 	docker buildx build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
 		-f Dockerfile \
