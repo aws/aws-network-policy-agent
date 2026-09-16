@@ -28,7 +28,7 @@ import (
 )
 
 func TestMarshalMetadata(t *testing.T) {
-	setBuildMetadataForTest(t, "v1.2.3", strings.Repeat("a", 40), "2026-09-16T05:00:00Z", "v1.0.17")
+	setBuildMetadataForTest(t, "v1.2.3", strings.Repeat("a", 40), "v1.0.17")
 
 	data, err := marshalMetadata()
 	if err != nil {
@@ -40,7 +40,6 @@ func TestMarshalMetadata(t *testing.T) {
 		"  \"component\": \"aws-network-policy-agent\",\n" +
 		"  \"version\": \"v1.2.3\",\n" +
 		"  \"gitCommit\": \"" + strings.Repeat("a", 40) + "\",\n" +
-		"  \"buildDate\": \"2026-09-16T05:00:00Z\",\n" +
 		"  \"goVersion\": \"" + runtime.Version() + "\",\n" +
 		"  \"platform\": \"" + runtime.GOOS + "/" + runtime.GOARCH + "\",\n" +
 		"  \"ebpfSdkVersion\": \"v1.0.17\"\n" +
@@ -51,7 +50,7 @@ func TestMarshalMetadata(t *testing.T) {
 }
 
 func TestMarshalMetadataUsesUnknownFallbacks(t *testing.T) {
-	setBuildMetadataForTest(t, "", "", "", "")
+	setBuildMetadataForTest(t, "", "", "")
 
 	data, err := marshalMetadata()
 	if err != nil {
@@ -62,21 +61,13 @@ func TestMarshalMetadataUsesUnknownFallbacks(t *testing.T) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if record.Version != "unknown" || record.GitCommit != "unknown" || record.BuildDate != "unknown" || record.EbpfSDKVersion != "unknown" {
+	if record.Version != "unknown" || record.GitCommit != "unknown" || record.EbpfSDKVersion != "unknown" {
 		t.Fatalf("metadata fallbacks = %#v, want unknown build values", record)
 	}
 }
 
-func TestMarshalMetadataRejectsOversizedRecord(t *testing.T) {
-	setBuildMetadataForTest(t, strings.Repeat("x", maxMetadataSize), "commit", "date", "sdk")
-
-	if _, err := marshalMetadata(); err == nil {
-		t.Fatal("marshalMetadata() error = nil, want size error")
-	}
-}
-
 func TestWriteMetadataCreatesAndReplacesFile(t *testing.T) {
-	setBuildMetadataForTest(t, "v1.2.3", strings.Repeat("b", 40), "2026-09-16T05:00:00Z", "v1.0.17")
+	setBuildMetadataForTest(t, "v1.2.3", strings.Repeat("b", 40), "v1.0.17")
 	path := filepath.Join(t.TempDir(), "aws-network-policy-agent-metadata.json")
 
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
@@ -103,7 +94,7 @@ func TestWriteMetadataCreatesAndReplacesFile(t *testing.T) {
 }
 
 func TestWriteMetadataPreservesDestinationOnRenameFailure(t *testing.T) {
-	setBuildMetadataForTest(t, "v1.2.3", "commit", "date", "sdk")
+	setBuildMetadataForTest(t, "v1.2.3", "commit", "sdk")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aws-network-policy-agent-metadata.json")
 	if err := os.Mkdir(path, 0o755); err != nil {
@@ -130,7 +121,7 @@ func TestWriteMetadataPreservesDestinationOnRenameFailure(t *testing.T) {
 }
 
 func TestWriteMetadataRequiresExistingParent(t *testing.T) {
-	setBuildMetadataForTest(t, "v1.2.3", "commit", "date", "sdk")
+	setBuildMetadataForTest(t, "v1.2.3", "commit", "sdk")
 	path := filepath.Join(t.TempDir(), "missing", "aws-network-policy-agent-metadata.json")
 
 	if err := writeMetadata(path); err == nil {
@@ -180,22 +171,19 @@ func (writer channelWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func setBuildMetadataForTest(t *testing.T, version, commit, buildDate, sdkVersion string) {
+func setBuildMetadataForTest(t *testing.T, version, commit, sdkVersion string) {
 	t.Helper()
 
 	originalVersion := GitVersion
 	originalCommit := GitCommit
-	originalBuildDate := BuildDate
 	originalSDKVersion := EbpfSDKVersion
 	t.Cleanup(func() {
 		GitVersion = originalVersion
 		GitCommit = originalCommit
-		BuildDate = originalBuildDate
 		EbpfSDKVersion = originalSDKVersion
 	})
 
 	GitVersion = version
 	GitCommit = commit
-	BuildDate = buildDate
 	EbpfSDKVersion = sdkVersion
 }

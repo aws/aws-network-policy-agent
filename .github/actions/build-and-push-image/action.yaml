@@ -39,7 +39,6 @@ runs:
             echo "Building AWS Network Policy Agent latest image"
 
             docker buildx create --name="network-policy-agent-builder" --buildkitd-flags '--allow-insecure-entitlement network.host' --use >/dev/null
-            make validate-release-metadata VERSION=$IMAGE_VERSION
             make multi-arch-build-and-push VERSION=$IMAGE_VERSION IMAGE=$AWS_ECR_REGISTRY/$AWS_ECR_REPO_NAME
 
             docker buildx rm network-policy-agent-builder

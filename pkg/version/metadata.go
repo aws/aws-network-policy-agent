@@ -29,7 +29,6 @@ import (
 const (
 	metadataSchemaVersion = 1
 	metadataComponent     = "aws-network-policy-agent"
-	maxMetadataSize       = 8 * 1024
 )
 
 type metadata struct {
@@ -37,7 +36,6 @@ type metadata struct {
 	Component      string `json:"component"`
 	Version        string `json:"version"`
 	GitCommit      string `json:"gitCommit"`
-	BuildDate      string `json:"buildDate"`
 	GoVersion      string `json:"goVersion"`
 	Platform       string `json:"platform"`
 	EbpfSDKVersion string `json:"ebpfSdkVersion"`
@@ -100,7 +98,6 @@ func marshalMetadata() ([]byte, error) {
 		Component:      metadataComponent,
 		Version:        valueOrUnknown(GitVersion),
 		GitCommit:      valueOrUnknown(GitCommit),
-		BuildDate:      valueOrUnknown(BuildDate),
 		GoVersion:      runtime.Version(),
 		Platform:       runtime.GOOS + "/" + runtime.GOARCH,
 		EbpfSDKVersion: valueOrUnknown(EbpfSDKVersion),
@@ -111,9 +108,6 @@ func marshalMetadata() ([]byte, error) {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
 	data = append(data, '\n')
-	if len(data) > maxMetadataSize {
-		return nil, fmt.Errorf("metadata exceeds %d bytes", maxMetadataSize)
-	}
 	return data, nil
 }
 

@@ -8,7 +8,6 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG git_version
 ARG git_commit
-ARG build_date
 ARG ebpf_sdk_version
 
 # Env configuration
@@ -25,7 +24,6 @@ COPY . ./
 
 RUN make GIT_VERSION="$git_version" \
     GIT_COMMIT="$git_commit" \
-    BUILD_DATE="$build_date" \
     EBPF_SDK_VERSION="$ebpf_sdk_version" \
     build-linux
 

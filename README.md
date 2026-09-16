@@ -129,14 +129,14 @@ $ cat /proc/sys/net/netfilter/nf_conntrack_max
 
 At startup, Network Policy Agent makes one best-effort attempt to write
 `/var/log/aws-routed-eni/aws-network-policy-agent-metadata.json` on the node.
-The JSON includes the schema version, component version, full Git commit, build
-date, Go version, target platform, and selected eBPF SDK version. The standard
+The JSON includes the schema version, component version, full Git commit, Go
+version, target platform, and selected eBPF SDK version. The standard
 EKS node support bundle collects this file.
 
 This diagnostic file is not authoritative evidence of the currently running
 image. A missing file does not prevent startup, and a downgrade to a version
 that does not publish metadata can leave an older file. Compare its version,
-commit, and build date with the pod's container image or managed add-on
+commit, and platform with the pod's container image or managed add-on
 information.
 
 ## Network Policy Agent CLI
