@@ -123,8 +123,7 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("verifying the established connection is re-evaluated and blocked", func() {
-				responseCount, err := persistentHTTPResponseCount(clientName)
-				Expect(err).ToNot(HaveOccurred())
+				responseCount := waitForPersistentHTTPResponseCountToStabilize(clientName)
 
 				Consistently(func() (int, error) {
 					return persistentHTTPResponseCount(clientName)
@@ -288,8 +287,7 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("verifying the established connection is re-evaluated and blocked", func() {
-				responseCount, err := persistentHTTPResponseCount(clientName)
-				Expect(err).ToNot(HaveOccurred())
+				responseCount := waitForPersistentHTTPResponseCountToStabilize(clientName)
 
 				Consistently(func() (int, error) {
 					return persistentHTTPResponseCount(clientName)
@@ -443,8 +441,7 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("verifying the established connection is re-evaluated and blocked", func() {
-				responseCount, err := persistentHTTPResponseCount(clientName)
-				Expect(err).ToNot(HaveOccurred())
+				responseCount := waitForPersistentHTTPResponseCountToStabilize(clientName)
 
 				Consistently(func() (int, error) {
 					return persistentHTTPResponseCount(clientName)
@@ -610,8 +607,7 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("verifying the established connection is re-evaluated and blocked", func() {
-				responseCount, err := persistentHTTPResponseCount(clientName)
-				Expect(err).ToNot(HaveOccurred())
+				responseCount := waitForPersistentHTTPResponseCountToStabilize(clientName)
 
 				Consistently(func() (int, error) {
 					return persistentHTTPResponseCount(clientName)
@@ -678,4 +674,27 @@ func persistentHTTPResponseCount(podName string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(output)
+}
+
+// Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value 
+func waitForPersistentHTTPResponseCountToStabilize(podName string) int {
+	var stableCount int
+	Eventually(func() (bool, error) {
+		first, err := persistentHTTPResponseCount(podName)
+		if err != nil {
+			return false, err
+		}
+		time.Sleep(utils.ProbeInterval)
+		second, err := persistentHTTPResponseCount(podName)
+		if err != nil {
+			return false, err
+		}
+		if first == second {
+			stableCount = second
+			return true, nil
+		}
+		return false, nil
+	}, utils.EnforcementTimeout, utils.ProbeInterval).Should(BeTrue(),
+		"persistent connection's response count should stabilize once the policy change is enforced")
+	return stableCount
 }
