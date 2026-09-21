@@ -21,9 +21,9 @@ set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
 GINKGO_TEST_BUILD_DIR="$DIR/../test/build"
 
-source ${DIR}/lib/cleanup.sh
-source ${DIR}/lib/network-policy.sh
-source ${DIR}/lib/tests.sh
+source "${DIR}/lib/cleanup.sh"
+source "${DIR}/lib/network-policy.sh"
+source "${DIR}/lib/tests.sh"
 
 : "${ENDPOINT_FLAG:=""}"
 : "${ENDPOINT:=""}"
@@ -43,20 +43,6 @@ source ${DIR}/lib/tests.sh
 : "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
-
-# Runs a prebuilt ginkgo suite binary against the cluster. Records any failure
-# in TEST_FAILED (instead of aborting) so the remaining suites still run.
-run_ginkgo_suite() {
-    local suite_binary="$1"
-    local timeout="${2:-15m}"
-    echo "Running ${suite_binary} (timeout ${timeout})"
-    CGO_ENABLED=0 ginkgo -v -timeout "$timeout" --no-color --fail-on-pending \
-        "$GINKGO_TEST_BUILD_DIR/$suite_binary" -- \
-        --cluster-kubeconfig="$KUBE_CONFIG_PATH" \
-        --cluster-name="$CLUSTER_NAME" \
-        --test-image-registry="$TEST_IMAGE_REGISTRY" \
-        --ip-family="$IP_FAMILY" || TEST_FAILED="true"
-}
 
 if [[ ! -z $ENDPOINT ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
@@ -129,11 +115,7 @@ fi
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
-    echo "Enable network policy strict mode"
-    kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
-
-    echo "Check aws-node daemonset status"
-    kubectl rollout status ds/aws-node -n kube-system --timeout=300s
+    enable_strict_mode
 
     run_ginkgo_suite strict.test 15m
 

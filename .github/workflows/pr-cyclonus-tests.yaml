@@ -132,6 +132,16 @@ jobs:
         with:
           ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
+      # PRs opened before the lifecycle script merged check out a head that
+      # predates it; fall back to the default-branch copy so /test cyclonus
+      # keeps working on them without a rebase.
+      - name: Ensure cluster lifecycle script
+        run: |
+          if [[ ! -f scripts/eks-test-cluster.sh ]]; then
+            git fetch --depth=1 origin "${{ github.workflow_sha }}"
+            git checkout FETCH_HEAD -- scripts/eks-test-cluster.sh
+          fi
+
       - uses: ./.github/actions/install-dependencies
 
       - uses: aws-actions/configure-aws-credentials@v4
@@ -143,71 +153,16 @@ jobs:
       - name: Create EKS cluster (${{ matrix.ip-family }})
         id: create
         run: |
-          K8S_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni --region $REGION \
+          K8S_VERSION=$(aws eks describe-addon-versions --addon-name vpc-cni --region "$REGION" \
             | jq -r '[.addons[0].addonVersions[0].compatibilities[].clusterVersion] | sort_by(split(".")[1] | tonumber) | .[-2]')
-          echo "k8s-version=$K8S_VERSION" >> $GITHUB_OUTPUT
-
-          # eksctl config file (rather than the bare CLI) so we can set the
-          # IP family and enable OIDC, which IPv6 clusters require.
-          cat > /tmp/cluster-config.yaml <<EOF
-          apiVersion: eksctl.io/v1alpha5
-          kind: ClusterConfig
-          metadata:
-            name: ${CLUSTER_NAME}
-            region: ${REGION}
-            version: "${K8S_VERSION}"
-          iam:
-            withOIDC: true
-          kubernetesNetworkConfig:
-            ipFamily: ${IP_FAMILY}
-          # Newer eksctl (CI installs latest) is moving to EKS Auto Mode by
-          # default, which drops managed nodegroups + the self-managed vpc-cni
-          # addon this workflow installs/patches and runs network-policy tests
-          # against. Pin the classic (non-Auto-Mode) cluster explicitly.
-          autoModeConfig:
-            enabled: false
-          addons:
-            - name: vpc-cni
-            - name: coredns
-            - name: kube-proxy
-          managedNodeGroups:
-            - name: ${CLUSTER_NAME}-ng
-              amiFamily: AmazonLinux2023
-              instanceType: ${INSTANCE_TYPE}
-              desiredCapacity: 3
-              minSize: 1
-              maxSize: 3
-          EOF
-
-          eksctl create cluster -f /tmp/cluster-config.yaml
-
-      - name: Update kubeconfig
-        run: |
-          mkdir -p $(dirname $KUBECONFIG)
-          aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION --kubeconfig $KUBECONFIG
+          echo "k8s-version=$K8S_VERSION" >> "$GITHUB_OUTPUT"
+          export K8S_VERSION
+          ./scripts/eks-test-cluster.sh create
 
       - name: Install addon and update node agent image
-        run: |
-          cat > /tmp/addon-config.yaml <<EOF
-          apiVersion: eksctl.io/v1alpha5
-          kind: ClusterConfig
-          metadata:
-            name: $CLUSTER_NAME
-            region: $REGION
-          addons:
-          - name: vpc-cni
-            version: latest
-            configurationValues: '{"enableNetworkPolicy": "true"}'
-            resolveConflicts: overwrite
-          EOF
-          eksctl update addon -f /tmp/addon-config.yaml --force
-
-          # Patch node agent image to PR build
-          kubectl set image daemonset/aws-node \
-            -n kube-system \
-            aws-eks-nodeagent=${{ needs.build-image.outputs.image }}
-
-          kubectl rollout status daemonset/aws-node -n kube-system --timeout=300s
+        env:
+          NODE_AGENT_IMAGE: ${{ needs.build-image.outputs.image }}
+        run: ./scripts/eks-test-cluster.sh install
 
       - name: Run cyclonus + integration suites
         id: cyclonus
@@ -256,8 +211,26 @@ jobs:
       CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
-      - uses: ./.github/actions/install-dependencies
+      # Keep create and delete on the same lifecycle-script revision. PRs that
+      # predate the helper use the exact default-branch workflow commit.
+      - name: Ensure cluster lifecycle script
+        run: |
+          if [[ ! -f scripts/eks-test-cluster.sh ]]; then
+            git fetch --depth=1 origin "${{ github.workflow_sha }}"
+            git checkout FETCH_HEAD -- scripts/eks-test-cluster.sh
+          fi
+
+      # Deletion needs only eksctl (aws CLI is preinstalled on runners).
+      # Deliberately not the install-dependencies composite: cleanup is the
+      # only independent deletion path, and a transient Go/Ginkgo setup
+      # failure must not leave the cluster running.
+      - name: Install eksctl
+        run: |
+          curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -266,23 +239,4 @@ jobs:
           role-duration-seconds: 3600
 
       - name: Delete EKS cluster
-        # Retry real delete failures (throttling/dependencies) instead of masking
-        # them. Only a genuine ResourceNotFoundException counts as "already gone" —
-        # do NOT treat auth/throttling describe errors as deleted (that would leak
-        # clusters silently, which is exactly what this guards against).
-        run: |
-          for attempt in 1 2 3; do
-            if eksctl delete cluster --name "$CLUSTER_NAME" --region "$REGION" --disable-nodegroup-eviction; then
-              echo "cluster deleted"; exit 0
-            fi
-            if ! out=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>&1); then
-              if echo "$out" | grep -q "ResourceNotFoundException"; then
-                echo "cluster $CLUSTER_NAME not found - treating as deleted"; exit 0
-              fi
-              echo "describe-cluster error (not a not-found, will retry): $out"
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "delete attempt $attempt failed; retrying in 30s..."; sleep 30
-            fi
-          done
-          echo "ERROR: cluster $CLUSTER_NAME still exists after 3 delete attempts"; exit 1
+        run: ./scripts/eks-test-cluster.sh delete
