@@ -676,7 +676,7 @@ func persistentHTTPResponseCount(podName string) (int, error) {
 	return strconv.Atoi(output)
 }
 
-// Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value 
+// Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value
 func waitForPersistentHTTPResponseCountToStabilize(podName string) int {
 	var stableCount int
 	Eventually(func() (bool, error) {
