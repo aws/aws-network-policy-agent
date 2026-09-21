@@ -599,11 +599,18 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 					"persistent connection should receive a response before policy removal")
 			})
 
-			By("removing both the NetworkPolicy and the ClusterNetworkPolicy", func() {
-				err := fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy)
-				Expect(err).ToNot(HaveOccurred())
-				err = fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
-				Expect(err).ToNot(HaveOccurred())
+			By("removing both the NetworkPolicy and the ClusterNetworkPolicy concurrently", func() {
+				// Started concurrently, not sequentially: each Delete call blocks until its own resource is confirmed gone
+				npErrCh := make(chan error, 1)
+				cnpErrCh := make(chan error, 1)
+
+				go func() { npErrCh <- fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy) }()
+				go func() {
+					cnpErrCh <- fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
+				}()
+
+				Expect(<-npErrCh).ToNot(HaveOccurred())
+				Expect(<-cnpErrCh).ToNot(HaveOccurred())
 			})
 
 			By("verifying the established connection is re-evaluated and blocked", func() {
