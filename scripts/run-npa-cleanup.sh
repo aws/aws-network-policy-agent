@@ -11,8 +11,8 @@ source "${DIR}/lib/scale-soak.sh"
 
 state_file=$(npa_state_file)
 if [[ ! -f $state_file ]]; then
-    echo "NPA workload state is missing at ${state_file}" >&2
-    exit 1
+    echo "NPA workload did not create state; cleanup is a no-op"
+    exit 0
 fi
 
 # The workload writes shell-escaped scalar assignments only.
