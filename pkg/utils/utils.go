@@ -49,16 +49,62 @@ var (
 	ErrMissingFilter                     = "no active filter to detach"
 )
 
+// BPFMapNames identifies the maps associated with one namespaced TC program.
+// The shared conntrack and policy-events maps are loaded by the events program
+// and are not returned in the TC program's BpfData map set.
+type BPFMapNames struct {
+	NetworkPolicy        string
+	ClusterNetworkPolicy string
+	PodState             string
+}
+
+// Required returns every map that must be associated with the TC program.
+func (m BPFMapNames) Required() []string {
+	return []string{m.NetworkPolicy, m.ClusterNetworkPolicy, m.PodState}
+}
+
+var (
+	ingressBPFMapNames = BPFMapNames{
+		NetworkPolicy:        TC_INGRESS_MAP,
+		ClusterNetworkPolicy: TC_CLUSTER_POLICY_INGRESS_MAP,
+		PodState:             TC_INGRESS_POD_STATE_MAP,
+	}
+	egressBPFMapNames = BPFMapNames{
+		NetworkPolicy:        TC_EGRESS_MAP,
+		ClusterNetworkPolicy: TC_CLUSTER_POLICY_EGRESS_MAP,
+		PodState:             TC_EGRESS_POD_STATE_MAP,
+	}
+)
+
+// GetBPFMapNames returns the map names for a supported TC program direction.
+func GetBPFMapNames(direction string) (BPFMapNames, bool) {
+	switch direction {
+	case "ingress":
+		return ingressBPFMapNames, true
+	case "egress":
+		return egressBPFMapNames, true
+	default:
+		return BPFMapNames{}, false
+	}
+}
+
+func bpfMapNamesForPath(direction string) BPFMapNames {
+	if mapNames, ok := GetBPFMapNames(direction); ok {
+		return mapNames
+	}
+	return ingressBPFMapNames
+}
+
 // NamespacedBPFMaps lists BPF map names that are pinned per pod-identifier
 // rather than globally.
 // Any new pod scoped eBPF maps added in ebpf C programs needs to be added in this list for recovery
 var NamespacedBPFMaps = []string{
-	TC_INGRESS_MAP,
-	TC_EGRESS_MAP,
-	TC_CLUSTER_POLICY_INGRESS_MAP,
-	TC_CLUSTER_POLICY_EGRESS_MAP,
-	TC_INGRESS_POD_STATE_MAP,
-	TC_EGRESS_POD_STATE_MAP,
+	ingressBPFMapNames.NetworkPolicy,
+	egressBPFMapNames.NetworkPolicy,
+	ingressBPFMapNames.ClusterNetworkPolicy,
+	egressBPFMapNames.ClusterNetworkPolicy,
+	ingressBPFMapNames.PodState,
+	egressBPFMapNames.PodState,
 }
 
 func log() logger.Logger {
@@ -226,23 +272,20 @@ func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) stri
 }
 
 func GetBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) (string, string) {
-	mapName := TC_INGRESS_MAP
-	clusterPolicyMapName := TC_CLUSTER_POLICY_INGRESS_MAP
-	if direction == "egress" {
-		mapName = TC_EGRESS_MAP
-		clusterPolicyMapName = TC_CLUSTER_POLICY_EGRESS_MAP
-	}
-	return fmt.Sprintf("%s%s_%s", BPF_MAPS_PIN_PATH_DIRECTORY, podIdentifier, mapName),
-		fmt.Sprintf("%s%s_%s", BPF_MAPS_PIN_PATH_DIRECTORY, podIdentifier, clusterPolicyMapName)
+	mapNames := bpfMapNamesForPath(direction)
+	return GetBPFMapPinPathFromPodIdentifierAndMapName(podIdentifier, mapNames.NetworkPolicy),
+		GetBPFMapPinPathFromPodIdentifierAndMapName(podIdentifier, mapNames.ClusterNetworkPolicy)
 }
 
 func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction string) string {
-	mapName := TC_INGRESS_POD_STATE_MAP
-	if direction == "egress" {
-		mapName = TC_EGRESS_POD_STATE_MAP
-	}
-	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
-	return pinPath
+	mapName := bpfMapNamesForPath(direction).PodState
+	return GetBPFMapPinPathFromPodIdentifierAndMapName(podIdentifier, mapName)
+}
+
+// GetBPFMapPinPathFromPodIdentifierAndMapName returns the pin path for a
+// pod-scoped BPF map with the supplied ELF map name.
+func GetBPFMapPinPathFromPodIdentifierAndMapName(podIdentifier string, mapName string) string {
+	return fmt.Sprintf("%s%s_%s", BPF_MAPS_PIN_PATH_DIRECTORY, podIdentifier, mapName)
 }
 
 func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) string {
