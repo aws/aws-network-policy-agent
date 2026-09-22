@@ -81,13 +81,19 @@ grep -q 'never proved allowed control plus denied target' <<<"$rendered_short_li
 report_dir=$(mktemp -d)
 trap 'rm -rf -- "$report_dir"' EXIT
 WORKLOAD_REPORT_PATH="${report_dir}/workload.json"
+WORKLOAD_BATCH_SIZE=50
 WORKLOAD_POLICY_SETTLE_SECONDS=10
 WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS=2000
+WORKLOAD_SHORT_LIVED_LIFETIME_SECONDS=5
 npa_write_workload_report
+grep -q '"batchSize": 50' "$WORKLOAD_REPORT_PATH" ||
+    fail "workload report omitted its batch size"
 grep -q '"policySettleSeconds": 10' "$WORKLOAD_REPORT_PATH" ||
     fail "workload report omitted its policy settle interval"
 grep -q '"shortLivedPolicyAttestations": 2000' "$WORKLOAD_REPORT_PATH" ||
     fail "workload report omitted its short-lived policy attestations"
+grep -q '"shortLivedLifetimeSeconds": 5' "$WORKLOAD_REPORT_PATH" ||
+    fail "workload report omitted its short-lived pod lifetime"
 
 npa_kubectl() {
     case "$*" in
