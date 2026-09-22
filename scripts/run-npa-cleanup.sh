@@ -19,6 +19,11 @@ fi
 source "$state_file"
 : "${NPA_TEST_NAMESPACE:?NPA_TEST_NAMESPACE is missing from workload state}"
 
+if [[ ${WORKLOAD_CLEANUP_STATUS:-pending} == pass ]]; then
+    echo "NPA workload cleanup already completed"
+    exit 0
+fi
+
 status=0
 if [[ ${WORKLOAD_STATUS:-failed} != pass ]]; then
     status=1

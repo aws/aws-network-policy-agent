@@ -8,7 +8,11 @@ This package contains shell scripts and libraries used for running e2e integrati
 
 `run-cyclonus-tests.sh` - Runs cyclonus tests against an existing cluster and validates the output
 
-`run-npa-scale-tests.sh` - Churns distinct pod and policy identities in bounded batches while continuously checking allowed and denied traffic.
+`run-npa-scale-tests.sh` - Runs the locked NPA scale workload through a caller-supplied ClusterLoader2 profile and monitor set.
+
+`run-npa-scale-workload.sh` - Churns distinct pod and policy identities in bounded batches while continuously checking allowed and denied traffic.
+
+`run-npa-bpf-snapshot.sh` - Captures baseline, full-load, and recovery bpffs pin identities on every Linux node and fails on missing activity or retained identities.
 
 `run-npa-soak-tests.sh` - Repeats the same bounded churn and traffic checks for a configurable duration.
 
@@ -17,7 +21,10 @@ This package contains shell scripts and libraries used for running e2e integrati
 The scale and soak scripts only own their test namespaces and workloads. The
 caller owns cluster creation, Network Policy enablement, metrics collection,
 and cluster deletion. Both scripts require `KUBECONFIG`, delete any stale test
-namespace before starting, and fail if final namespace deletion fails.
+namespace before starting, and fail if final namespace deletion fails. The
+scale wrapper additionally requires `CL2_PROFILE_PATH`; Hydra normally supplies
+that component-owned policy plus `CL2_MONITORS_PATH`. The workload remains
+manually runnable against a developer cluster through the same interface.
 
 Scale defaults:
 
@@ -65,6 +72,8 @@ Soak defaults:
 
 #### Tests
 `scripts/test/scale-soak-test.sh` validates namespace safety and active-probe failure handling without a cluster.
+
+`scripts/test/bpf-snapshot-test.sh` validates exact eBPF activity and drain set comparisons without a cluster.
 
 The following tests are valid to run using `run-test.sh` script, and setting the respective environment variable to true will run them:
 1. Conformance Tests - `RUN_CONFORMANCE_TESTS`
