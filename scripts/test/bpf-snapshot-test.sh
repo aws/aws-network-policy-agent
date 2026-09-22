@@ -60,4 +60,28 @@ node-a	map	scale-map
 EOF
 expect_failure npa_bpf_assert_activity "$baseline" "$full_load" "$added"
 
+KUBECONFIG=/tmp/npa-bpf-snapshot-test-kubeconfig
+CL2_EXPECTED_LINUX_NODES=2
+ARTIFACT_DIR=$test_dir
+NPA_BPF_NAMESPACE=npa-scale-evidence-test
+npa_bpf_kubectl() {
+    case "$1" in
+        get)
+            printf 'node-a\treader-a\nnode-b\treader-b\n'
+            ;;
+        exec)
+            if [[ $4 == reader-b ]]; then
+                return 1
+            fi
+            printf 'map=baseline-map\nprogram=baseline-program\n'
+            ;;
+        *)
+            fail "unexpected bpffs capture invocation: $*"
+            ;;
+    esac
+}
+expect_failure npa_bpf_capture "${test_dir}/capture.tsv"
+[[ ! -e ${test_dir}/capture.tsv ]] ||
+    fail "failed node capture published partial bpffs evidence"
+
 echo "PASS"

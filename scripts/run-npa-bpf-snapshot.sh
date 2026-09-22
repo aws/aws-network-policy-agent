@@ -131,11 +131,8 @@ npa_bpf_capture() {
     local observed=0
     while IFS=$'\t' read -r node pod; do
         [[ -n $node && -n $pod ]] || continue
-        observed=$((observed + 1))
-        while IFS='=' read -r kind identity; do
-            [[ -n $kind && -n $identity ]] || continue
-            printf '%s\t%s\t%s\n' "$node" "$kind" "$identity" >>"$temporary"
-        done < <(
+        local evidence
+        if ! evidence=$(
             npa_bpf_kubectl exec \
                 -n "$NPA_BPF_NAMESPACE" \
                 "$pod" \
@@ -160,7 +157,17 @@ npa_bpf_capture() {
                         printf "map=%s\n" "${path##*/}"
                     done
                 '
-        )
+        ); then
+            printf 'failed to capture NPA bpffs evidence from node %s using pod %s\n' \
+                "$node" "$pod" >&2
+            rm -f -- "$temporary"
+            return 1
+        fi
+        observed=$((observed + 1))
+        while IFS='=' read -r kind identity; do
+            [[ -n $kind && -n $identity ]] || continue
+            printf '%s\t%s\t%s\n' "$node" "$kind" "$identity" >>"$temporary"
+        done <<<"$evidence"
     done <<<"$pod_rows"
 
     if [[ $observed != "$CL2_EXPECTED_LINUX_NODES" ]]; then
