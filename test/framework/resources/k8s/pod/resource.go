@@ -26,6 +26,7 @@ type Manager interface {
 	CreateAndWaitTillPodIsCompleted(context context.Context, pod *v1.Pod) (*v1.Pod, error)
 	DeleteAndWaitTillPodIsDeleted(context context.Context, pod *v1.Pod) error
 	GetPodsWithLabel(context context.Context, namespace string, labelKey string, labelValue string) ([]v1.Pod, error)
+	WaitTillPodWithLabelRunning(context context.Context, namespace string, labelKey string, labelValue string, timeOut time.Duration) (v1.Pod, error)
 	PatchPod(context context.Context, oldPod *v1.Pod, newPod *v1.Pod) error
 	PodLogs(namespace string, name string) (string, error)
 	ExecInPod(namespace string, podName string, command []string) (string, error)
@@ -99,6 +100,34 @@ func (d *defaultManager) GetPodsWithLabel(context context.Context, namespace str
 	})
 
 	return podList.Items, err
+}
+
+// WaitTillPodWithLabelRunning polls until a pod carrying the given label is
+// Running with a node assigned, and returns the first such pod - so callers can
+// read its generated name (e.g. a Deployment/Job pod). Intended for
+// single-pod-per-label selectors; with multiple replicas it returns an
+// arbitrary Running one. Returns an error if the timeout elapses first.
+func (d *defaultManager) WaitTillPodWithLabelRunning(ctx context.Context, namespace string,
+	labelKey string, labelValue string, timeOut time.Duration) (v1.Pod, error) {
+
+	var found v1.Pod
+	err := wait.PollUntilContextTimeout(ctx, utils.PollIntervalShort, timeOut, true, func(context.Context) (done bool, err error) {
+		pods, err := d.GetPodsWithLabel(ctx, namespace, labelKey, labelValue)
+		if err != nil {
+			return true, err
+		}
+		for _, p := range pods {
+			if p.Status.Phase == v1.PodRunning && p.Spec.NodeName != "" {
+				found = p
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return v1.Pod{}, fmt.Errorf("waiting for a Running pod with %s=%s: %w", labelKey, labelValue, err)
+	}
+	return found, nil
 }
 
 func (d *defaultManager) DeleteAndWaitTillPodIsDeleted(ctx context.Context, pod *v1.Pod) error {
