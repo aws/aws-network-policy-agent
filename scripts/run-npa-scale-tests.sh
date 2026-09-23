@@ -66,7 +66,7 @@ if [[ $CL2_DRY_RUN != true && $CL2_DRY_RUN != false ]]; then
     printf 'CL2_DRY_RUN must be true or false; got %q\n' "$CL2_DRY_RUN" >&2
     exit 2
 fi
-for command in "$CL2_BIN" awk comm grep realpath sha256sum sort tee; do
+for command in "$CL2_BIN" awk comm grep realpath sha256sum sort tail tar; do
     command -v "$command" >/dev/null 2>&1 || {
         printf '%s is required\n' "$command" >&2
         exit 127
@@ -152,6 +152,42 @@ safe_cluster_name=${safe_cluster_name//[^a-zA-Z0-9_.-]/-}
 artifact_root=${ARTIFACT_DIR:-log}
 report_dir=${NPA_SCALE_REPORT_DIR:-"${artifact_root}/clusterloader2-${safe_cluster_name}"}
 mkdir -p "$report_dir"
+clusterloader_log="${artifact_root}/npa-cl2-${safe_cluster_name}.log"
+clusterloader_summary="${artifact_root}/npa-cl2-${safe_cluster_name}-summary.txt"
+clusterloader_reports="${artifact_root}/npa-cl2-${safe_cluster_name}-reports.tar.gz"
+
+publish_clusterloader_artifacts() {
+    local clusterloader_status=$1
+    local generated_configs
+
+    {
+        printf 'clusterloader2_exit_code=%s\n' "$clusterloader_status"
+        printf 'full_log=%s\n' "$clusterloader_log"
+        printf 'report_archive=%s\n' "$clusterloader_reports"
+        printf '\nRelevant verdict lines:\n'
+        grep -E -i \
+            'GenericPrometheusQuery|violation|threshold|fail(ed|ure)?|error|panic|fatal' \
+            "$clusterloader_log" |
+            tail -n 200 || true
+        printf '\nLast 200 ClusterLoader2 lines:\n'
+        tail -n 200 "$clusterloader_log"
+    } >"$clusterloader_summary"
+
+    if [[ -s ${report_dir}/junit.xml ]]; then
+        cp "${report_dir}/junit.xml" \
+            "${artifact_root}/npa-cl2-${safe_cluster_name}-junit.xml"
+    fi
+    if [[ -s ${report_dir}/cl2-metadata.json ]]; then
+        cp "${report_dir}/cl2-metadata.json" \
+            "${artifact_root}/npa-cl2-${safe_cluster_name}-metadata.json"
+    fi
+    generated_configs=("${report_dir}"/generatedConfig_*.yaml)
+    if [[ -s ${generated_configs[0]} ]]; then
+        cp "${generated_configs[0]}" \
+            "${artifact_root}/npa-cl2-${safe_cluster_name}-generated-config.yaml"
+    fi
+    tar -C "$report_dir" -czf "$clusterloader_reports" .
+}
 
 cat >"${report_dir}/metadata.txt" <<EOF
 scenario_id=${TEST_SCENARIO_ID:-manual}
@@ -200,13 +236,15 @@ printf 'Running NPA %s scale profile %s with ClusterLoader2 %s\n' \
     "$NPA_POLICY_MODE" "$CL2_PROFILE_PATH" "$clusterloader_sha256"
 if [[ $CL2_DRY_RUN == true ]]; then
     set +e
-    "$CL2_BIN" "${cl2_args[@]}" 2>&1 | tee "${report_dir}/clusterloader2.log"
-    clusterloader_status=${PIPESTATUS[0]}
+    "$CL2_BIN" "${cl2_args[@]}" >"$clusterloader_log" 2>&1
+    clusterloader_status=$?
     set -e
+    publish_clusterloader_artifacts "$clusterloader_status"
     generated_configs=("${report_dir}"/generatedConfig_*.yaml)
     if [[ ! -s ${generated_configs[0]} ]]; then
         printf 'ClusterLoader2 dry run produced no generated config (status %s)\n' \
             "$clusterloader_status" >&2
+        cat "$clusterloader_summary" >&2
         exit 1
     fi
     printf 'ClusterLoader2 compiled the NPA scale profile: %s\n' \
@@ -214,6 +252,15 @@ if [[ $CL2_DRY_RUN == true ]]; then
     exit 0
 fi
 
-"$CL2_BIN" "${cl2_args[@]}" 2>&1 | tee "${report_dir}/clusterloader2.log"
+set +e
+"$CL2_BIN" "${cl2_args[@]}" >"$clusterloader_log" 2>&1
+clusterloader_status=$?
+set -e
+publish_clusterloader_artifacts "$clusterloader_status"
+if ((clusterloader_status != 0)); then
+    cat "$clusterloader_summary" >&2
+    exit "$clusterloader_status"
+fi
 
-printf 'NPA scale profile passed; reports: %s\n' "$report_dir"
+printf 'NPA scale profile passed; summary: %s; reports: %s\n' \
+    "$clusterloader_summary" "$clusterloader_reports"

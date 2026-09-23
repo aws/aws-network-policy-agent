@@ -75,6 +75,8 @@ Soak defaults:
 
 `scripts/test/bpf-snapshot-test.sh` validates exact eBPF activity and drain set comparisons without a cluster.
 
+`scripts/test/cl2-artifact-test.sh` validates that a failed ClusterLoader2 run preserves its exact verdict and reports as top-level test artifacts.
+
 The following tests are valid to run using `run-test.sh` script, and setting the respective environment variable to true will run them:
 1. Conformance Tests - `RUN_CONFORMANCE_TESTS`
 2. Performance Tests - `RUN_PERFORMANCE_TESTS`
