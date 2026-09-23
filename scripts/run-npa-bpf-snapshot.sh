@@ -6,9 +6,23 @@
 
 set -euo pipefail
 
-NPA_BPF_NAMESPACE=${NPA_BPF_NAMESPACE:-npa-scale-evidence}
-NPA_BPF_READER_IMAGE=${NPA_BPF_READER_IMAGE:-public.ecr.aws/docker/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}
+readonly NPA_BPF_OWNED_NAMESPACE=npa-scale-evidence
+readonly NPA_BPF_PINNED_READER_IMAGE=public.ecr.aws/docker/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+NPA_BPF_NAMESPACE=${NPA_BPF_NAMESPACE:-$NPA_BPF_OWNED_NAMESPACE}
+NPA_BPF_READER_IMAGE=${NPA_BPF_READER_IMAGE:-$NPA_BPF_PINNED_READER_IMAGE}
 NPA_BPF_BASELINE_SETTLE_SECONDS=${NPA_BPF_BASELINE_SETTLE_SECONDS:-30}
+
+npa_bpf_validate_inputs() {
+    if [[ $NPA_BPF_NAMESPACE != "$NPA_BPF_OWNED_NAMESPACE" ]]; then
+        printf 'NPA BPF namespace must be the scenario-owned namespace %s, got %s\n' \
+            "$NPA_BPF_OWNED_NAMESPACE" "$NPA_BPF_NAMESPACE" >&2
+        return 2
+    fi
+    if [[ $NPA_BPF_READER_IMAGE != "$NPA_BPF_PINNED_READER_IMAGE" ]]; then
+        echo "NPA BPF reader image must match the sealed digest-pinned image" >&2
+        return 2
+    fi
+}
 
 npa_bpf_new_identities() {
     local baseline=$1
@@ -16,18 +30,57 @@ npa_bpf_new_identities() {
     comm -13 "$baseline" "$current"
 }
 
+npa_bpf_reader_nodes() {
+    local snapshot=$1
+    awk -F $'\t' '$2 == "reader" && $3 == "present" { print $1 }' "$snapshot" |
+        sort -u
+}
+
+npa_bpf_assert_same_reader_nodes() {
+    local left=$1
+    local right=$2
+    local difference
+    difference=$(comm -3 \
+        <(npa_bpf_reader_nodes "$left") \
+        <(npa_bpf_reader_nodes "$right"))
+    if [[ -n $difference ]]; then
+        printf 'NPA BPF reader node sets differ between %s and %s:\n%s\n' \
+            "$left" "$right" "$difference" >&2
+        return 1
+    fi
+}
+
 npa_bpf_assert_activity() {
     local baseline=$1
     local full_load=$2
     local added=$3
 
+    npa_bpf_assert_same_reader_nodes "$baseline" "$full_load" || return
     npa_bpf_new_identities "$baseline" "$full_load" >"$added"
-    if ! grep -q $'\tprogram\t' "$added"; then
-        echo "full load added no pinned NPA program identity" >&2
-        return 1
-    fi
-    if ! grep -q $'\tmap\t' "$added"; then
-        echo "full load added no pinned NPA map identity" >&2
+    local observed=0
+    local node
+    while IFS= read -r node; do
+        [[ -n $node ]] || continue
+        observed=$((observed + 1))
+        if ! awk -F $'\t' -v expected_node="$node" \
+            '$1 == expected_node && $2 == "program" { found = 1 } END { exit found ? 0 : 1 }' \
+            "$added"; then
+            printf 'full load added no pinned NPA program identity on node %s\n' \
+                "$node" >&2
+            return 1
+        fi
+        if ! awk -F $'\t' -v expected_node="$node" \
+            '$1 == expected_node && $2 == "map" { found = 1 } END { exit found ? 0 : 1 }' \
+            "$added"; then
+            printf 'full load added no pinned NPA map identity on node %s\n' \
+                "$node" >&2
+            return 1
+        fi
+    done < <(npa_bpf_reader_nodes "$full_load")
+
+    if [[ $observed != "$CL2_EXPECTED_LINUX_NODES" ]]; then
+        printf 'full-load NPA BPF evidence covered %s nodes, want %s\n' \
+            "$observed" "$CL2_EXPECTED_LINUX_NODES" >&2
         return 1
     fi
 }
@@ -37,6 +90,7 @@ npa_bpf_assert_drain() {
     local recovery=$2
     local residual=$3
 
+    npa_bpf_assert_same_reader_nodes "$baseline" "$recovery" || return
     npa_bpf_new_identities "$baseline" "$recovery" >"$residual"
     if [[ -s $residual ]]; then
         echo "recovery retained pinned NPA identities that were absent at baseline:" >&2
@@ -70,6 +124,7 @@ spec:
       labels:
         app: npa-bpffs-reader
     spec:
+      automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/os: linux
       tolerations:
@@ -127,10 +182,37 @@ npa_bpf_capture() {
         -n "$NPA_BPF_NAMESPACE" \
         -l app=npa-bpffs-reader \
         -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.metadata.name}{"\n"}{end}')
+    local expected_nodes
+    expected_nodes=$(npa_bpf_kubectl get nodes \
+        -l kubernetes.io/os=linux \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+        sed '/^$/d' |
+        sort -u)
+    local reader_nodes
+    reader_nodes=$(cut -f1 <<<"$pod_rows" | sed '/^$/d' | sort -u)
+    local expected_node_count
+    expected_node_count=$(awk 'NF { count++ } END { print count + 0 }' <<<"$expected_nodes")
+    if ((expected_node_count != CL2_EXPECTED_LINUX_NODES)); then
+        printf 'NPA BPF cluster has %s Linux nodes, want %s:\n%s\n' \
+            "$expected_node_count" "$CL2_EXPECTED_LINUX_NODES" "$expected_nodes" >&2
+        rm -f -- "$temporary"
+        return 1
+    fi
+    local node_difference
+    node_difference=$(comm -3 \
+        <(printf '%s\n' "$expected_nodes") \
+        <(printf '%s\n' "$reader_nodes"))
+    if [[ -n $node_difference ]]; then
+        printf 'NPA BPF readers do not cover the exact Linux node set:\n%s\n' \
+            "$node_difference" >&2
+        rm -f -- "$temporary"
+        return 1
+    fi
 
     local observed=0
     while IFS=$'\t' read -r node pod; do
         [[ -n $node && -n $pod ]] || continue
+        printf '%s\treader\tpresent\n' "$node" >>"$temporary"
         local evidence
         if ! evidence=$(
             npa_bpf_kubectl exec \
@@ -202,11 +284,12 @@ npa_bpf_main() {
     : "${KUBECONFIG:?KUBECONFIG must identify the test cluster}"
     : "${SCENARIO_STATE_DIR:?SCENARIO_STATE_DIR must be set}"
     : "${CL2_EXPECTED_LINUX_NODES:?CL2_EXPECTED_LINUX_NODES must be set}"
+    npa_bpf_validate_inputs
     if [[ ! $NPA_BPF_BASELINE_SETTLE_SECONDS =~ ^[0-9]+$ ]]; then
         echo "NPA_BPF_BASELINE_SETTLE_SECONDS must be a non-negative integer" >&2
         return 2
     fi
-    for command in comm cp grep head kubectl sort; do
+    for command in awk comm cp cut head kubectl sed sort; do
         command -v "$command" >/dev/null 2>&1 || {
             printf '%s is required\n' "$command" >&2
             return 127
@@ -239,17 +322,28 @@ npa_bpf_main() {
                 echo "NPA baseline eBPF snapshot is missing" >&2
                 return 1
             }
-            npa_bpf_capture "$snapshot"
-            local residual="${SCENARIO_STATE_DIR}/npa-bpf-recovery-residual.tsv"
-            npa_bpf_assert_drain "$baseline" "$snapshot" "$residual"
-            npa_bpf_publish "$residual"
-            npa_bpf_kubectl delete namespace "$NPA_BPF_NAMESPACE" \
+            local status=0
+            if npa_bpf_capture "$snapshot"; then
+                local residual="${SCENARIO_STATE_DIR}/npa-bpf-recovery-residual.tsv"
+                if npa_bpf_assert_drain "$baseline" "$snapshot" "$residual"; then
+                    npa_bpf_publish "$residual"
+                else
+                    status=$?
+                fi
+            else
+                status=$?
+            fi
+            if ! npa_bpf_kubectl delete namespace "$NPA_BPF_NAMESPACE" \
                 --ignore-not-found=true \
-                --wait=false
+                --wait=true \
+                --timeout=10m; then
+                status=1
+            fi
+            return "$status"
             ;;
     esac
 }
 
-if [[ ${NPA_BPF_LIBRARY_ONLY:-false} != true ]]; then
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     npa_bpf_main "$@"
 fi

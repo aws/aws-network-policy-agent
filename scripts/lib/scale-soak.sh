@@ -24,6 +24,15 @@ npa_require_positive_integer() {
     fi
 }
 
+npa_require_image_reference() {
+    local name=$1
+    local value=$2
+    if [[ ! $value =~ ^[A-Za-z0-9._/@:-]+$ ]]; then
+        echo "${name} must be a single safe container image reference, got ${value}" >&2
+        return 1
+    fi
+}
+
 npa_require_test_namespace() {
     local namespace=$1
     local prefix=$2
@@ -85,6 +94,7 @@ npa_persist_state() {
         printf 'WORKLOAD_BATCH_SIZE=%q\n' "${WORKLOAD_BATCH_SIZE:-0}"
         printf 'WORKLOAD_CYCLE_INTERVAL_SECONDS=%q\n' "${WORKLOAD_CYCLE_INTERVAL_SECONDS:-0}"
         printf 'WORKLOAD_POLICY_SETTLE_SECONDS=%q\n' "${WORKLOAD_POLICY_SETTLE_SECONDS:-0}"
+        printf 'WORKLOAD_POLICY_PODS_PER_ROUND=%q\n' "${WORKLOAD_POLICY_PODS_PER_ROUND:-0}"
         printf 'WORKLOAD_POLICY_ROUNDS_REQUESTED=%q\n' "${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0}"
         printf 'WORKLOAD_POLICY_ROUNDS_COMPLETED=%q\n' "${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0}"
         printf 'WORKLOAD_SHORT_LIVED_PODS=%q\n' "${WORKLOAD_SHORT_LIVED_PODS:-0}"
@@ -223,6 +233,66 @@ npa_complete_cleanup() {
     return "$status"
 }
 
+npa_completion_equal() {
+    local name=$1
+    local got=$2
+    local want=$3
+
+    if [[ $got != "$want" ]]; then
+        echo "NPA workload completion mismatch: ${name}=${got}, want ${want}" >&2
+        return 1
+    fi
+}
+
+npa_validate_scale_completion() {
+    if [[ ${WORKLOAD_PROFILE_ID:-} != npa-policy-churn-v4 ]]; then
+        return 0
+    fi
+
+    local expected_rounds
+    local expected_short_lived_pods
+    local expected_churn_pods
+    expected_rounds=$((
+        ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0} +
+            ${WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED:-0}
+    ))
+    expected_short_lived_pods=$((
+        ${WORKLOAD_SHORT_LIVED_PODS_PER_ROUND:-0} *
+            ${WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED:-0}
+    ))
+    expected_churn_pods=$((
+        ${WORKLOAD_POLICY_PODS_PER_ROUND:-0} *
+            ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0} +
+            expected_short_lived_pods
+    ))
+
+    npa_completion_equal workloadStatus "${WORKLOAD_STATUS:-unknown}" pass &&
+        npa_completion_equal \
+            policyRoundsCompleted \
+            "${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0}" \
+            "${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0}" &&
+        npa_completion_equal \
+            shortLivedRoundsCompleted \
+            "${WORKLOAD_SHORT_LIVED_ROUNDS_COMPLETED:-0}" \
+            "${WORKLOAD_SHORT_LIVED_ROUNDS_REQUESTED:-0}" &&
+        npa_completion_equal \
+            roundsCompleted \
+            "${WORKLOAD_ROUNDS_COMPLETED:-0}" \
+            "$expected_rounds" &&
+        npa_completion_equal \
+            shortLivedPods \
+            "${WORKLOAD_SHORT_LIVED_PODS:-0}" \
+            "$expected_short_lived_pods" &&
+        npa_completion_equal \
+            shortLivedPolicyAttestations \
+            "${WORKLOAD_SHORT_LIVED_POLICY_ATTESTATIONS:-0}" \
+            "$expected_short_lived_pods" &&
+        npa_completion_equal \
+            churnPods \
+            "${WORKLOAD_CHURN_PODS:-0}" \
+            "$expected_churn_pods"
+}
+
 npa_finalize() {
     local namespace=$1
     local status=$2
@@ -264,6 +334,7 @@ spec:
       labels:
         app: npa-probe-server
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: server
           image: ${NPA_TEST_IMAGE}
@@ -322,6 +393,7 @@ metadata:
   labels:
     npa-access: allowed
 spec:
+  automountServiceAccountToken: false
   containers:
     - name: client
       image: ${NPA_TEST_IMAGE}
@@ -334,6 +406,7 @@ metadata:
   labels:
     npa-access: denied
 spec:
+  automountServiceAccountToken: false
   containers:
     - name: client
       image: ${NPA_TEST_IMAGE}
@@ -353,6 +426,7 @@ spec:
       labels:
         app: npa-unselected-server
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: server
           image: ${NPA_TEST_IMAGE}
@@ -374,6 +448,7 @@ kind: Pod
 metadata:
   name: npa-unselected-client
 spec:
+  automountServiceAccountToken: false
   containers:
     - name: client
       image: ${NPA_TEST_IMAGE}
@@ -499,6 +574,7 @@ npa_write_workload_report() {
   "batchSize": ${WORKLOAD_BATCH_SIZE:-0},
   "cycleIntervalSeconds": ${WORKLOAD_CYCLE_INTERVAL_SECONDS:-0},
   "policySettleSeconds": ${WORKLOAD_POLICY_SETTLE_SECONDS:-0},
+  "policyPodsPerRound": ${WORKLOAD_POLICY_PODS_PER_ROUND:-0},
   "policyRoundsRequested": ${WORKLOAD_POLICY_ROUNDS_REQUESTED:-0},
   "policyRoundsCompleted": ${WORKLOAD_POLICY_ROUNDS_COMPLETED:-0},
   "shortLivedPods": ${WORKLOAD_SHORT_LIVED_PODS:-0},
@@ -524,10 +600,35 @@ EOF
     mv -f -- "$temporary" "$WORKLOAD_REPORT_PATH"
 }
 
+npa_scale_workload_label() {
+    local distribute=$1
+    if [[ $distribute == true ]]; then
+        printf '        npa-scale-workload: "true"\n'
+    fi
+}
+
+npa_scale_workload_placement() {
+    local distribute=$1
+    if [[ $distribute == true ]]; then
+        cat <<'EOF'
+      nodeSelector:
+        kubernetes.io/os: linux
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              npa-scale-workload: "true"
+EOF
+    fi
+}
+
 npa_render_churn_batch() {
     local run_label=$1
     local start=$2
     local end=$3
+    local distribute=${4:-false}
     local identity
 
     for ((identity = start; identity <= end; identity++)); do
@@ -549,7 +650,10 @@ spec:
       labels:
         app: ${name}
         npa-test-run: ${run_label}
+$(npa_scale_workload_label "$distribute")
     spec:
+$(npa_scale_workload_placement "$distribute")
+      automountServiceAccountToken: false
       containers:
         - name: workload
           image: ${NPA_TEST_IMAGE}
@@ -578,8 +682,9 @@ npa_apply_churn_batch() {
     local run_label=$2
     local start=$3
     local end=$4
+    local distribute=${5:-false}
 
-    npa_render_churn_batch "$run_label" "$start" "$end" |
+    npa_render_churn_batch "$run_label" "$start" "$end" "$distribute" |
         npa_kubectl apply -n "$namespace" -f -
 }
 
@@ -622,12 +727,13 @@ npa_apply_churn() {
     local run_label=$2
     local targets=$3
     local batch_size=$4
+    local distribute=${5:-false}
 
     local start=1
     while ((start <= targets)); do
         local end=$((start + batch_size - 1))
         end=$((end < targets ? end : targets))
-        npa_apply_churn_batch "$namespace" "$run_label" "$start" "$end"
+        npa_apply_churn_batch "$namespace" "$run_label" "$start" "$end" "$distribute"
         npa_wait_for_churn "$namespace" "$run_label"
         npa_verify_enforcement "$namespace"
         start=$((end + 1))
@@ -677,6 +783,7 @@ npa_render_short_lived_job() {
     local run_label=$1
     local targets=$2
     local lifetime_seconds=$3
+    local distribute=${4:-false}
 
     cat <<EOF
 apiVersion: batch/v1
@@ -696,7 +803,10 @@ spec:
       labels:
         npa-test-phase: short-lived
         npa-test-run: ${run_label}
+$(npa_scale_workload_label "$distribute")
     spec:
+$(npa_scale_workload_placement "$distribute")
+      automountServiceAccountToken: false
       restartPolicy: Never
       containers:
         - name: workload
@@ -745,8 +855,9 @@ npa_run_short_lived_round() {
     local run_label=$2
     local targets=$3
     local lifetime_seconds=$4
+    local distribute=${5:-false}
 
-    npa_render_short_lived_job "$run_label" "$targets" "$lifetime_seconds" |
+    npa_render_short_lived_job "$run_label" "$targets" "$lifetime_seconds" "$distribute" |
         npa_kubectl apply -n "$namespace" -f -
     npa_kubectl wait "job/${run_label}" \
         -n "$namespace" \
@@ -757,6 +868,51 @@ npa_run_short_lived_round() {
         --ignore-not-found=true \
         --wait=false \
         --timeout=10m
+}
+
+npa_require_workload_node_coverage() {
+    local namespace=$1
+    local expected_nodes=$2
+    npa_require_positive_integer CL2_EXPECTED_LINUX_NODES "$expected_nodes"
+
+    local expected_rows
+    expected_rows=$(npa_kubectl get nodes \
+        -l kubernetes.io/os=linux \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    local node_rows
+    node_rows=$(npa_kubectl get pods \
+        -n "$namespace" \
+        -l npa-scale-workload=true \
+        -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.spec.nodeName}{"\n"}{end}')
+
+    local -A cluster_nodes=()
+    local -A observed_nodes=()
+    local node
+    while IFS= read -r node; do
+        [[ -n $node ]] || continue
+        cluster_nodes["$node"]=1
+    done <<<"$expected_rows"
+    while IFS= read -r node; do
+        [[ -n $node ]] || continue
+        observed_nodes["$node"]=1
+    done <<<"$node_rows"
+
+    if ((${#cluster_nodes[@]} != expected_nodes)); then
+        printf 'NPA scale cluster has %s Linux nodes, want %s\n' \
+            "${#cluster_nodes[@]}" "$expected_nodes" >&2
+        return 1
+    fi
+    for node in "${!cluster_nodes[@]}"; do
+        if [[ -z ${observed_nodes[$node]+set} ]]; then
+            printf 'active NPA scale workload did not cover Linux node %s\n' \
+                "$node" >&2
+            return 1
+        fi
+    done
+    if ((${#observed_nodes[@]} != expected_nodes)); then
+        printf 'active NPA scale workload covered an unexpected node set\n' >&2
+        return 1
+    fi
 }
 
 npa_require_short_lived_deleted() {

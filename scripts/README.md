@@ -8,11 +8,11 @@ This package contains shell scripts and libraries used for running e2e integrati
 
 `run-cyclonus-tests.sh` - Runs cyclonus tests against an existing cluster and validates the output
 
-`run-npa-scale-tests.sh` - Runs the locked NPA scale workload through a caller-supplied ClusterLoader2 profile and monitor set.
-
 `run-npa-scale-workload.sh` - Churns distinct pod and policy identities in bounded batches while continuously checking allowed and denied traffic.
 
 `run-npa-bpf-snapshot.sh` - Captures baseline, full-load, and recovery bpffs pin identities on every Linux node and fails on missing activity or retained identities.
+
+`run-npa-cleanup.sh` - Removes the active scale workload and validates its completion report.
 
 `run-npa-soak-tests.sh` - Repeats the same bounded churn and traffic checks for a configurable duration.
 
@@ -20,11 +20,14 @@ This package contains shell scripts and libraries used for running e2e integrati
 
 The scale and soak scripts only own their test namespaces and workloads. The
 caller owns cluster creation, Network Policy enablement, metrics collection,
-and cluster deletion. Both scripts require `KUBECONFIG`, delete any stale test
-namespace before starting, and fail if final namespace deletion fails. The
-scale wrapper additionally requires `CL2_PROFILE_PATH`; Hydra normally supplies
-that component-owned policy plus `CL2_MONITORS_PATH`. The workload remains
-manually runnable against a developer cluster through the same interface.
+and cluster deletion. The scripts require `KUBECONFIG`, delete any stale test
+namespace before starting, and fail if final namespace deletion fails.
+
+Hydra owns the ClusterLoader2 profile, Prometheus queries, thresholds, and
+terminal verdict. It composes the scale workload, BPF snapshots, and cleanup
+commands at explicit phases. These OSS commands remain directly runnable
+against a developer cluster and do not contain a second orchestration or
+metric-assertion framework.
 
 Scale defaults:
 
@@ -58,9 +61,18 @@ the remainder of the interval. Before creating the next round, the workload
 requires the previous round's pods to be gone. The workload fails if Job
 completion, deletion, or the functional probe misses the next absolute
 60-second boundary. The final policy batch remains active for the full-load
-metric snapshot. Including the five functional probe pods, the default peak
-test workload is 205 concurrent pods and 3,000 churn pod creations across the
-run.
+metric snapshot. Scale pods use a shared label and hostname topology spread,
+and the workload fails unless active pods cover every node named by
+`CL2_EXPECTED_LINUX_NODES`. The BPF probe separately requires workload-created
+program and map identities on each of those nodes. Including the five
+functional probe pods, the default peak test workload is 205 concurrent pods
+and 3,000 churn pod creations across the run.
+
+For a direct scale-workload run against a disposable developer cluster, set
+`KUBECONFIG` and `CL2_EXPECTED_LINUX_NODES`, then run
+`scripts/run-npa-scale-workload.sh` followed by
+`scripts/run-npa-cleanup.sh`. Hydra adds the baseline/full-load/recovery BPF
+snapshots and metric assertions around these same commands.
 
 Soak defaults:
 
@@ -74,8 +86,6 @@ Soak defaults:
 `scripts/test/scale-soak-test.sh` validates namespace safety and active-probe failure handling without a cluster.
 
 `scripts/test/bpf-snapshot-test.sh` validates exact eBPF activity and drain set comparisons without a cluster.
-
-`scripts/test/cl2-artifact-test.sh` validates that a failed ClusterLoader2 run preserves its exact verdict and reports as top-level test artifacts.
 
 The following tests are valid to run using `run-test.sh` script, and setting the respective environment variable to true will run them:
 1. Conformance Tests - `RUN_CONFORMANCE_TESTS`
