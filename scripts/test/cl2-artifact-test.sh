@@ -86,8 +86,8 @@ grep -q 'clusterloader2_exit_code=17' \
 grep -q 'working-set assertion marker' \
     "${artifact_dir}/npa-cl2-test-cluster-summary.txt" ||
     fail "summary omitted the assertion marker"
-tar -tzf "${artifact_dir}/npa-cl2-test-cluster-reports.tar.gz" |
-    grep -q './junit.xml' ||
+tar -tzf "${artifact_dir}/npa-cl2-test-cluster-reports.tar.gz" ./junit.xml \
+    >/dev/null ||
     fail "report archive omitted the JUnit report"
 
 echo "PASS"
