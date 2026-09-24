@@ -87,7 +87,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
 
-		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcd/my-namespace")
 		assert.True(t, ok)
 		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 	})
@@ -133,7 +133,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		assert.True(t, ok)
 		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
 
-		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcdmy-namespace")
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcd/my-namespace")
 		assert.True(t, ok)
 		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 
@@ -294,6 +294,318 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 3, len(val.([]string)),
 		"networkPolicyToPodIdentifierMap should track only currently-selected identifiers")
+}
+
+func TestPolicyEndpointReconcile_StaleDeletedPodDoesNotBlockLiveProgramming(t *testing.T) {
+	const (
+		namespace  = "my-namespace"
+		nodeIP     = "1.1.1.1"
+		policyName = "allow-all-egress"
+	)
+
+	deletedEndpoint := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.1", Name: "task-uuid1-abcd", Namespace: namespace}
+	liveEndpoint := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.2", Name: "deployment2rs-1", Namespace: namespace}
+	deletedIdentifier := utils.GetPodIdentifier(deletedEndpoint.Name, namespace)
+	liveIdentifier := utils.GetPodIdentifier(liveEndpoint.Name, namespace)
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{PodIdentifiersWithoutBPFContext: map[string]bool{deletedIdentifier: true}}
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{deletedEndpoint})
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*pe = currentPE
+			return nil
+		},
+	).AnyTimes()
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
+			return nil
+		},
+	).AnyTimes()
+
+	req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: namespace}}
+	_, err := r.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+
+	mockBpf.CallLog = nil
+	currentPE = getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{liveEndpoint})
+	_, err = r.Reconcile(context.Background(), req)
+	assert.NoError(t, err, "a torn-down stale pod must not fail cleanup or block live programming")
+
+	_, found := r.podIdentifierToPolicyEndpointMap.Load(deletedIdentifier)
+	assert.False(t, found, "the stale deleted identifier must be removed from MAP1")
+	_, found = r.podIdentifierToPolicyEndpointMap.Load(liveIdentifier)
+	assert.True(t, found, "the current live identifier must remain in MAP1")
+	currentSnapshot, found := r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(policyName, namespace))
+	assert.True(t, found)
+	assert.ElementsMatch(t, []string{liveIdentifier}, currentSnapshot.([]string))
+	assert.Contains(t, mockBpf.CallLog, "AttacheBPFProbes", "the current live pod must still be programmed")
+}
+
+func TestPolicyEndpointReconcile_LiveDeselectionPurgesMapsAndRestoresBaseline(t *testing.T) {
+	const (
+		namespace  = "my-namespace"
+		nodeIP     = "1.1.1.1"
+		policyName = "allow-all-egress"
+	)
+
+	previousEndpoint := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.1", Name: "deployment1rs-1", Namespace: namespace}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{previousEndpoint})
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*pe = currentPE
+			return nil
+		},
+	).AnyTimes()
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
+			return nil
+		},
+	).AnyTimes()
+
+	req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: namespace}}
+	_, err := r.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+
+	mockBpf.CallLog = nil
+	currentPE = getPolicyEndpoint(policyName, namespace, nil)
+	_, err = r.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, sizeOfSyncMap(&r.podIdentifierToPolicyEndpointMap))
+	assert.Equal(t, 0, sizeOfSyncMap(&r.networkPolicyToPodIdentifierMap))
+	assert.Equal(t, 0, sizeOfSyncMap(&r.policyEndpointSelectorMap))
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps", "the still-live deselected pod must have its rules cleared")
+	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps", "the still-live deselected pod must be restored to baseline")
+}
+
+func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T) {
+	const (
+		namespace       = "my-namespace"
+		nodeIP          = "1.1.1.1"
+		deletedPolicy   = "policy-a"
+		survivingPolicy = "policy-b"
+	)
+
+	deletedPEName := deletedPolicy + "-abcd"
+	survivingPE := getPolicyEndpoint(survivingPolicy, namespace, nil)
+	survivingPE.Spec.Ingress = []policyendpoint.EndpointInfo{{CIDR: "10.0.0.0/8"}}
+	targetPod := npatypes.Pod{NamespacedName: types.NamespacedName{Name: "deployment1rs-1", Namespace: namespace}, PodIP: "10.1.1.1"}
+	podIdentifier := utils.GetPodIdentifier(targetPod.Name, namespace)
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			switch key.Name {
+			case deletedPEName:
+				return apierrors.NewNotFound(schema.GroupResource{Group: networking.SchemeGroupVersion.Group, Resource: "policyendpoints"}, key.Name)
+			case survivingPE.Name:
+				*pe = survivingPE
+				return nil
+			default:
+				return fmt.Errorf("unexpected PolicyEndpoint get: %s", key)
+			}
+		},
+	).AnyTimes()
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{survivingPE}}
+			return nil
+		},
+	).AnyTimes()
+
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPE.Name})
+	r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(deletedPolicy, namespace), []string{podIdentifier})
+	r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+
+	_, err := r.Reconcile(context.Background(), controllerruntime.Request{
+		NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
+	})
+	assert.NoError(t, err)
+
+	mappedPEs, found := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+	assert.True(t, found, "MAP1 key must survive while another NP still selects the identifier")
+	assert.ElementsMatch(t, []string{survivingPE.Name}, mappedPEs.([]string))
+	_, found = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(deletedPolicy, namespace))
+	assert.False(t, found, "the deleted policy's MAP3 snapshot must be removed")
+	_, found = r.policyEndpointSelectorMap.Load(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace))
+	assert.False(t, found, "the deleted PE's MAP2 entry must be removed")
+	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps", "cleanup must reapply the surviving policy's rules")
+	assert.Contains(t, mockBpf.LastIngressRules, fwrp.EbpfFirewallRules{IPCidr: "10.0.0.0/8"})
+}
+
+func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *testing.T) {
+	const (
+		namespace  = "my-namespace"
+		nodeIP     = "1.1.1.1"
+		policyName = "policy-a"
+	)
+
+	deletedPEName := policyName + "-s1"
+	survivingPEName := policyName + "-s2"
+	podEndpoint := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.1", Name: "deployment1rs-1", Namespace: namespace}
+	targetPod := npatypes.Pod{NamespacedName: types.NamespacedName{Name: podEndpoint.Name, Namespace: namespace}, PodIP: podEndpoint.PodIP}
+	podIdentifier := utils.GetPodIdentifier(podEndpoint.Name, namespace)
+
+	tests := []struct {
+		name                  string
+		survivingPodEndpoints []policyendpoint.PodEndpoint
+		wantMAP1              []string
+		wantMAP3              bool
+		wantBaselineRestore   bool
+	}{
+		{
+			name:                  "surviving shard still selects identifier prunes deleted shard name",
+			survivingPodEndpoints: []policyendpoint.PodEndpoint{podEndpoint},
+			wantMAP1:              []string{survivingPEName},
+			wantMAP3:              true,
+		},
+		{
+			name:                "no surviving shard selects identifier purges parent and cleans pod",
+			wantMAP1:            nil,
+			wantMAP3:            false,
+			wantBaselineRestore: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockClient := mock_client.NewMockClient(ctrl)
+			mockBpf := &ebpf.MockBpfClient{}
+			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+			survivingPE := getPolicyEndpoint(policyName, namespace, tt.survivingPodEndpoints)
+			survivingPE.Name = survivingPEName
+
+			mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+					switch key.Name {
+					case deletedPEName:
+						return apierrors.NewNotFound(schema.GroupResource{Group: networking.SchemeGroupVersion.Group, Resource: "policyendpoints"}, key.Name)
+					case survivingPEName:
+						*pe = survivingPE
+						return nil
+					default:
+						return fmt.Errorf("unexpected PolicyEndpoint get: %s", key)
+					}
+				},
+			).AnyTimes()
+			mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+					*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{survivingPE}}
+					return nil
+				},
+			).AnyTimes()
+
+			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPEName})
+			r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(policyName, namespace), []string{podIdentifier})
+			r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+
+			_, err := r.Reconcile(context.Background(), controllerruntime.Request{
+				NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
+			})
+			assert.NoError(t, err)
+
+			mappedPEs, found := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+			if len(tt.wantMAP1) == 0 {
+				assert.False(t, found)
+			} else {
+				assert.True(t, found)
+				assert.ElementsMatch(t, tt.wantMAP1, mappedPEs.([]string))
+			}
+
+			_, found = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(policyName, namespace))
+			assert.Equal(t, tt.wantMAP3, found)
+			if tt.wantBaselineRestore {
+				assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps")
+				assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
+			}
+		})
+	}
+}
+
+func TestDeriveTargetPodsForParentNP_StaleIdentifierIsPurgedAndSelectedForCleanup(t *testing.T) {
+	const (
+		namespace  = "my-namespace"
+		nodeIP     = "1.1.1.1"
+		policyName = "allow-all-egress"
+	)
+
+	previousEndpoint := policyendpoint.PodEndpoint{
+		HostIP:    nodeIP,
+		PodIP:     "10.1.1.1",
+		Name:      "deployment1rs-1",
+		Namespace: namespace,
+	}
+	previousTarget := npatypes.Pod{
+		NamespacedName: types.NamespacedName{Name: previousEndpoint.Name, Namespace: namespace},
+		PodIP:          previousEndpoint.PodIP,
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
+
+	// The first reconcile records the prior local target in MAP2 and its identifier in
+	// MAP1/MAP3. The current PE then stops selecting that pod.
+	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{previousEndpoint})
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+			*pe = currentPE
+			return nil
+		},
+	).AnyTimes()
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
+			return nil
+		},
+	).AnyTimes()
+
+	_, err := r.Reconcile(context.Background(), controllerruntime.Request{
+		NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: currentPE.Namespace},
+	})
+	assert.NoError(t, err)
+
+	previousIdentifier := utils.GetPodIdentifier(previousEndpoint.Name, namespace)
+	_, tracked := r.podIdentifierToPolicyEndpointMap.Load(previousIdentifier)
+	assert.True(t, tracked, "the initial reconcile must register the selected identifier in MAP1")
+	_, tracked = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(policyName, namespace))
+	assert.True(t, tracked, "the initial reconcile must record the identifier in MAP3")
+
+	currentPE = getPolicyEndpoint(policyName, namespace, nil)
+	targetPods, podIdentifiers, podsToBeCleanedUp, parentPEList, clusterWidePodIdentifiers, err := r.deriveTargetPodsForParentNP(
+		context.Background(), policyName, namespace, currentPE.Name)
+	assert.NoError(t, err)
+	assert.Empty(t, targetPods)
+	assert.Empty(t, podIdentifiers)
+	assert.Equal(t, []npatypes.Pod{previousTarget}, podsToBeCleanedUp)
+	assert.Equal(t, []string{currentPE.Name}, parentPEList)
+	assert.Empty(t, clusterWidePodIdentifiers)
+
+	_, tracked = r.podIdentifierToPolicyEndpointMap.Load(previousIdentifier)
+	assert.False(t, tracked, "the stale identifier must be removed from MAP1 before cleanup")
 }
 
 func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testing.T) {
@@ -737,7 +1049,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	samplePolicyEndpoint := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -759,7 +1071,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	noMatchingPods := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -781,7 +1093,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	policyEndpointUpdate := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -810,7 +1122,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	ipv6NodePolicyEndpoint := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -832,7 +1144,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	hostNetworkPolicyEndpoint := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -854,7 +1166,7 @@ func TestDeriveTargetPods(t *testing.T) {
 
 	mixedPolicyEndpoint := policyendpoint.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
+			Name:      "foo-abcde",
 			Namespace: "bar",
 		},
 		Spec: policyendpoint.PolicyEndpointSpec{
@@ -1767,8 +2079,12 @@ func TestCleanupPod_PodAlreadyTornDownSkipsWrites(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	// BPFContextRegistered defaults to false -> pod already torn down.
-	mockBpf := &ebpf.MockBpfClient{}
+	podIdentifier := utils.GetPodIdentifier("task-uuid1-abcd", namespace)
+	// HasBPFContext is false when CNI DEL has already removed this identifier's
+	// eBPF context.
+	mockBpf := &ebpf.MockBpfClient{
+		PodIdentifiersWithoutBPFContext: map[string]bool{podIdentifier: true},
+	}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 
 	// Note: podIdentifierToPolicyEndpointMap intentionally has NO entry for this pod
@@ -1796,7 +2112,9 @@ func TestCleanupPod_DeselectedLivePodRestoresBaseline(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	mockBpf := &ebpf.MockBpfClient{BPFContextRegistered: true}
+	// A default mock (empty PodIdentifiersWithoutBPFContext) reports HasBPFContext=true,
+	// simulating a live pod whose probes are still attached.
+	mockBpf := &ebpf.MockBpfClient{}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 
 	// No entry in podIdentifierToPolicyEndpointMap -> no policy tracks this pod anymore,
@@ -1827,10 +2145,9 @@ func TestCleanupPod_BaselineRestoreFailureDoesNotRequeue(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	// Context registered, so the restore is attempted - but the map write fails.
+	// Context registered (mock default), so the restore is attempted - but the map write fails.
 	mockBpf := &ebpf.MockBpfClient{
-		BPFContextRegistered: true,
-		UpdateEbpfMapsErr:    errors.New("no bpf context registered for pod"),
+		UpdateEbpfMapsErr: errors.New("no bpf context registered for pod"),
 	}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 

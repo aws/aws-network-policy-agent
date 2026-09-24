@@ -246,7 +246,7 @@ func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction s
 }
 
 func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) string {
-	return policyEndpointName + policyNamespace
+	return policyEndpointName + "/" + policyNamespace
 }
 
 func GetParentNPNameFromPEName(policyEndpointName string) string {

@@ -30,11 +30,11 @@ func GetNetworkPolicyIdentifier(policyName, policyNamespace string) string {
 // DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy.
 // targetPodIdentifiers covers every identifier the policy selects cluster-wide, so it can be
 // large under churn.
-func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, policyIdentifier string, targetPodIdentifiers []string) []string {
+func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, policyIdentifier string, targetPodIdentifiers map[string]bool) []string {
 	var stalePodIdentifiers []string
 	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(policyIdentifier); ok {
 		targetSet := make(map[string]struct{}, len(targetPodIdentifiers))
-		for _, podIdentifier := range targetPodIdentifiers {
+		for podIdentifier := range targetPodIdentifiers {
 			targetSet[podIdentifier] = struct{}{}
 		}
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
