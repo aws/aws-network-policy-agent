@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -102,6 +102,38 @@ var (
 		func() float64 { return float64(goebpfmetrics.ProgLoadEAGAINExhausted()) },
 	)
 
+	// sdkAPIErr only names the calling function, so it cannot tell a transient
+	// allocator ENOMEM apart from a full map or a closed fd. Diagnosing
+	// aws-network-policy-agent#686 cost a 40-minute A/B reproduction across two
+	// instance generations precisely because the errno was never recorded.
+	//
+	// An errno="unknown" series is also the tripwire for utils.MapErrnoLabel
+	// having drifted from the SDK's error text, which would silently disable the
+	// retry below. Alert on it.
+	bpfMapOpErr = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_op_errors_total",
+			Help: "BPF map mutations that failed, by operation and errno",
+		},
+		[]string{"op", "errno"},
+	)
+
+	bpfMapUpdateRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_update_retries_total",
+			Help: "BPF map update attempts retried after a transient errno",
+		},
+		[]string{"errno"},
+	)
+
+	bpfMapUpdateRetriesExhausted = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_update_retries_exhausted_total",
+			Help: "BPF map updates still failing with a transient errno after every retry, left to the controller requeue",
+		},
+		[]string{"errno"},
+	)
+
 	prometheusRegistered = false
 )
 
@@ -119,6 +151,9 @@ func prometheusRegister() {
 		metrics.Registry.MustRegister(sdkAPIErr)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINRetries)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINExhausted)
+		metrics.Registry.MustRegister(bpfMapOpErr)
+		metrics.Registry.MustRegister(bpfMapUpdateRetries)
+		metrics.Registry.MustRegister(bpfMapUpdateRetriesExhausted)
 		prometheusRegistered = true
 	}
 }
@@ -1303,7 +1338,19 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 		mapToUpdate = ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
 		log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, podStateValue.state)
 		start := time.Now()
-		ingressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		// Retried for the same reason BulkRefresh is: pod_state is a
+		// BPF_F_NO_PREALLOC hash, so its elements come from bpf_mem_alloc and a
+		// transient allocator ENOMEM is possible here too. Its unit_size is well
+		// under the 256-byte cliff so the per-CPU prefill is 4 rather than 1,
+		// making it far less exposed than the policy tries - but not immune, and a
+		// failed pod_state write is what blackholes a pod, because the datapath
+		// drops on a NULL pod-state lookup.
+		budget := retryBudget{sleep: mapRetrySleepBudget}
+		ingressErr = retryTransientMutation("pod_state BPF_MAP_UPDATE_ELEM", ingressProgFD, func() error {
+			return mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		}, &budget)
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
 		sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(ingressErr != nil)).Observe(msSince(start))
 		if ingressErr != nil {
 			log().Errorf("Ingress Pod State Map update failed: %v", ingressErr)
@@ -1317,7 +1364,13 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 
 		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
 		start := time.Now()
-		egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		// Same rationale as the ingress write above.
+		budget := retryBudget{sleep: mapRetrySleepBudget}
+		egressErr = retryTransientMutation("pod_state BPF_MAP_UPDATE_ELEM", egressProgFD, func() error {
+			return mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		}, &budget)
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
 		sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
 		if egressErr != nil {
 			log().Errorf("Egress Map update failed: %v", egressErr)
@@ -1397,7 +1450,6 @@ func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace stri
 
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
 	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1406,7 +1458,7 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()
@@ -1417,7 +1469,6 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 
 func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
 	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1426,7 +1477,7 @@ func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewall
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()

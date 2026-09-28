@@ -43,6 +43,8 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 	fresher := now.Add(-1 * time.Second).UTC().Format(time.RFC3339Nano)
 	beforeStart := now.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	future := now.Add(1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	// past programmingLatencyMaxAge, but still after trackerStartTime
+	stale := now.Add(-5 * time.Minute).UTC().Format(time.RFC3339Nano)
 
 	type observeCall struct {
 		pe                   *policyendpoint.PolicyEndpoint
@@ -112,11 +114,40 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 0,
 		},
 		{
-			name: "programming failure suppresses observation AND consumes trigger time",
-			// a later resync of the same annotation must not emit an inflated value
+			name: "programming failure is retried and the successful retry IS observed",
+			// Programming failures are now requeued (ErrProgrammingIncomplete), so the
+			// same annotation legitimately comes back within programmingRequeueBase..Cap
+			// and that retry's latency is real. Consuming the trigger time on failure -
+			// which is what this case used to assert - would drop every retried, i.e.
+			// every slow, programming from the histogram and bias it towards first-try
+			// successes. Inflation from a much later resync is instead prevented by the
+			// programmingLatencyMaxAge guard, covered below.
 			calls: []observeCall{
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+			},
+			observed: 1,
+		},
+		{
+			name: "repeated failures observe nothing, and the eventual success counts once",
+			calls: []observeCall{
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+				// consumed on success, so a later resync adds nothing
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+			},
+			observed: 1,
+		},
+		{
+			name: "trigger time older than programmingLatencyMaxAge is consumed but not observed",
+			// Recovering long after the change was requested must not report the outage
+			// duration as programming latency. This replaces consume-on-failure as the
+			// inflation guard.
+			calls: []observeCall{
+				{pe: newPEWithTriggerTime("pe-1", "ns", stale), programmingSucceeded: true},
+				{pe: newPEWithTriggerTime("pe-1", "ns", stale), programmingSucceeded: true},
 			},
 			observed: 0,
 		},
@@ -190,12 +221,23 @@ func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
 	r.observeClusterPolicyProgrammingLatency(cpe, true) // duplicate, skipped
 	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
+	// A failed programming is now requeued, so the retry that succeeds against the
+	// same annotation must still be observed - otherwise every retried (slow)
+	// cluster-policy programming would be missing from the histogram.
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = fresher
-	r.observeClusterPolicyProgrammingLatency(cpe, false) // programming failed: consumed, not observed
-	r.observeClusterPolicyProgrammingLatency(cpe, true)  // same annotation: stays consumed
-	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, false) // failed: not consumed, not observed
+	r.observeClusterPolicyProgrammingLatency(cpe, true)  // successful retry: observed
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, true) // consumed on success: adds nothing
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest
 	r.observeClusterPolicyProgrammingLatency(cpe, true) // changed annotation, observed
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+
+	// Past programmingLatencyMaxAge: consumed, but reporting it would record the
+	// outage duration as programming latency.
+	cpe.Annotations[LastChangeTriggerTimeAnnotation] = now.Add(-5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	r.observeClusterPolicyProgrammingLatency(cpe, true)
+	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 }
