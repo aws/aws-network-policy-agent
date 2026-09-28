@@ -33,13 +33,14 @@ type MockBpfClient struct {
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
 
-	// BPFContextRegistered controls the IsBPFContextRegistered return value.
-	// Defaults to false; set true to simulate a pod whose probes are still attached.
-	BPFContextRegistered bool
-
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
+
+	// Captured args from the most recent UpdatePodStateEbpfMaps call, so tests can assert
+	// which baseline (DEFAULT_ALLOW vs DEFAULT_DENY) was programmed.
+	LastPodStateKey int
+	LastPodState    int
 
 	// Captured args from the most recent UpdateClusterPolicyEbpfMaps call, so tests can
 	// assert that the rules were actually cleared and not just that the call happened.
@@ -49,6 +50,10 @@ type MockBpfClient struct {
 	// podIdentifiers with no registered eBPF context. Empty by default so HasBPFContext
 	// reports true, preserving the original success-path behavior.
 	PodIdentifiersWithoutBPFContext map[string]bool
+
+	// Network policy mode reported by GetNetworkPolicyMode. Defaults to standard when empty,
+	// preserving the default-allow baseline the existing tests assume.
+	NetworkPolicyMode string
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -77,6 +82,8 @@ func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingres
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
+	m.LastPodStateKey = key
+	m.LastPodState = state
 	return m.UpdatePodStateEbpfMapsErr
 }
 
@@ -91,7 +98,10 @@ func (m *MockBpfClient) ReAttachEbpfProbes() error {
 }
 
 func (m *MockBpfClient) GetNetworkPolicyMode() string {
-	return "standard"
+	if m.NetworkPolicyMode == "" {
+		return "standard"
+	}
+	return m.NetworkPolicyMode
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
