@@ -1207,3 +1207,94 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 	})
 	assert.Equal(t, 400, remaining)
 }
+
+// Records how many times FlushConntrackMap is called and lets a test force it to fail, so the marker-gating logic can be exercised without a live BPF map.
+type fakeConntrackClient struct {
+	flushCalls int
+	flushErr   error
+}
+
+func (f *fakeConntrackClient) CleanupConntrackMap()   {}
+func (f *fakeConntrackClient) Cleanupv6ConntrackMap() {}
+func (f *fakeConntrackClient) FlushConntrackMap() error {
+	f.flushCalls++
+	return f.flushErr
+}
+
+func TestFlushConntrackMapOnEncodingChange(t *testing.T) {
+	readMarker := func(t *testing.T, path string) (string, bool) {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false
+		}
+		assert.NoError(t, err)
+		return string(b), true
+	}
+
+	t.Run("fresh node (no marker) flushes once and records the version", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := dir + "/.npa_ct_encoding_version"
+		fake := &fakeConntrackClient{}
+
+		err := flushConntrackMapOnEncodingChange(fake, marker, 2)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, fake.flushCalls, "a fresh node must flush exactly once")
+
+		got, ok := readMarker(t, marker)
+		assert.True(t, ok, "marker must be written after a successful flush")
+		assert.Equal(t, "2\n", got)
+	})
+
+	t.Run("marker already at current version is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := dir + "/.npa_ct_encoding_version"
+		assert.NoError(t, os.WriteFile(marker, []byte("2\n"), 0644))
+		fake := &fakeConntrackClient{}
+
+		err := flushConntrackMapOnEncodingChange(fake, marker, 2)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, fake.flushCalls, "matching version must not flush")
+	})
+
+	t.Run("older recorded version triggers a flush and bumps the marker", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := dir + "/.npa_ct_encoding_version"
+		assert.NoError(t, os.WriteFile(marker, []byte("1\n"), 0644))
+		fake := &fakeConntrackClient{}
+
+		err := flushConntrackMapOnEncodingChange(fake, marker, 2)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, fake.flushCalls)
+
+		got, _ := readMarker(t, marker)
+		assert.Equal(t, "2\n", got)
+	})
+
+	t.Run("flush failure surfaces the error and does not write the marker", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := dir + "/.npa_ct_encoding_version"
+		fake := &fakeConntrackClient{flushErr: errors.New("boom")}
+
+		err := flushConntrackMapOnEncodingChange(fake, marker, 2)
+		assert.Error(t, err, "a flush failure must be surfaced so it retries next start")
+		assert.Equal(t, 1, fake.flushCalls)
+
+		_, ok := readMarker(t, marker)
+		assert.False(t, ok, "marker must not be written when the flush failed")
+	})
+
+	t.Run("corrupt marker is treated as unset and re-flushes", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := dir + "/.npa_ct_encoding_version"
+		assert.NoError(t, os.WriteFile(marker, []byte("not-a-number"), 0644))
+		fake := &fakeConntrackClient{}
+
+		err := flushConntrackMapOnEncodingChange(fake, marker, 2)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, fake.flushCalls, "an unparseable marker must be treated as unset")
+
+		got, _ := readMarker(t, marker)
+		assert.Equal(t, "2\n", got)
+	})
+}
