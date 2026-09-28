@@ -1397,7 +1397,6 @@ func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace stri
 
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
 	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1406,7 +1405,7 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()
@@ -1417,7 +1416,6 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 
 func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
 	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1426,7 +1424,7 @@ func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewall
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()
