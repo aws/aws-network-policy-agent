@@ -34,7 +34,7 @@ func TestPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 		require.NoError(t, fx.reconcile("np-1-aaaaa"))
 
 		for _, id := range []string{web, api} {
-			assert.Subset(t, fx.ingressCIDRs(id), []string{"192.168.90.1/32", "192.168.90.2/32"},
+			assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"}, fx.ingressCIDRs(id),
 				"rules from every slice of the parent must reach each identifier the parent selects")
 			state, ok := fx.podState(id)
 			require.True(t, ok, "identifier %s must be programmed", id)
@@ -56,8 +56,8 @@ func TestPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		require.NoError(t, fx.reconcile("np-1-aaaaa"))
 
-		assert.Subset(t, fx.ingressCIDRs(nginx), []string{"192.168.90.1/32", "192.168.90.2/32"})
-		assert.Subset(t, fx.egressCIDRs(nginx), []string{"10.0.0.0/8", "172.16.0.0/12"})
+		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"}, fx.ingressCIDRs(nginx))
+		assert.ElementsMatch(t, []string{"10.0.0.0/8", "172.16.0.0/12"}, fx.egressCIDRs(nginx))
 	})
 
 	t.Run("an un-isolated direction gets an allow-all entry", func(t *testing.T) {
@@ -103,10 +103,8 @@ func TestPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		fx.reconcileAll()
 
-		assert.Contains(t, fx.ingressCIDRs(web), "192.168.90.1/32")
-		assert.NotContains(t, fx.ingressCIDRs(web), "192.168.90.2/32")
-		assert.Contains(t, fx.ingressCIDRs(api), "192.168.90.2/32")
-		assert.NotContains(t, fx.ingressCIDRs(api), "192.168.90.1/32")
+		assert.ElementsMatch(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(web))
+		assert.ElementsMatch(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(api))
 	})
 
 	t.Run("remote pods in a slice are not programmed locally", func(t *testing.T) {
@@ -378,6 +376,79 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 			"identifiers with detached probes must not be written to")
 	})
 
+	t.Run("losing one direction's rules during cleanup re-adds that direction's allow-all", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			remaining sliceSpec
+			emptied   func(*peFixture) []string
+		}{
+			{
+				name:      "egress emptied",
+				remaining: sliceSpec{name: "np-1-aaaaa", parent: "np-1", ingress: []ruleRef{allow("192.168.90.1/32")}},
+				emptied:   func(fx *peFixture) []string { return fx.egressCIDRs(identifierOf("nginx-aaa")) },
+			},
+			{
+				name:      "ingress emptied",
+				remaining: sliceSpec{name: "np-1-aaaaa", parent: "np-1", egress: []ruleRef{allow("10.0.0.0/8")}},
+				emptied:   func(fx *peFixture) []string { return fx.ingressCIDRs(identifierOf("nginx-aaa")) },
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				nginx := identifierOf("nginx-aaa")
+				fx := newPEFixture(t)
+				fx.setSlices(
+					sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+						pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), localPod("nginx-bbb", "10.1.1.2")},
+						ingress: []ruleRef{allow("192.168.90.1/32")},
+						egress:  []ruleRef{allow("10.0.0.0/8")}},
+					// A second parent keeps the identifier's map entry alive through cleanup, so
+					// cleanupPod takes its re-derive branch rather than clearing everything.
+					sliceSpec{name: "np-2-aaaaa", parent: "np-2",
+						pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), localPod("nginx-bbb", "10.1.1.2")},
+						ingress: []ruleRef{allow("192.168.90.9/32")},
+						egress:  []ruleRef{allow("192.168.91.9/32")}},
+				)
+				fx.reconcileAll()
+				fx.reset()
+
+				remaining := tc.remaining
+				remaining.pods = []podRef{localPod("nginx-bbb", "10.1.1.2")}
+				fx.setSlices(remaining, sliceSpec{name: "np-2-aaaaa", parent: "np-2",
+					pods: []podRef{localPod("nginx-bbb", "10.1.1.2")}})
+				require.NoError(t, fx.reconcile("np-1-aaaaa"))
+
+				state, ok := fx.podState(nginx)
+				require.True(t, ok)
+				require.Equal(t, ebpf.POLICIES_APPLIED, state,
+					"the identifier is still selected, so the datapath consults its maps")
+				assert.Contains(t, tc.emptied(fx), "0.0.0.0/0",
+					"a direction left with no rules while POLICIES_APPLIED must get an allow-all")
+			})
+		}
+	})
+
+	t.Run("a policy cannot claim a same-named slice from another namespace", func(t *testing.T) {
+		here, there := identifierOf("nginx-aaa"), identifierIn("nginx-aaa", "other-ns")
+		fx := newPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+				ingress: []ruleRef{allow("192.168.90.1/32")}},
+			sliceSpec{name: "np-1-bbbbb", parent: "np-1", namespace: "other-ns",
+				pods:    []podRef{localPod("nginx-aaa", "10.2.2.1")},
+				ingress: []ruleRef{allow("192.168.90.2/32")}},
+		)
+
+		require.NoError(t, fx.reconcile("np-1-aaaaa"))
+
+		assert.ElementsMatch(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(here),
+			"a slice in another namespace must not contribute rules")
+		assert.NotContains(t, fx.bpf.IngressByIdentifier, there,
+			"reconciling one namespace must not program another's identifier")
+		assert.ElementsMatch(t, []string{"np-1-aaaaa"}, fx.identifierSlices(here),
+			"a same-named policy in another namespace is not a sibling and must not be recorded as one")
+	})
+
 	t.Run("a de-selected identifier falls back to the mode's default state", func(t *testing.T) {
 		for _, tc := range []struct {
 			mode string
@@ -431,7 +502,7 @@ func TestPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("np-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
 
-		assert.Contains(t, fx.ingressCIDRs(nginx), "192.168.90.2/32",
+		assert.ElementsMatch(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(nginx),
 			"the surviving slice's rules must be retained")
 	})
 
@@ -451,7 +522,7 @@ func TestPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("np-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
 
-		assert.Contains(t, fx.ingressCIDRs(nginx), "192.168.90.2/32")
+		assert.ElementsMatch(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(nginx))
 	})
 
 	t.Run("deleting the identifier's only slice clears its rules", func(t *testing.T) {
@@ -515,7 +586,7 @@ func TestPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice(deleted)
 		require.NoError(t, fx.reconcileDeleted(deleted))
 
-		assert.Contains(t, fx.ingressCIDRs(nginx), "192.168.90.2/32",
+		assert.ElementsMatch(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(nginx),
 			"a truncated slice name must not cost the surviving sibling its rules")
 	})
 

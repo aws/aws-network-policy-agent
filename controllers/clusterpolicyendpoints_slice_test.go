@@ -5,6 +5,7 @@ import (
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +24,7 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 10,
 				pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
 				ingress: []ruleRef{deny("192.168.90.1/32")}},
-			sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 10,
+			sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 20,
 				pods:    []podRef{localPod("api-aaa", "10.1.1.2")},
 				ingress: []ruleRef{deny("192.168.90.2/32")}},
 		)
@@ -34,7 +35,7 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 			assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"},
 				fx.clusterPolicyRules(id),
 				"rules from every slice of the parent must reach each identifier the parent selects")
-			assert.Equal(t, []int{10, 10}, fx.clusterPolicyPriorities(id))
+			assert.ElementsMatch(t, []int{10, 20}, fx.clusterPolicyPriorities(id))
 			state, ok := fx.clusterPolicyState(id)
 			require.True(t, ok, "identifier %s must be programmed", id)
 			assert.Equal(t, ebpf.POLICIES_APPLIED, state)
@@ -123,25 +124,34 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 			"a Deny and an Accept from different parents must stay distinguishable")
 	})
 
-	t.Run("admin and baseline tiers in different slices both reach the map", func(t *testing.T) {
+	t.Run("baseline tier priority is offset in both directions", func(t *testing.T) {
 		fx := newCPEFixture(t)
 		fx.setSlices(
 			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", tier: policyk8sawsv1.AdminTier, priority: 10,
 				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
-				ingress: []ruleRef{deny("192.168.90.1/32")}},
+				ingress: []ruleRef{deny("192.168.90.1/32")},
+				egress:  []ruleRef{deny("10.0.0.0/8")}},
 			sliceSpec{name: "cnp-2-aaaaa", parent: "cnp-2", tier: policyk8sawsv1.BaselineTier, priority: 999,
 				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
-				ingress: []ruleRef{deny("192.168.90.2/32")}},
+				ingress: []ruleRef{deny("192.168.90.2/32")},
+				egress:  []ruleRef{deny("172.16.0.0/12")}},
 		)
 
 		fx.reconcileAll()
 
-		rules := fx.bpf.ClusterPolicyIngressByIdentifier[nginx]
-		require.Len(t, rules, 2)
-		priorities := []int{rules[0].Priority, rules[1].Priority}
-		assert.Contains(t, priorities, 10, "admin tier priority is used as-is")
-		assert.NotContains(t, priorities, 999,
-			"baseline tier priority must be offset so admin always outranks it")
+		// Admin priorities pass through; baseline ones are offset above every admin value so
+		// admin always outranks baseline whatever numbers the policies chose.
+		offsetBaseline := 999 + fwrp.BASELINE_TIER_PRIORITY_OFFSET
+		for _, direction := range []struct {
+			name       string
+			priorities []int
+		}{
+			{"ingress", fx.clusterPolicyPriorities(nginx)},
+			{"egress", prioritiesOf(fx.bpf.ClusterPolicyEgressByIdentifier[nginx])},
+		} {
+			assert.ElementsMatch(t, []int{10, offsetBaseline}, direction.priorities,
+				"%s: admin priority passes through and baseline is offset", direction.name)
+		}
 	})
 }
 
@@ -324,6 +334,8 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		fx.detachContext(nginx)
 
 		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, nginx,
+			"an identifier with detached probes must not be written to")
 	})
 
 	t.Run("last local pod leaving with two parent policies does not wedge the reconcile", func(t *testing.T) {
@@ -396,6 +408,11 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 
 		fx.assertClusterPolicyRulesCleared(nginx)
 		fx.assertIdentifierAbsent(nginx)
+		_, tracked := fx.parentIdentifiers("cnp-1")
+		assert.False(t, tracked,
+			"the parent selects nothing locally, so it must hold no identifiers")
+		assert.Equal(t, []string{"cnp-1-aaaaa"}, fx.sliceNames(),
+			"the empty slice still exists, so this is not the no-slices-left path")
 	})
 
 	t.Run("last local pod leaving with one parent sliced in two does not wedge the reconcile", func(t *testing.T) {
