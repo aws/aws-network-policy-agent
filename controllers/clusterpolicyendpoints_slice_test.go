@@ -393,7 +393,7 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		assert.Equal(t, ebpf.DEFAULT_ALLOW, state)
 	})
 
-	t.Run("a parent policy keeping one empty slice is not treated as having no slices", func(t *testing.T) {
+	t.Run("a parent policy left selecting nothing clears its identifiers", func(t *testing.T) {
 		fx := newCPEFixture(t)
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 			pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
@@ -402,7 +402,9 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		fx.reset()
 
 		// The controller always retains at least one slice per policy, so "selects nothing"
-		// arrives as an empty slice rather than as zero slices.
+		// arrives as an empty slice rather than as zero slices. For a single slice the two are
+		// observationally identical: the no-slices path falls back to parentCPEList =
+		// []string{resourceName}, which is the list the has-slices path builds anyway.
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1"})
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
@@ -411,8 +413,6 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		_, tracked := fx.parentIdentifiers("cnp-1")
 		assert.False(t, tracked,
 			"the parent selects nothing locally, so it must hold no identifiers")
-		assert.Equal(t, []string{"cnp-1-aaaaa"}, fx.sliceNames(),
-			"the empty slice still exists, so this is not the no-slices-left path")
 	})
 
 	t.Run("last local pod leaving with one parent sliced in two does not wedge the reconcile", func(t *testing.T) {
@@ -441,10 +441,41 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		fx.detachContext(nginx)
 
+		require.Equal(t, []string{"cnp-1-bbbbb"}, fx.identifierSlices(nginx),
+			"the already-deleted slice is what the scrub leaves behind")
+
 		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
 
 		state, ok := fx.clusterPolicyState(other)
 		require.True(t, ok, "a newly scheduled workload must be programmed, not left unenforced")
+		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	})
+
+	t.Run("an identifier whose pods leave and return is programmed again", func(t *testing.T) {
+		nginx := identifierOf("nginx-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.detachContext(nginx)
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		// A later pod of the same workload re-attaches probes, so the identifier gets a fresh
+		// context and must be programmed from scratch rather than treated as still torn down.
+		fx.bpf.ForgetIdentifier(nginx)
+		fx.reset()
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("nginx-ccc", "10.1.1.3")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx))
+		state, ok := fx.clusterPolicyState(nginx)
+		require.True(t, ok)
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
 	})
 
