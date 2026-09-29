@@ -64,7 +64,7 @@ var (
 	deletedPodsMinAge                                = 5 * time.Minute
 
 	// Identifies the layout/meaning of the conntrack map's per-flow verdict byte (conntrack_value.val, produced by GET_CT_VAL in the
-	// datapath). Bump this whenever the encoding's meaning changes so that on the upgrade to the new agent, the persisted global 
+	// datapath). Bump this whenever the encoding's meaning changes so that on the upgrade to the new agent, the persisted global
 	// conntrack map is flushed once and stale bytes cannot be reinterpreted under the new encoding
 	CT_ENCODING_VERSION = 2
 	// CT_ENCODING_VERSION last applied on this node
@@ -380,7 +380,7 @@ type bpfClient struct {
 	deletedPods *sync.Map
 }
 
-// Flushes the global conntrack map exactly once per node when the conntrack verdict-byte encoding version advances. 
+// Flushes the global conntrack map exactly once per node when the conntrack verdict-byte encoding version advances.
 func flushConntrackMapOnEncodingChange(cc conntrack.ConntrackClient, markerPath string, currentVersion int) error {
 	applied, err := readCTEncodingMarker(markerPath)
 	if err != nil {

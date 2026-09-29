@@ -86,7 +86,7 @@ const maxFlushIterations = 512 * 1024
 
 func (c *conntrackClient) FlushConntrackMap() error {
 	// Guard against an unset map handle: DeleteMapEntry keys off MapFD, and a zero
-	// FD would target an unrelated fd (e.g. stdin). 
+	// FD would target an unrelated fd (e.g. stdin).
 	if c.conntrackMap.MapFD == 0 {
 		return fmt.Errorf("flush conntrack: conntrack map handle has no FD; skipping flush")
 	}
