@@ -103,13 +103,13 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	m.CallLog = append(m.CallLog, "DeleteBPFProbes")
-	m.ForgetIdentifier(podIdentifier)
 	return nil
 }
 
 // ForgetIdentifier drops everything the mock holds for an identifier, modelling
-// deleteBPFProbes destroying its maps once the last local pod leaves. Tests that detach
-// probes directly call this to undo it.
+// deleteBPFProbes destroying its maps. DeleteBPFProbes does not call it: production only
+// destroys the context when the identifier's last pod leaves the node, and the mock has no
+// notion of a shared program FD, so tests decide when an identifier is really gone.
 func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
 	delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
 	for k := range m.podStateSeeded {

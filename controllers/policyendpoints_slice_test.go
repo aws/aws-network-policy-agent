@@ -1,11 +1,20 @@
 package controllers
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // The namespaced path mirrors the cluster path: one NetworkPolicy is bin-packed across
@@ -379,55 +388,59 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 	t.Run("losing one direction's rules during cleanup re-adds that direction's allow-all", func(t *testing.T) {
 		for _, tc := range []struct {
 			name      string
-			remaining sliceSpec
-			emptied   func(*peFixture) []string
+			survivor  sliceSpec
+			emptied   func(*peFixture, string) []string
+			remaining func(*peFixture, string) []string
 		}{
 			{
 				name:      "egress emptied",
-				remaining: sliceSpec{name: "np-1-aaaaa", parent: "np-1", ingress: []ruleRef{allow("192.168.90.1/32")}},
-				emptied:   func(fx *peFixture) []string { return fx.egressCIDRs(identifierOf("nginx-aaa")) },
+				survivor:  sliceSpec{name: "np-2-aaaaa", parent: "np-2", ingress: []ruleRef{allow("192.168.90.9/32")}},
+				emptied:   (*peFixture).egressCIDRs,
+				remaining: (*peFixture).ingressCIDRs,
 			},
 			{
 				name:      "ingress emptied",
-				remaining: sliceSpec{name: "np-1-aaaaa", parent: "np-1", egress: []ruleRef{allow("10.0.0.0/8")}},
-				emptied:   func(fx *peFixture) []string { return fx.ingressCIDRs(identifierOf("nginx-aaa")) },
+				survivor:  sliceSpec{name: "np-2-aaaaa", parent: "np-2", egress: []ruleRef{allow("192.168.91.9/32")}},
+				emptied:   (*peFixture).ingressCIDRs,
+				remaining: (*peFixture).egressCIDRs,
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				nginx := identifierOf("nginx-aaa")
+				pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
+
+				survivor := tc.survivor
+				survivor.pods = pods
 				fx := newPEFixture(t)
 				fx.setSlices(
-					sliceSpec{name: "np-1-aaaaa", parent: "np-1",
-						pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), localPod("nginx-bbb", "10.1.1.2")},
+					sliceSpec{name: "np-1-aaaaa", parent: "np-1", pods: pods,
 						ingress: []ruleRef{allow("192.168.90.1/32")},
 						egress:  []ruleRef{allow("10.0.0.0/8")}},
-					// A second parent keeps the identifier's map entry alive through cleanup, so
-					// cleanupPod takes its re-derive branch rather than clearing everything.
-					sliceSpec{name: "np-2-aaaaa", parent: "np-2",
-						pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), localPod("nginx-bbb", "10.1.1.2")},
-						ingress: []ruleRef{allow("192.168.90.9/32")},
-						egress:  []ruleRef{allow("192.168.91.9/32")}},
+					survivor,
 				)
 				fx.reconcileAll()
 				fx.reset()
 
-				remaining := tc.remaining
-				remaining.pods = []podRef{localPod("nginx-bbb", "10.1.1.2")}
-				fx.setSlices(remaining, sliceSpec{name: "np-2-aaaaa", parent: "np-2",
-					pods: []podRef{localPod("nginx-bbb", "10.1.1.2")}})
+				// np-1 stops selecting the pod, so cleanup runs for the identifier. np-2 still
+				// names it, so cleanup re-derives from np-2 rather than clearing everything --
+				// and np-2 supplies only one direction.
+				fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+					ingress: []ruleRef{allow("192.168.90.1/32")}}, survivor)
 				require.NoError(t, fx.reconcile("np-1-aaaaa"))
 
 				state, ok := fx.podState(nginx)
 				require.True(t, ok)
 				require.Equal(t, ebpf.POLICIES_APPLIED, state,
 					"the identifier is still selected, so the datapath consults its maps")
-				assert.Contains(t, tc.emptied(fx), "0.0.0.0/0",
-					"a direction left with no rules while POLICIES_APPLIED must get an allow-all")
+				assert.NotEmpty(t, tc.remaining(fx, nginx), "the surviving direction keeps its rules")
+				assert.Contains(t, tc.emptied(fx, nginx), "0.0.0.0/0",
+					"a direction left with no rules while POLICIES_APPLIED must get an allow-all, "+
+						"or the datapath drops all of that direction's traffic")
 			})
 		}
 	})
 
-	t.Run("a policy cannot claim a same-named slice from another namespace", func(t *testing.T) {
+	t.Run("a policy cannot claim a same-named policy's slice from another namespace", func(t *testing.T) {
 		here, there := identifierOf("nginx-aaa"), identifierIn("nginx-aaa", "other-ns")
 		fx := newPEFixture(t)
 		fx.setSlices(
@@ -447,6 +460,10 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 			"reconciling one namespace must not program another's identifier")
 		assert.ElementsMatch(t, []string{"np-1-aaaaa"}, fx.identifierSlices(here),
 			"a same-named policy in another namespace is not a sibling and must not be recorded as one")
+		_, crossNamespace := fx.r.policyEndpointSelectorMap.Load(
+			utils.GetPolicyEndpointIdentifier("np-1-bbbbb", fixtureNamespace))
+		assert.False(t, crossNamespace,
+			"the foreign slice must not gain a selector entry keyed to this namespace")
 	})
 
 	t.Run("a de-selected identifier falls back to the mode's default state", func(t *testing.T) {
@@ -644,4 +661,50 @@ func TestPolicySlices_RestartReconstruction(t *testing.T) {
 
 	assert.ElementsMatch(t, want, after.ingressCIDRs(nginx),
 		"a restarted agent must rebuild the same rules from the same slices")
+}
+
+// The cluster path surfaces a List failure so controller-runtime requeues, because an
+// empty result is otherwise indistinguishable from "no slices left" and would clear rules.
+// The namespaced path swallows it instead, and this records what that costs.
+func TestPolicySlices_TransientListError(t *testing.T) {
+	t.Skip("known defect: derivePolicyEndpointsOfParentNP logs the List error and returns nil, so " +
+		"reconcile reports success and nothing requeues, after deriveTargetPodsForParentNP has " +
+		"already deleted the policy's bookkeeping. The cluster twin returns the error instead")
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_client.NewMockClient(ctrl)
+	mockBpf := &ebpf.MockBpfClient{}
+	reconciler := NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, mockBpf, false)
+
+	nginx := identifierOf("nginx-aaa")
+	peName := "np-1-aaaaa"
+
+	reconciler.podIdentifierToPolicyEndpointMap.Store(nginx, []string{peName})
+	reconciler.networkPolicyToPodIdentifierMap.Store("np-1", []string{nginx})
+	reconciler.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(peName, fixtureNamespace),
+		[]npatypes.Pod{{
+			NamespacedName: types.NamespacedName{Name: "nginx-aaa", Namespace: fixtureNamespace},
+			PodIP:          "10.1.1.1",
+		}})
+
+	listErr := errors.New("etcdserver: request timed out")
+	mockClient.EXPECT().
+		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).
+		Return(listErr).AnyTimes()
+
+	pe := &policyk8sawsv1.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: peName, Namespace: fixtureNamespace},
+		Spec: policyk8sawsv1.PolicyEndpointSpec{
+			PolicyRef: policyk8sawsv1.PolicyReference{Name: "np-1", Namespace: fixtureNamespace},
+			Ingress:   []policyk8sawsv1.EndpointInfo{{CIDR: "192.168.90.1/32"}},
+		},
+	}
+
+	err := reconciler.reconcilePolicyEndpoint(context.TODO(), pe)
+	assert.ErrorIs(t, err, listErr, "reconcile must surface a List failure so the request requeues")
+
+	_, tracked := reconciler.networkPolicyToPodIdentifierMap.Load("np-1")
+	assert.True(t, tracked, "the policy's bookkeeping must survive a transient List failure")
 }
