@@ -45,8 +45,7 @@ type MockBpfClient struct {
 
 	// podIdentifiers whose probes are detached. Empty by default so HasBPFContext reports
 	// true, preserving the original success-path behavior. Also fails every map write for
-	// that identifier, the way the real client's context lookup does. AttacheBPFProbes does
-	// not clear it, so a test that re-attaches must do so itself.
+	// that identifier, the way the real client's context lookup does.
 	PodIdentifiersWithoutBPFContext map[string]bool
 
 	// Empty means "standard", preserving the original behavior.
@@ -104,7 +103,25 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
 	m.CallLog = append(m.CallLog, "DeleteBPFProbes")
+	m.ForgetIdentifier(podIdentifier)
 	return nil
+}
+
+// ForgetIdentifier drops everything the mock holds for an identifier, modelling
+// deleteBPFProbes destroying its maps once the last local pod leaves. Tests that detach
+// probes directly call this to undo it.
+func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
+	delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
+	for k := range m.podStateSeeded {
+		if k.PodIdentifier == podIdentifier {
+			delete(m.podStateSeeded, k)
+		}
+	}
+	for k := range m.PodStateByIdentifier {
+		if k.PodIdentifier == podIdentifier {
+			delete(m.PodStateByIdentifier, k)
+		}
+	}
 }
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {

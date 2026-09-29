@@ -244,6 +244,17 @@ func (fx *cpeFixture) identifierSlices(podIdentifier string) []string {
 	return v.([]string)
 }
 
+// parentIdentifiers reports the identifiers the reconciler believes the parent policy
+// still selects locally. An empty slice and a deleted policy both clear the eBPF rules, so
+// this is what distinguishes them.
+func (fx *cpeFixture) parentIdentifiers(parent string) ([]string, bool) {
+	v, ok := fx.r.clusterNetworkPolicyToPodIdentifierMap.Load(parent)
+	if !ok {
+		return nil, false
+	}
+	return v.([]string), true
+}
+
 func (fx *cpeFixture) reconcile(name string) error {
 	cpe := fx.store[name]
 	return fx.r.reconcileClusterPolicyEndpoint(context.TODO(), &cpe)
@@ -310,9 +321,9 @@ func assertNoContextError(t *testing.T, err error) {
 	if err == nil {
 		return
 	}
-	require.NotContains(t, err.Error(), "no bpf context registered",
+	assert.NotContains(t, err.Error(), "no bpf context registered",
 		"cleanup of an identifier with detached probes must be a no-op, not an error")
-	require.NoError(t, err, "unexpected reconcile error")
+	assert.NoError(t, err, "unexpected reconcile error")
 }
 
 func (fx *cpeFixture) assertIdentifierAbsent(podIdentifier string) {
@@ -326,10 +337,13 @@ func (fx *cpeFixture) assertIdentifierAbsent(podIdentifier string) {
 // ---------------------------------------------------------------------------
 
 type peFixture struct {
-	t     *testing.T
-	r     *PolicyEndpointsReconciler
-	bpf   *ebpf.MockBpfClient
-	store map[string]policyk8sawsv1.PolicyEndpoint
+	t   *testing.T
+	r   *PolicyEndpointsReconciler
+	bpf *ebpf.MockBpfClient
+	// store is the API server's contents; sliceNamespaces outlives it so a slice's
+	// namespace is still resolvable after deleteSlice removes the object.
+	store           map[string]policyk8sawsv1.PolicyEndpoint
+	sliceNamespaces map[string]string
 }
 
 func newPEFixture(t *testing.T) *peFixture {
@@ -339,17 +353,26 @@ func newPEFixture(t *testing.T) *peFixture {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	fx := &peFixture{
-		t:     t,
-		bpf:   &ebpf.MockBpfClient{},
-		store: map[string]policyk8sawsv1.PolicyEndpoint{},
+		t:               t,
+		bpf:             &ebpf.MockBpfClient{},
+		store:           map[string]policyk8sawsv1.PolicyEndpoint{},
+		sliceNamespaces: map[string]string{},
 	}
 	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).
-		DoAndReturn(func(_ context.Context, list *policyk8sawsv1.PolicyEndpointList, _ ...client.ListOption) error {
+		DoAndReturn(func(_ context.Context, list *policyk8sawsv1.PolicyEndpointList, opts ...client.ListOption) error {
+			listOpts := &client.ListOptions{}
+			for _, o := range opts {
+				o.ApplyToList(listOpts)
+			}
 			list.Items = nil
-			for _, pe := range fx.store {
+			for _, name := range fx.sliceNames() {
+				pe := fx.store[name]
+				if listOpts.Namespace != "" && pe.Namespace != listOpts.Namespace {
+					continue
+				}
 				list.Items = append(list.Items, pe)
 			}
 			return nil
@@ -359,7 +382,7 @@ func newPEFixture(t *testing.T) *peFixture {
 		Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpoint{}), gomock.Any()).
 		DoAndReturn(func(_ context.Context, key types.NamespacedName, obj *policyk8sawsv1.PolicyEndpoint, _ ...client.GetOption) error {
 			pe, ok := fx.store[key.Name]
-			if !ok {
+			if !ok || pe.Namespace != key.Namespace {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, key.Name)
 			}
 			*obj = pe
@@ -372,6 +395,7 @@ func newPEFixture(t *testing.T) *peFixture {
 func (fx *peFixture) setSlices(specs ...sliceSpec) {
 	fx.store = map[string]policyk8sawsv1.PolicyEndpoint{}
 	for _, s := range specs {
+		fx.sliceNamespaces[s.name] = s.namespaceOrDefault()
 		ingress := make([]policyk8sawsv1.EndpointInfo, 0, len(s.ingress))
 		for _, r := range s.ingress {
 			ingress = append(ingress, policyk8sawsv1.EndpointInfo{CIDR: policyk8sawsv1.NetworkAddress(r.cidr)})
@@ -381,9 +405,9 @@ func (fx *peFixture) setSlices(specs ...sliceSpec) {
 			egress = append(egress, policyk8sawsv1.EndpointInfo{CIDR: policyk8sawsv1.NetworkAddress(r.cidr)})
 		}
 		fx.store[s.name] = policyk8sawsv1.PolicyEndpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: s.name, Namespace: fixtureNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: s.name, Namespace: s.namespaceOrDefault()},
 			Spec: policyk8sawsv1.PolicyEndpointSpec{
-				PolicyRef:            policyk8sawsv1.PolicyReference{Name: s.parent, Namespace: fixtureNamespace},
+				PolicyRef:            policyk8sawsv1.PolicyReference{Name: s.parent, Namespace: s.namespaceOrDefault()},
 				PodSelectorEndpoints: s.podEndpoints(),
 				Ingress:              ingress,
 				Egress:               egress,
@@ -412,6 +436,14 @@ func (fx *peFixture) sliceNames() []string {
 	return names
 }
 
+func (fx *peFixture) identifierSlices(podIdentifier string) []string {
+	v, ok := fx.r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+	if !ok {
+		return nil
+	}
+	return v.([]string)
+}
+
 // assertRulesCleared requires an actual map write with an empty rule set, since an absent
 // key means nothing was written at all.
 func (fx *peFixture) assertRulesCleared(podIdentifier string) {
@@ -428,8 +460,13 @@ func (fx *peFixture) reconcile(name string) error {
 
 func (fx *peFixture) reconcileDeleted(name string) error {
 	return fx.r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: fixtureNamespace},
+		NamespacedName: types.NamespacedName{Name: name, Namespace: fx.sliceNamespaces[name]},
 	})
+}
+
+// identifierIn is the identifier for a pod in a namespace other than the fixture default.
+func identifierIn(podName, namespace string) string {
+	return utils.GetPodIdentifier(podName, namespace)
 }
 
 func (fx *peFixture) detachContext(podIdentifiers ...string) {
