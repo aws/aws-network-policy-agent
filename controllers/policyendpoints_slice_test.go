@@ -13,7 +13,9 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -693,6 +695,13 @@ func TestPolicySlices_TransientListError(t *testing.T) {
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).
 		Return(listErr).AnyTimes()
+
+	// With the List failed the parent looks sliceless, so cleanup runs for the seeded pod and
+	// re-derives its rules, which Gets the slice. Stub it so removing the skip fails at the
+	// assertions below rather than on missing mock plumbing.
+	mockClient.EXPECT().
+		Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpoint{}), gomock.Any()).
+		Return(apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, peName)).AnyTimes()
 
 	pe := &policyk8sawsv1.PolicyEndpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: peName, Namespace: fixtureNamespace},
