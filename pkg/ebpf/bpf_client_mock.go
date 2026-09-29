@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"fmt"
 	"sync"
 
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
@@ -45,6 +46,48 @@ type MockBpfClient struct {
 	// podIdentifiers with no registered eBPF context. Empty by default so HasBPFContext
 	// reports true, preserving the original success-path behavior.
 	PodIdentifiersWithoutBPFContext map[string]bool
+
+	// Empty means "standard", preserving the original behavior.
+	NetworkPolicyMode string
+
+	// Per-identifier call records. The Last* fields above retain only the most recent
+	// call, which cannot distinguish outcomes when one reconcile programs several
+	// identifiers.
+	ClusterPolicyIngressByIdentifier map[string][]fwrp.EbpfFirewallRules
+	ClusterPolicyEgressByIdentifier  map[string][]fwrp.EbpfFirewallRules
+	IngressByIdentifier              map[string][]fwrp.EbpfFirewallRules
+	EgressByIdentifier               map[string][]fwrp.EbpfFirewallRules
+	PodStateByIdentifier             map[PodStateKey]int
+}
+
+// PodStateKey identifies one entry of the pod-state map. POD_STATE_MAP_KEY holds the
+// namespaced-policy verdict and CLUSTER_POLICY_POD_STATE_MAP_KEY the cluster-policy one,
+// so one identifier has an independent state under each.
+type PodStateKey struct {
+	PodIdentifier string
+	MapKey        int
+}
+
+// Reset clears every recorded call so a test can establish steady state through a first
+// reconcile and then assert only on what a later reconcile did.
+func (m *MockBpfClient) Reset() {
+	m.CallLog = nil
+	m.LastIngressRules = nil
+	m.LastEgressRules = nil
+	m.LastClusterPolicyIngressRules = nil
+	m.LastClusterPolicyEgressRules = nil
+	m.ClusterPolicyIngressByIdentifier = nil
+	m.ClusterPolicyEgressByIdentifier = nil
+	m.IngressByIdentifier = nil
+	m.EgressByIdentifier = nil
+	m.PodStateByIdentifier = nil
+}
+
+func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string, rules []fwrp.EbpfFirewallRules) {
+	if *dst == nil {
+		*dst = map[string][]fwrp.EbpfFirewallRules{}
+	}
+	(*dst)[podIdentifier] = rules
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -59,20 +102,34 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
+	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
 	m.LastIngressRules = ingressFirewallRules
 	m.LastEgressRules = egressFirewallRules
+	recordRules(&m.IngressByIdentifier, podIdentifier, ingressFirewallRules)
+	recordRules(&m.EgressByIdentifier, podIdentifier, egressFirewallRules)
 	return m.UpdateEbpfMapsErr
 }
 
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateClusterPolicyEbpfMaps")
+	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
 	m.LastClusterPolicyIngressRules = ingressFirewallRules
 	m.LastClusterPolicyEgressRules = egressFirewallRules
+	recordRules(&m.ClusterPolicyIngressByIdentifier, podIdentifier, ingressFirewallRules)
+	recordRules(&m.ClusterPolicyEgressByIdentifier, podIdentifier, egressFirewallRules)
 	return m.UpdateClusterPolicyEbpfMapsErr
 }
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
+	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
+	m.recordPodState(podIdentifier, key, state)
 	return m.UpdatePodStateEbpfMapsErr
 }
 
@@ -87,11 +144,20 @@ func (m *MockBpfClient) ReAttachEbpfProbes() error {
 }
 
 func (m *MockBpfClient) GetNetworkPolicyMode() string {
-	return "standard"
+	if m.NetworkPolicyMode == "" {
+		return "standard"
+	}
+	return m.NetworkPolicyMode
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
 	m.CallLog = append(m.CallLog, "CreatePodStateEbpfEntryIfNotExists")
+	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
+	if _, seeded := m.PodStateByIdentifier[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}]; !seeded {
+		m.recordPodState(podIdentifier, key, state)
+	}
 	return m.CreatePodStateEbpfEntryIfNotExistsErr
 }
 
@@ -101,4 +167,21 @@ func (m *MockBpfClient) ClearDeletedPod(podNamespacedName string) {
 
 func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {
 	return !m.PodIdentifiersWithoutBPFContext[podIdentifier]
+}
+
+func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int) {
+	if m.PodStateByIdentifier == nil {
+		m.PodStateByIdentifier = map[PodStateKey]int{}
+	}
+	m.PodStateByIdentifier[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] = state
+}
+
+// contextErr mirrors the real client: every map write first loads the identifier's BPF
+// context and fails if the probes have already been detached. Without this the mock is
+// more forgiving than production and cannot reproduce cleanup failures.
+func (m *MockBpfClient) contextErr(podIdentifier string) error {
+	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
+		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
+	}
+	return nil
 }
