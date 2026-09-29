@@ -16,25 +16,29 @@ import (
 func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
-	t.Run("pods split across slices are all programmed", func(t *testing.T) {
+	t.Run("distinct identifiers in sibling slices are each programmed", func(t *testing.T) {
+		web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
 		fx := newCPEFixture(t)
 		fx.setSlices(
 			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 10,
-				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+				pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
 				ingress: []ruleRef{deny("192.168.90.1/32")}},
 			sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 10,
-				pods:    []podRef{localPod("nginx-bbb", "10.1.1.2")},
+				pods:    []podRef{localPod("api-aaa", "10.1.1.2")},
 				ingress: []ruleRef{deny("192.168.90.2/32")}},
 		)
 
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"},
-			fx.clusterPolicyCIDRs(nginx),
-			"rules from every slice of the parent must reach the identifier's map")
-		state, ok := fx.clusterPolicyState(nginx)
-		require.True(t, ok)
-		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+		for _, id := range []string{web, api} {
+			assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"},
+				fx.clusterPolicyRules(id),
+				"rules from every slice of the parent must reach each identifier the parent selects")
+			assert.Equal(t, []int{10, 10}, fx.clusterPolicyPriorities(id))
+			state, ok := fx.clusterPolicyState(id)
+			require.True(t, ok, "identifier %s must be programmed", id)
+			assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+		}
 	})
 
 	t.Run("ingress and egress rules split across slices are unioned", func(t *testing.T) {
@@ -51,8 +55,8 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"}, fx.clusterPolicyCIDRs(nginx))
-		assert.ElementsMatch(t, []string{"10.0.0.0/8", "172.16.0.0/12"}, fx.clusterPolicyEgressCIDRs(nginx))
+		assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"}, fx.clusterPolicyRules(nginx))
+		assert.ElementsMatch(t, []string{"Deny 10.0.0.0/8", "Deny 172.16.0.0/12"}, fx.clusterPolicyEgressRules(nginx))
 	})
 
 	t.Run("a slice carrying only rules still applies to pods named by a sibling slice", func(t *testing.T) {
@@ -66,7 +70,7 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
 
-		assert.Equal(t, []string{"192.168.90.1/32"}, fx.clusterPolicyCIDRs(nginx),
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx),
 			"pods and the rules that govern them can be packed into different slices")
 	})
 
@@ -85,8 +89,8 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 		require.NoError(t, fx.reconcile("cnp-2-aaaaa"))
 
-		assert.Equal(t, []string{"192.168.90.1/32"}, fx.clusterPolicyCIDRs(web))
-		assert.Equal(t, []string{"192.168.90.2/32"}, fx.clusterPolicyCIDRs(api))
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(web))
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(api))
 	})
 
 	t.Run("remote pods in a slice are not programmed locally", func(t *testing.T) {
@@ -114,8 +118,9 @@ func TestClusterPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		fx.reconcileAll()
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"},
-			fx.clusterPolicyCIDRs(nginx))
+		assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Accept 192.168.90.2/32"},
+			fx.clusterPolicyRules(nginx),
+			"a Deny and an Accept from different parents must stay distinguishable")
 	})
 
 	t.Run("admin and baseline tiers in different slices both reach the map", func(t *testing.T) {
@@ -163,8 +168,8 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 		)
 		require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"},
-			fx.clusterPolicyCIDRs(nginx))
+		assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"},
+			fx.clusterPolicyRules(nginx))
 	})
 
 	t.Run("a second parent policy selecting the identifier adds its rules", func(t *testing.T) {
@@ -185,8 +190,8 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 		)
 		require.NoError(t, fx.reconcile("cnp-2-aaaaa"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"},
-			fx.clusterPolicyCIDRs(nginx))
+		assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"},
+			fx.clusterPolicyRules(nginx))
 	})
 
 	t.Run("dropping a rule from one slice leaves the sibling slice's rules", func(t *testing.T) {
@@ -209,7 +214,7 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 		)
 		require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
 
-		assert.Equal(t, []string{"192.168.90.1/32"}, fx.clusterPolicyCIDRs(nginx))
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx))
 	})
 
 	t.Run("a pod repacked into a sibling slice is not treated as departed", func(t *testing.T) {
@@ -236,7 +241,7 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 		state, ok := fx.clusterPolicyState(nginx)
 		require.True(t, ok, "the migrating identifier must still be programmed")
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
-		assert.Equal(t, []string{"192.168.90.1/32"}, fx.clusterPolicyCIDRs(nginx))
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx))
 	})
 
 	t.Run("reconciling unchanged slices repeatedly is idempotent", func(t *testing.T) {
@@ -249,12 +254,12 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 				ingress: []ruleRef{deny("192.168.90.2/32")}},
 		)
 		fx.reconcileAll()
-		first := fx.clusterPolicyCIDRs(nginx)
+		first := fx.clusterPolicyRules(nginx)
 
 		fx.reset()
 		fx.reconcileAll()
 
-		assert.ElementsMatch(t, first, fx.clusterPolicyCIDRs(nginx))
+		assert.ElementsMatch(t, first, fx.clusterPolicyRules(nginx))
 		state, ok := fx.clusterPolicyState(nginx)
 		require.True(t, ok)
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
@@ -301,7 +306,7 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		assert.Equal(t, []string{"192.168.90.1/32"}, fx.clusterPolicyCIDRs(nginx),
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx),
 			"pods of one identifier share an eBPF program set, so a surviving replica keeps it")
 	})
 
@@ -318,13 +323,14 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		fx.detachContext(nginx)
 
-		fx.assertNoContextErrors(fx.reconcile("cnp-1-aaaaa"))
+		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
 	})
 
 	t.Run("last local pod leaving with two parent policies does not wedge the reconcile", func(t *testing.T) {
-		t.Skip("known defect: cleanupClusterPolicyPod guards only its no-siblings branch, so a " +
-			"sibling parent keeps the identifier entry alive and the map write fails on a detached " +
-			"context; the error returns above commitClusterPolicyEndpointState and the programming loop")
+		t.Skip("known defect: cleanupClusterPolicyPod guards only its no-siblings branch, so any name " +
+			"the scrub does not cover keeps the identifier entry alive and the map write fails on a " +
+			"detached context. The error returns above commitClusterPolicyEndpointState and the " +
+			"programming loop, so the stale set is re-derived and the reconcile cannot make progress")
 		other := identifierOf("other-aaa")
 		fx := newCPEFixture(t)
 		fx.setSlices(
@@ -350,7 +356,7 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		)
 		fx.detachContext(nginx)
 
-		fx.assertNoContextErrors(fx.reconcile("cnp-1-aaaaa"))
+		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
 
 		state, ok := fx.clusterPolicyState(other)
 		require.True(t, ok, "a newly scheduled workload must be programmed, not left unenforced")
@@ -369,7 +375,7 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		assert.Empty(t, fx.clusterPolicyCIDRs(nginx), "stale rules must not survive de-selection")
+		fx.assertClusterPolicyRulesCleared(nginx)
 		state, ok := fx.clusterPolicyState(nginx)
 		require.True(t, ok, "the identifier's pod state must be reset, not left at POLICIES_APPLIED")
 		assert.Equal(t, ebpf.DEFAULT_ALLOW, state)
@@ -388,8 +394,57 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1"})
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		assert.Empty(t, fx.clusterPolicyCIDRs(nginx))
+		fx.assertClusterPolicyRulesCleared(nginx)
 		fx.assertIdentifierAbsent(nginx)
+	})
+
+	t.Run("last local pod leaving with one parent sliced in two does not wedge the reconcile", func(t *testing.T) {
+		t.Skip("known defect: the scrub removes only the slices this parent currently has, so a " +
+			"slice already gone from the API server leaves its name behind and the identifier takes " +
+			"the unguarded branch. One parent policy is enough; a second is not required")
+
+		other := identifierOf("other-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), remotePod("nginx-bbb", "10.2.2.2")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1",
+				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), remotePod("nginx-bbb", "10.2.2.2")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+		fx.reset()
+
+		// Slice bbbbb is gone but its delete event has not been processed, so its name is
+		// still recorded against the identifier while no longer appearing in parentCPEList.
+		fx.deleteSlice("cnp-1-bbbbb")
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{remotePod("nginx-bbb", "10.2.2.2"), localPod("other-aaa", "10.1.1.9")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.detachContext(nginx)
+
+		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		state, ok := fx.clusterPolicyState(other)
+		require.True(t, ok, "a newly scheduled workload must be programmed, not left unenforced")
+		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	})
+
+	t.Run("one identifier failing does not stop another from being programmed", func(t *testing.T) {
+		web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("web-aaa", "10.1.1.1"), localPod("api-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.detachContext(web)
+
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web)
+		state, ok := fx.clusterPolicyState(api)
+		require.True(t, ok, "a programming failure on one identifier must not skip the rest")
+		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
 	})
 
 	t.Run("draining every identifier from the node does not error", func(t *testing.T) {
@@ -404,30 +459,42 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		fx.detachContext(identifierOf("web-aaa"), identifierOf("api-aaa"))
 
-		fx.assertNoContextErrors(fx.reconcile("cnp-1-aaaaa"))
+		assertNoContextError(t, fx.reconcile("cnp-1-aaaaa"))
 	})
 
-	t.Run("strict mode leaves a de-selected identifier default-deny", func(t *testing.T) {
-		fx := newCPEFixture(t)
-		fx.bpf.NetworkPolicyMode = "strict"
-		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
-			pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
-			ingress: []ruleRef{deny("192.168.90.1/32")}})
-		fx.reconcileAll()
-		fx.reset()
+	t.Run("the namespaced default state a cluster policy seeds follows the enforcing mode", func(t *testing.T) {
+		for _, tc := range []struct {
+			mode string
+			want int
+		}{
+			{mode: "standard", want: ebpf.DEFAULT_ALLOW},
+			{mode: "strict", want: ebpf.DEFAULT_DENY},
+		} {
+			t.Run(tc.mode, func(t *testing.T) {
+				fx := newCPEFixture(t)
+				fx.bpf.NetworkPolicyMode = tc.mode
+				fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+					pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+					ingress: []ruleRef{deny("192.168.90.1/32")}})
 
-		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
-			ingress: []ruleRef{deny("192.168.90.1/32")}})
-		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+				require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
-		// Cluster policies have no default-deny of their own; the namespaced tier carries
-		// the mode, so its seeded state is what differs from standard mode.
-		state, ok := fx.bpf.PodStateByIdentifier[ebpf.PodStateKey{
-			PodIdentifier: nginx, MapKey: ebpf.POD_STATE_MAP_KEY,
-		}]
-		require.True(t, ok)
-		assert.Equal(t, ebpf.DEFAULT_DENY, state)
+				// Cluster policies have no default-deny of their own, so programming one seeds
+				// the namespaced tier's default from the mode and leaves the cluster tier applied.
+				state, ok := fx.bpf.PodStateByIdentifier[ebpf.PodStateKey{
+					PodIdentifier: nginx, MapKey: ebpf.POD_STATE_MAP_KEY,
+				}]
+				require.True(t, ok, "programming must seed the namespaced pod state")
+				assert.Equal(t, tc.want, state)
+
+				clusterState, ok := fx.clusterPolicyState(nginx)
+				require.True(t, ok)
+				assert.Equal(t, ebpf.POLICIES_APPLIED, clusterState,
+					"the cluster tier is applied regardless of mode")
+			})
+		}
 	})
+
 }
 
 // Slice deletion: a deleted slice must stop contributing rules without disturbing the
@@ -452,7 +519,7 @@ func TestClusterPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("cnp-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 
-		assert.Equal(t, []string{"192.168.90.2/32"}, fx.clusterPolicyCIDRs(nginx),
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(nginx),
 			"the surviving slice's rules must be retained")
 	})
 
@@ -472,7 +539,7 @@ func TestClusterPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("cnp-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 
-		assert.Equal(t, []string{"192.168.90.2/32"}, fx.clusterPolicyCIDRs(nginx))
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(nginx))
 	})
 
 	t.Run("deleting the identifier's only slice clears its rules", func(t *testing.T) {
@@ -486,7 +553,7 @@ func TestClusterPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("cnp-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 
-		assert.Empty(t, fx.clusterPolicyCIDRs(nginx))
+		fx.assertClusterPolicyRulesCleared(nginx)
 		fx.assertIdentifierAbsent(nginx)
 	})
 
@@ -506,7 +573,7 @@ func TestClusterPolicySlices_SliceDeletion(t *testing.T) {
 		fx.detachContext(nginx)
 
 		fx.deleteSlice("cnp-1-aaaaa")
-		fx.assertNoContextErrors(fx.reconcileDeleted("cnp-1-aaaaa"))
+		assertNoContextError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 	})
 
 	t.Run("deleting one slice of a long-named parent keeps sibling rules", func(t *testing.T) {
@@ -535,7 +602,7 @@ func TestClusterPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice(deleted)
 		require.NoError(t, fx.reconcileDeleted(deleted))
 
-		assert.Equal(t, []string{"192.168.90.2/32"}, fx.clusterPolicyCIDRs(nginx),
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(nginx),
 			"a truncated slice name must not cost the surviving sibling its rules")
 	})
 
@@ -583,13 +650,13 @@ func TestClusterPolicySlices_RestartReconstruction(t *testing.T) {
 	before := newCPEFixture(t)
 	before.setSlices(slices...)
 	before.reconcileAll()
-	want := before.clusterPolicyCIDRs(nginx)
+	want := before.clusterPolicyRules(nginx)
 	require.NotEmpty(t, want)
 
 	after := newCPEFixture(t)
 	after.setSlices(slices...)
 	after.reconcileAll()
 
-	assert.ElementsMatch(t, want, after.clusterPolicyCIDRs(nginx),
+	assert.ElementsMatch(t, want, after.clusterPolicyRules(nginx),
 		"a restarted agent must rebuild the same rules from the same slices")
 }

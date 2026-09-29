@@ -43,8 +43,10 @@ type MockBpfClient struct {
 	LastClusterPolicyIngressRules []fwrp.EbpfFirewallRules
 	LastClusterPolicyEgressRules  []fwrp.EbpfFirewallRules
 
-	// podIdentifiers with no registered eBPF context. Empty by default so HasBPFContext
-	// reports true, preserving the original success-path behavior.
+	// podIdentifiers whose probes are detached. Empty by default so HasBPFContext reports
+	// true, preserving the original success-path behavior. Also fails every map write for
+	// that identifier, the way the real client's context lookup does. AttacheBPFProbes does
+	// not clear it, so a test that re-attaches must do so itself.
 	PodIdentifiersWithoutBPFContext map[string]bool
 
 	// Empty means "standard", preserving the original behavior.
@@ -58,6 +60,11 @@ type MockBpfClient struct {
 	IngressByIdentifier              map[string][]fwrp.EbpfFirewallRules
 	EgressByIdentifier               map[string][]fwrp.EbpfFirewallRules
 	PodStateByIdentifier             map[PodStateKey]int
+
+	// Entries the eBPF map already holds, which survive Reset because they model map
+	// contents rather than recorded calls. CreatePodStateEbpfEntryIfNotExists uses
+	// BPF_NOEXIST, so it must not overwrite one.
+	podStateSeeded map[PodStateKey]bool
 }
 
 // PodStateKey identifies one entry of the pod-state map. POD_STATE_MAP_KEY holds the
@@ -155,7 +162,7 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
-	if _, seeded := m.PodStateByIdentifier[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}]; !seeded {
+	if !m.podStateSeeded[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] {
 		m.recordPodState(podIdentifier, key, state)
 	}
 	return m.CreatePodStateEbpfEntryIfNotExistsErr
@@ -173,12 +180,17 @@ func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int)
 	if m.PodStateByIdentifier == nil {
 		m.PodStateByIdentifier = map[PodStateKey]int{}
 	}
-	m.PodStateByIdentifier[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] = state
+	if m.podStateSeeded == nil {
+		m.podStateSeeded = map[PodStateKey]bool{}
+	}
+	k := PodStateKey{PodIdentifier: podIdentifier, MapKey: key}
+	m.PodStateByIdentifier[k] = state
+	m.podStateSeeded[k] = true
 }
 
-// contextErr mirrors the real client: every map write first loads the identifier's BPF
-// context and fails if the probes have already been detached. Without this the mock is
-// more forgiving than production and cannot reproduce cleanup failures.
+// contextErr reproduces the real client's context lookup, which every map write performs
+// before touching a map and which fails once the probes are detached. Without it the mock
+// is more forgiving than production and cannot reproduce cleanup failures.
 func (m *MockBpfClient) contextErr(podIdentifier string) error {
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
