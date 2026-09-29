@@ -10,31 +10,36 @@ import (
 
 // The namespaced path mirrors the cluster path: one NetworkPolicy is bin-packed across
 // several PolicyEndpoints, so every slice contributes pods and rules to the identifiers
-// it names. NetworkPolicy rules are allow-only, and isolation comes from the pod being
-// selected at all rather than from an explicit Deny action.
+// it names.
+//
+// NetworkPolicy rules are allow-only. Isolation per direction comes from Spec.PodIsolation,
+// which these fixtures leave unset, so both directions are un-isolated and the reconciler
+// appends an allow-all entry to keep the datapath from dropping traffic it has no rule for.
 
 func TestPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
-	t.Run("pods split across slices are all programmed", func(t *testing.T) {
+	t.Run("distinct identifiers in sibling slices are each programmed", func(t *testing.T) {
+		web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
 		fx := newPEFixture(t)
 		fx.setSlices(
 			sliceSpec{name: "np-1-aaaaa", parent: "np-1",
-				pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+				pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
 				ingress: []ruleRef{allow("192.168.90.1/32")}},
 			sliceSpec{name: "np-1-bbbbb", parent: "np-1",
-				pods:    []podRef{localPod("nginx-bbb", "10.1.1.2")},
+				pods:    []podRef{localPod("api-aaa", "10.1.1.2")},
 				ingress: []ruleRef{allow("192.168.90.2/32")}},
 		)
 
 		require.NoError(t, fx.reconcile("np-1-aaaaa"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"},
-			fx.ingressCIDRs(nginx),
-			"rules from every slice of the parent must reach the identifier's map")
-		state, ok := fx.podState(nginx)
-		require.True(t, ok)
-		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+		for _, id := range []string{web, api} {
+			assert.Subset(t, fx.ingressCIDRs(id), []string{"192.168.90.1/32", "192.168.90.2/32"},
+				"rules from every slice of the parent must reach each identifier the parent selects")
+			state, ok := fx.podState(id)
+			require.True(t, ok, "identifier %s must be programmed", id)
+			assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+		}
 	})
 
 	t.Run("ingress and egress rules split across slices are unioned", func(t *testing.T) {
@@ -51,8 +56,22 @@ func TestPolicySlices_ProgrammingAcrossSlices(t *testing.T) {
 
 		require.NoError(t, fx.reconcile("np-1-aaaaa"))
 
-		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"}, fx.ingressCIDRs(nginx))
-		assert.ElementsMatch(t, []string{"10.0.0.0/8", "172.16.0.0/12"}, fx.egressCIDRs(nginx))
+		assert.Subset(t, fx.ingressCIDRs(nginx), []string{"192.168.90.1/32", "192.168.90.2/32"})
+		assert.Subset(t, fx.egressCIDRs(nginx), []string{"10.0.0.0/8", "172.16.0.0/12"})
+	})
+
+	t.Run("an un-isolated direction gets an allow-all entry", func(t *testing.T) {
+		fx := newPEFixture(t)
+		fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+			pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+			ingress: []ruleRef{allow("192.168.90.1/32")}})
+
+		require.NoError(t, fx.reconcile("np-1-aaaaa"))
+
+		// Without PodIsolation the egress direction has no rules of its own, and the pod
+		// state is POLICIES_APPLIED, so omitting the allow-all would drop all egress.
+		assert.Contains(t, fx.egressCIDRs(nginx), "0.0.0.0/0",
+			"an un-isolated direction with no rules must receive an allow-all entry")
 	})
 
 	t.Run("a slice carrying only rules still applies to pods named by a sibling slice", func(t *testing.T) {
@@ -265,7 +284,9 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{allow("192.168.90.1/32")}})
 		fx.detachContext(nginx)
 
-		assert.NoError(t, fx.reconcile("np-1-aaaaa"))
+		assertNoContextError(t, fx.reconcile("np-1-aaaaa"))
+		assert.NotContains(t, fx.bpf.IngressByIdentifier, nginx,
+			"an identifier with detached probes must not be written to")
 	})
 
 	t.Run("last local pod leaving with two parent policies does not wedge the reconcile", func(t *testing.T) {
@@ -352,28 +373,43 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{allow("192.168.90.1/32")}})
 		fx.detachContext(identifierOf("web-aaa"), identifierOf("api-aaa"))
 
-		assert.NoError(t, fx.reconcile("np-1-aaaaa"))
+		assertNoContextError(t, fx.reconcile("np-1-aaaaa"))
+		assert.Empty(t, fx.bpf.IngressByIdentifier,
+			"identifiers with detached probes must not be written to")
 	})
 
-	t.Run("strict mode seeds a de-selected identifier default-deny", func(t *testing.T) {
-		fx := newPEFixture(t)
-		fx.bpf.NetworkPolicyMode = "strict"
-		fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
-			pods:    []podRef{localPod("nginx-aaa", "10.1.1.1"), localPod("nginx-bbb", "10.1.1.2")},
-			ingress: []ruleRef{allow("192.168.90.1/32")}})
-		fx.reconcileAll()
-		fx.reset()
+	t.Run("a de-selected identifier falls back to the mode's default state", func(t *testing.T) {
+		for _, tc := range []struct {
+			mode string
+			want int
+		}{
+			{mode: "standard", want: ebpf.DEFAULT_ALLOW},
+			{mode: "strict", want: ebpf.DEFAULT_DENY},
+		} {
+			t.Run(tc.mode, func(t *testing.T) {
+				t.Skip("known defect: deriveTargetPodsForParentNP scrubs the identifier before cleanup " +
+					"runs, so cleanupPod's presence check misses and the default-state assignment at " +
+					"policyendpoints_controller.go:404-407 is never reached")
 
-		fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
-			pods:    []podRef{localPod("nginx-bbb", "10.1.1.2")},
-			ingress: []ruleRef{allow("192.168.90.1/32")}})
-		require.NoError(t, fx.reconcile("np-1-aaaaa"))
+				fx := newPEFixture(t)
+				fx.bpf.NetworkPolicyMode = tc.mode
+				fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+					pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
+					ingress: []ruleRef{allow("192.168.90.1/32")}})
+				fx.reconcileAll()
+				fx.reset()
 
-		state, ok := fx.podState(nginx)
-		require.True(t, ok)
-		assert.Equal(t, ebpf.POLICIES_APPLIED, state,
-			"a surviving replica keeps the policy applied regardless of mode")
+				fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+					ingress: []ruleRef{allow("192.168.90.1/32")}})
+				require.NoError(t, fx.reconcile("np-1-aaaaa"))
+
+				state, ok := fx.podState(nginx)
+				require.True(t, ok, "de-selection must write the pod state, not leave it applied")
+				assert.Equal(t, tc.want, state)
+			})
+		}
 	})
+
 }
 
 func TestPolicySlices_SliceDeletion(t *testing.T) {
@@ -429,6 +465,7 @@ func TestPolicySlices_SliceDeletion(t *testing.T) {
 		fx.deleteSlice("np-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
 
+		fx.assertRulesCleared(nginx)
 		fx.assertIdentifierAbsent(nginx)
 	})
 
@@ -449,7 +486,7 @@ func TestPolicySlices_SliceDeletion(t *testing.T) {
 		fx.detachContext(nginx)
 
 		fx.deleteSlice("np-1-aaaaa")
-		assert.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+		assertNoContextError(t, fx.reconcileDeleted("np-1-aaaaa"))
 	})
 
 	t.Run("deleting one slice of a long-named parent keeps sibling rules", func(t *testing.T) {

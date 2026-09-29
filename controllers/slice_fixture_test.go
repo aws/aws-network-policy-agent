@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -60,13 +61,14 @@ func deny(cidr string) ruleRef  { return ruleRef{cidr: cidr, action: "Deny"} }
 
 // sliceSpec declares one PolicyEndpoint or ClusterPolicyEndpoint.
 type sliceSpec struct {
-	name     string
-	parent   string
-	pods     []podRef
-	ingress  []ruleRef
-	egress   []ruleRef
-	tier     policyk8sawsv1.Tier
-	priority int32
+	name      string
+	parent    string
+	namespace string
+	pods      []podRef
+	ingress   []ruleRef
+	egress    []ruleRef
+	tier      policyk8sawsv1.Tier
+	priority  int32
 }
 
 func (s sliceSpec) tierOrDefault() policyk8sawsv1.Tier {
@@ -74,6 +76,13 @@ func (s sliceSpec) tierOrDefault() policyk8sawsv1.Tier {
 		return policyk8sawsv1.AdminTier
 	}
 	return s.tier
+}
+
+func (s sliceSpec) namespaceOrDefault() string {
+	if s.namespace == "" {
+		return fixtureNamespace
+	}
+	return s.namespace
 }
 
 func (s sliceSpec) podEndpoints() []policyk8sawsv1.PodEndpoint {
@@ -85,7 +94,7 @@ func (s sliceSpec) podEndpoints() []policyk8sawsv1.PodEndpoint {
 		}
 		eps = append(eps, policyk8sawsv1.PodEndpoint{
 			Name:      p.name,
-			Namespace: fixtureNamespace,
+			Namespace: s.namespaceOrDefault(),
 			PodIP:     policyk8sawsv1.NetworkAddress(p.ip),
 			HostIP:    policyk8sawsv1.NetworkAddress(host),
 		})
@@ -101,6 +110,24 @@ func cidrsOf(rules []fwrp.EbpfFirewallRules) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
 		out = append(out, string(r.IPCidr))
+	}
+	return out
+}
+
+// actionCIDRsOf renders cluster-policy rules as "<Action> <CIDR>". Comparing CIDRs alone
+// cannot tell a Deny from an Accept, which is the whole verdict.
+func actionCIDRsOf(rules []fwrp.EbpfFirewallRules) []string {
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, string(r.Action)+" "+string(r.IPCidr))
+	}
+	return out
+}
+
+func prioritiesOf(rules []fwrp.EbpfFirewallRules) []int {
+	out := make([]int, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r.Priority)
 	}
 	return out
 }
@@ -195,9 +222,26 @@ func (fx *cpeFixture) deleteSlice(name string) {
 // steady state after a restart or a policy create.
 func (fx *cpeFixture) reconcileAll() {
 	fx.t.Helper()
-	for name := range fx.store {
+	for _, name := range fx.sliceNames() {
 		require.NoError(fx.t, fx.reconcile(name), "steady-state reconcile of %s", name)
 	}
+}
+
+func (fx *cpeFixture) sliceNames() []string {
+	names := make([]string, 0, len(fx.store))
+	for name := range fx.store {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (fx *cpeFixture) identifierSlices(podIdentifier string) []string {
+	v, ok := fx.r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
+	if !ok {
+		return nil
+	}
+	return v.([]string)
 }
 
 func (fx *cpeFixture) reconcile(name string) error {
@@ -227,12 +271,26 @@ func (fx *cpeFixture) detachContext(podIdentifiers ...string) {
 
 func (fx *cpeFixture) reset() { fx.bpf.Reset() }
 
-func (fx *cpeFixture) clusterPolicyCIDRs(podIdentifier string) []string {
-	return cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[podIdentifier])
+func (fx *cpeFixture) clusterPolicyRules(podIdentifier string) []string {
+	return actionCIDRsOf(fx.bpf.ClusterPolicyIngressByIdentifier[podIdentifier])
 }
 
-func (fx *cpeFixture) clusterPolicyEgressCIDRs(podIdentifier string) []string {
-	return cidrsOf(fx.bpf.ClusterPolicyEgressByIdentifier[podIdentifier])
+func (fx *cpeFixture) clusterPolicyEgressRules(podIdentifier string) []string {
+	return actionCIDRsOf(fx.bpf.ClusterPolicyEgressByIdentifier[podIdentifier])
+}
+
+func (fx *cpeFixture) clusterPolicyPriorities(podIdentifier string) []int {
+	return prioritiesOf(fx.bpf.ClusterPolicyIngressByIdentifier[podIdentifier])
+}
+
+// assertClusterPolicyRulesCleared requires that the identifier's map was written with an
+// empty rule set. An absent key means nothing was ever written, which is a different
+// outcome and must not pass as "cleared".
+func (fx *cpeFixture) assertClusterPolicyRulesCleared(podIdentifier string) {
+	fx.t.Helper()
+	rules, written := fx.bpf.ClusterPolicyIngressByIdentifier[podIdentifier]
+	require.True(fx.t, written, "expected a map write clearing %s, got no write at all", podIdentifier)
+	assert.Empty(fx.t, rules, "the identifier's rules must be cleared, not retained")
 }
 
 func (fx *cpeFixture) clusterPolicyState(podIdentifier string) (int, bool) {
@@ -243,12 +301,18 @@ func (fx *cpeFixture) clusterPolicyState(podIdentifier string) (int, bool) {
 	return state, ok
 }
 
-// assertNoContextErrors is the generic detector for this bug class: a reconcile that
-// tried to write eBPF maps for an identifier whose probes are already detached fails
-// with "no bpf context registered", and the agent surfaces that as a reconcile error.
-func (fx *cpeFixture) assertNoContextErrors(err error) {
-	fx.t.Helper()
-	assert.NoError(fx.t, err, "reconcile must not fail on an identifier with no eBPF context")
+// assertNoContextError is the generic detector for this bug class. A reconcile that tried
+// to write eBPF maps for an identifier whose probes are already detached fails with
+// "no bpf context registered"; naming the string keeps an unrelated failure from passing
+// as the expected outcome, or masquerading as this defect.
+func assertNoContextError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	require.NotContains(t, err.Error(), "no bpf context registered",
+		"cleanup of an identifier with detached probes must be a no-op, not an error")
+	require.NoError(t, err, "unexpected reconcile error")
 }
 
 func (fx *cpeFixture) assertIdentifierAbsent(podIdentifier string) {
@@ -334,9 +398,27 @@ func (fx *peFixture) deleteSlice(name string) {
 
 func (fx *peFixture) reconcileAll() {
 	fx.t.Helper()
-	for name := range fx.store {
+	for _, name := range fx.sliceNames() {
 		require.NoError(fx.t, fx.reconcile(name), "steady-state reconcile of %s", name)
 	}
+}
+
+func (fx *peFixture) sliceNames() []string {
+	names := make([]string, 0, len(fx.store))
+	for name := range fx.store {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// assertRulesCleared requires an actual map write with an empty rule set, since an absent
+// key means nothing was written at all.
+func (fx *peFixture) assertRulesCleared(podIdentifier string) {
+	fx.t.Helper()
+	rules, written := fx.bpf.IngressByIdentifier[podIdentifier]
+	require.True(fx.t, written, "expected a map write clearing %s, got no write at all", podIdentifier)
+	assert.Empty(fx.t, rules, "the identifier's rules must be cleared, not retained")
 }
 
 func (fx *peFixture) reconcile(name string) error {
