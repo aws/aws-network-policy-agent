@@ -142,9 +142,10 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 
 	// deriveTargetPodsForParentCNP scrubs only the parent's *remaining* CPEs from stale
 	// identifiers. When siblings exist the deleted CPE is not in that list, so its name
-	// keeps the identifier entry alive and cleanupClusterPolicyPod would attempt an eBPF
-	// update on a detached context instead of taking the HasBPFContext-guarded clear path.
-	// Scrub it explicitly before cleanup runs.
+	// would linger and the identifier's entry would never drain. Scrub it here so the entry
+	// drains: cleanupClusterPolicyPod's presence check and
+	// deriveClusterPolicyIngressAndEgressFirewallRules both read it on later reconciles, and
+	// the deleted CPE is no longer fetchable.
 	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
 		for _, pod := range existingPods.([]npatypes.Pod) {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -463,6 +464,14 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusF
 func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, isDeleteFlow bool) error {
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
 
+	// The map consulted below is populated for pods on every node, so it cannot tell us
+	// whether this node still holds programs for the identifier. Only the eBPF context can,
+	// and every write below needs it, so when it is gone there is nothing here to clean up.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		log().Debugf("Skipping cluster policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
+		return nil
+	}
+
 	if _, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
 		// A sibling CPE (from this or another parent CNP) still targets the identifier —
 		// recompute rules from what remains.
@@ -478,12 +487,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 		return nil
 	}
 
-	// Nothing selects this identifier anymore; clear its eBPF maps. Skip if probes
-	// were already detached — UpdateClusterPolicyEbpfMaps would fail without context.
-	if !r.ebpfClient.HasBPFContext(podIdentifier) {
-		log().Debugf("Skipping cluster policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return nil
-	}
+	// Nothing selects this identifier anymore; clear its eBPF maps.
 	log().Debugf("No cluster policies left for podIdentifier %s, clearing cluster policy maps", podIdentifier)
 	if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
 		log().Errorf("cluster policy map clear failed for podIdentifier %s: %v", podIdentifier, err)

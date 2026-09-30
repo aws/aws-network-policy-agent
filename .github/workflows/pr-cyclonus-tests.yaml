@@ -171,6 +171,12 @@ jobs:
           ENABLE_STRICT_MODE: "true"
           RUN_EBPF_TESTS: "true"
           RUN_CLUSTER_NETWORK_POLICY_TESTS: "true"
+          # The control-plane controller packs 200 endpoints per object, so at test scale a
+          # policy never splits. Running the controller on the dataplane lets us shrink that
+          # and exercise policies spread across several PolicyEndpoint objects.
+          DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: "true"
+          NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: "2"
+          PROD_IMAGE_REGISTRY: ${{ secrets.PROD_IMAGE_REGISTRY }}
         run: SKIP_ADDON_INSTALLATION=true ./scripts/run-cyclonus-tests.sh
 
       - name: Post results
