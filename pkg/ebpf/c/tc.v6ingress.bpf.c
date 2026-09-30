@@ -359,6 +359,14 @@ int handle_ingress(struct __sk_buff *skb)
 		    return BPF_OK;
 		}
 
+		// MLD is ICMPv6 carried behind a Hop-by-Hop (Router Alert) header
+		if (ip->nexthdr == 0) {
+			struct ipv6_opt_hdr *hbh = data + sizeof(*ip);
+			if ((void *)(hbh + 1) <= data_end && hbh->nexthdr == 58) {
+				return BPF_OK;
+			}
+		}
+
 		switch (ip->nexthdr) {
 			case IPPROTO_TCP:
 				if (data + sizeof(*ip) + sizeof(*l4_tcp_hdr) > data_end) {
