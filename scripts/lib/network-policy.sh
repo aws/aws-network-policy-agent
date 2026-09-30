@@ -117,3 +117,19 @@ function install_network_policy_helm(){
         --set env.ENABLE_IPv4=$ENABLE_IPv4 $HELM_EXTRA_ARGS
 
 }
+
+# verify_endpoint_chunk_size fails fast if the dataplane controller did not pick up the
+# requested chunk size. Without it a slicing run silently falls back to the default of 200
+# and every multi-slice assertion passes for the wrong reason.
+function verify_endpoint_chunk_size() {
+    local expected="$1"
+    local args
+    args=$(kubectl get deployment amazon-network-policy-controller-k8s -n kube-system \
+        -o jsonpath='{.spec.template.spec.containers[0].args}')
+    echo "Controller args: $args"
+    if [[ $args != *"endpoint-chunk-size=$expected"* ]]; then
+        echo "Expected endpoint-chunk-size=$expected in the controller args, not found"
+        return 1
+    fi
+    echo "Dataplane controller is running with endpoint-chunk-size=$expected"
+}

@@ -12,7 +12,12 @@
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
 # DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
-# NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional
+#   Replaces the control-plane network policy controller with one running on the dataplane,
+#   which is the only way to configure it. Needed to exercise policies split across several
+#   PolicyEndpoint / ClusterPolicyEndpoint objects.
+# NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional, defaults to 2 when the above is true.
+#   The controller packs at most this many pods, ingress rules or egress rules into one
+#   endpoint object. Its own default is 200, so at test scale nothing ever slices.
 # AWS_EKS_NODEAGENT: Optional
 # AWS_CNI_IMAGE: Optional
 # AWS_CNI_IMAGE_INIT: Optional
@@ -40,6 +45,10 @@ source "${DIR}/lib/tests.sh"
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
 : "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE:=""}"
+
+if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" && -z $NP_CONTROLLER_ENDPOINT_CHUNK_SIZE ]]; then
+    NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=2
+fi
 : "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
@@ -88,7 +97,9 @@ else
 fi
 
 if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" ]]; then
+    echo "Replacing the control-plane controller with a dataplane one, endpoint chunk size $NP_CONTROLLER_ENDPOINT_CHUNK_SIZE"
     make deploy-network-policy-controller-on-dataplane NP_CONTROLLER_IMAGE=$PROD_IMAGE_REGISTRY NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE
+    verify_endpoint_chunk_size "$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE"
 fi
 
 run_cyclonus_tests
