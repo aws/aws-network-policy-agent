@@ -49,7 +49,6 @@ func log() logger.Logger {
 type ConntrackClient interface {
 	CleanupConntrackMap()
 	Cleanupv6ConntrackMap()
-	FlushConntrackMap() error
 }
 
 var _ ConntrackClient = (*conntrackClient)(nil)
@@ -76,122 +75,6 @@ func (c *conntrackClient) InitializeLocalCache() {
 	} else {
 		c.localConntrackV4Cache = make((map[utils.ConntrackKey]bool))
 	}
-}
-
-// Bounds the key-collection pass so the startup-path flush can never spin indefinitely if the old datapath is churning
-// entries into the map while we walk it (matches the conntrack map's max_entries)
-const maxFlushIterations = 512 * 1024
-
-// FlushConntrackMap deletes every entry currently in the global conntrack map.
-
-func (c *conntrackClient) FlushConntrackMap() error {
-	// Guard against an unset map handle: DeleteMapEntry keys off MapFD, and a zero
-	// FD would target an unrelated fd (e.g. stdin).
-	if c.conntrackMap.MapFD == 0 {
-		return fmt.Errorf("flush conntrack: conntrack map handle has no FD; skipping flush")
-	}
-
-	mapInfo, err := (&goebpfmaps.BpfMap{}).GetMapFromPinPath(CONNTRACK_MAP_PIN_PATH)
-	if err != nil {
-		return fmt.Errorf("flush conntrack: get map info for %s: %w", CONNTRACK_MAP_PIN_PATH, err)
-	}
-	mapID := int(mapInfo.Id)
-
-	if c.enableIPv6 {
-		return c.flushV6(mapID)
-	}
-	return c.flushV4(mapID)
-}
-
-func (c *conntrackClient) flushV4(mapID int) error {
-	// Phase 1: collect keys in a single read-only pass. Deleting during kernel
-	// iteration risks repeats/misses under concurrent mutation; collecting first
-	// makes termination trivially bounded and iteration undisturbed.
-	iterKey := utils.ConntrackKey{}
-	iterNextKey := utils.ConntrackKey{}
-
-	if err := goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID); err != nil {
-		// An empty map reports ENOENT for the first key; nothing to flush.
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return fmt.Errorf("flush conntrack v4: get first entry: %w", err)
-	}
-
-	keys := make([]utils.ConntrackKey, 0)
-	for i := 0; i < maxFlushIterations; i++ {
-		keys = append(keys, iterKey)
-		err := goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), uintptr(unsafe.Pointer(&iterNextKey)), mapID)
-		if errors.Is(err, unix.ENOENT) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("flush conntrack v4: get next entry: %w", err)
-		}
-		iterKey = iterNextKey
-	}
-
-	// Phase 2: delete the collected keys via the recovered map handle (valid FD).
-	deleted := 0
-	for i := range keys {
-		if err := c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&keys[i]))); err != nil {
-			// ENOENT just means the datapath/GC already removed it; not an error.
-			if !errors.Is(err, unix.ENOENT) {
-				return fmt.Errorf("flush conntrack v4: delete entry: %w", err)
-			}
-			continue
-		}
-		deleted++
-	}
-	log().Infof("Flushed %d of %d collected entries from conntrack map (v4)", deleted, len(keys))
-	return nil
-}
-
-func (c *conntrackClient) flushV6(mapID int) error {
-	// Phase 1: collect keys (as fixed-size byte slices) in a single read pass.
-	iterKey := utils.ConntrackKeyV6{}
-	iterNextKey := utils.ConntrackKeyV6{}
-
-	byteSlice := utils.ConvConntrackV6ToByte(iterKey)
-	nextByteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
-	keyLen := len(byteSlice)
-
-	if err := goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID); err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return fmt.Errorf("flush conntrack v6: get first entry: %w", err)
-	}
-
-	keys := make([][]byte, 0)
-	for i := 0; i < maxFlushIterations; i++ {
-		snapshot := make([]byte, keyLen)
-		copy(snapshot, byteSlice)
-		keys = append(keys, snapshot)
-
-		err := goebpfmaps.GetNextMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), uintptr(unsafe.Pointer(&nextByteSlice[0])), mapID)
-		if errors.Is(err, unix.ENOENT) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("flush conntrack v6: get next entry: %w", err)
-		}
-		copy(byteSlice, nextByteSlice)
-	}
-
-	// Phase 2: delete the collected keys via the recovered map handle (valid FD).
-	deleted := 0
-	for i := range keys {
-		if err := c.conntrackMap.DeleteMapEntry(uintptr(unsafe.Pointer(&keys[i][0]))); err != nil {
-			if !errors.Is(err, unix.ENOENT) {
-				return fmt.Errorf("flush conntrack v6: delete entry: %w", err)
-			}
-			continue
-		}
-		deleted++
-	}
-	log().Infof("Flushed %d of %d collected entries from conntrack map (v6)", deleted, len(keys))
-	return nil
 }
 
 func (c *conntrackClient) CleanupConntrackMap() {

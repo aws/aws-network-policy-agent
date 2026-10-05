@@ -6,9 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 
 	"sync"
 	"time"
@@ -62,13 +59,6 @@ var (
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
 	deletedPodsMinAge                                = 5 * time.Minute
-
-	// Identifies the layout/meaning of the conntrack map's per-flow verdict byte (conntrack_value.val, produced by GET_CT_VAL in the
-	// datapath). Bump this whenever the encoding's meaning changes so that on the upgrade to the new agent, the persisted global
-	// conntrack map is flushed once and stale bytes cannot be reinterpreted under the new encoding
-	CT_ENCODING_VERSION = 2
-	// CT_ENCODING_VERSION last applied on this node
-	ctEncodingMarkerPath = "/var/run/aws-node/.npa_ct_encoding_version"
 )
 
 func log() logger.Logger {
@@ -283,11 +273,6 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6)
 	log().Info("Initialized Conntrack client")
 
-	if err := flushConntrackMapOnEncodingChange(ebpfClient.conntrackClient, ctEncodingMarkerPath, CT_ENCODING_VERSION); err != nil {
-		log().Errorf("conntrack cache encoding flush failed (non-fatal): %v", err)
-		sdkAPIErr.WithLabelValues("FlushConntrackMap").Inc()
-	}
-
 	if enablePolicyEventLogs {
 		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, logLevel)
 		if err != nil {
@@ -378,59 +363,6 @@ type bpfClient struct {
 	clusterPolicyEgressInMemoryMap *sync.Map
 	// This is in-memory map to track recently deleted pods (key: podNamespacedName, value: time added to map)
 	deletedPods *sync.Map
-}
-
-// Flushes the global conntrack map exactly once per node when the conntrack verdict-byte encoding version advances.
-func flushConntrackMapOnEncodingChange(cc conntrack.ConntrackClient, markerPath string, currentVersion int) error {
-	applied, err := readCTEncodingMarker(markerPath)
-	if err != nil {
-		return fmt.Errorf("read conntrack encoding marker %s: %w", markerPath, err)
-	}
-	if applied == currentVersion {
-		return nil
-	}
-
-	log().Infof("conntrack encoding version changed (%d -> %d); flushing conntrack map once", applied, currentVersion)
-	if err := cc.FlushConntrackMap(); err != nil {
-		return fmt.Errorf("flush conntrack map: %w", err)
-	}
-
-	if err := writeCTEncodingMarker(markerPath, currentVersion); err != nil {
-		// The flush succeeded, so correctness is already restored for this boot,
-		// failing to persist the marker only means a redundant flush next start.
-		return fmt.Errorf("record conntrack encoding marker %s (flush already succeeded): %w", markerPath, err)
-	}
-	log().Infof("conntrack map flush complete; recorded encoding version %d", currentVersion)
-	return nil
-}
-
-// readCTEncodingMarker returns the encoding version recorded in the marker file.
-// A missing marker means "no version applied yet" and returns 0 (an
-// intentionally-invalid version that never equals a real CT_ENCODING_VERSION), so
-// a fresh node or a pre-versioning agent triggers exactly one flush.
-func readCTEncodingMarker(markerPath string) (int, error) {
-	raw, err := os.ReadFile(markerPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	v, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		// A corrupt/unparseable marker is treated as "unknown version" so we
-		// re-flush and rewrite it cleanly, rather than failing startup.
-		log().Warnf("conntrack encoding marker %s unparseable (%q); treating as unset", markerPath, string(raw))
-		return 0, nil
-	}
-	return v, nil
-}
-
-func writeCTEncodingMarker(markerPath string, version int) error {
-	if err := os.MkdirAll(filepath.Dir(markerPath), 0755); err != nil {
-		return fmt.Errorf("ensure marker dir for %s: %w", markerPath, err)
-	}
-	return os.WriteFile(markerPath, []byte(strconv.Itoa(version)+"\n"), 0644)
 }
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
