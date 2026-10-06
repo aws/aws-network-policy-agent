@@ -21,12 +21,20 @@ func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod,
 	return podsToBeCleanedUp
 }
 
-// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy
-func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, resourceName string, targetPodIdentifiers []string) []string {
+// GetNetworkPolicyIdentifier returns an injective in-memory key for a namespaced
+// NetworkPolicy. "/" cannot appear in either Kubernetes name component.
+func GetNetworkPolicyIdentifier(policyName, policyNamespace string) string {
+	return policyName + "/" + policyNamespace
+}
+
+// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy.
+// targetPodIdentifiers covers every identifier the policy selects cluster-wide, so it can be
+// large under churn.
+func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, networkPolicyIdentifier string, targetPodIdentifiers map[string]bool) []string {
 	var stalePodIdentifiers []string
-	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(GetParentNPNameFromPEName(resourceName)); ok {
+	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(networkPolicyIdentifier); ok {
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
-			if !slices.Contains(targetPodIdentifiers, podIdentifier) {
+			if !targetPodIdentifiers[podIdentifier] {
 				stalePodIdentifiers = append(stalePodIdentifiers, podIdentifier)
 			}
 		}
@@ -55,21 +63,53 @@ func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *
 	}
 }
 
-// UpdatePodIdentifierToPolicyEndpointMap adds policy endpoints to a pod's identifier map
+// DeleteParentNPFromPodIdentifierMap removes every policy endpoint belonging to the given
+// parent network policy from a pod identifier's tracked PE list, deleting the map entry once
+// the list is empty. Unlike DeletePolicyEndpointFromPodIdentifierMap (which matches one exact
+// PE name), this matches by parent NP name, so it cleans up entries even when the PE slices
+// are gone (full NP delete -> empty parent list) or were renamed/re-sliced.
+func DeleteParentNPFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, parentNP string) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	var currentList []string
+	if policyEndpointList, ok := podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		for _, policyEndpointName := range policyEndpointList.([]string) {
+			if GetParentNPNameFromPEName(policyEndpointName) == parentNP {
+				continue
+			}
+			currentList = append(currentList, policyEndpointName)
+		}
+		if len(currentList) == 0 {
+			podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
+		} else {
+			podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentList)
+		}
+	}
+}
+
+// UpdatePodIdentifierToPolicyEndpointMap replaces the tracked policy endpoints for one network policy,
+// preserving endpoints belonging to other parents. Empty list is a no-op.
 func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpointList []string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	var policyEndpoints []string
-	if currentSet, ok := podIdentifierMap.Load(podIdentifier); ok {
-		policyEndpoints = currentSet.([]string)
-		for _, policyEndpointResourceName := range policyEndpointList {
-			if !slices.Contains(policyEndpoints, policyEndpointResourceName) {
-				policyEndpoints = append(policyEndpoints, policyEndpointResourceName)
+	if len(policyEndpointList) == 0 {
+		return
+	}
+
+	parentNP := GetParentNPNameFromPEName(policyEndpointList[0])
+	policyEndpoints := make([]string, 0, len(policyEndpointList))
+	if currentPESet, ok := podIdentifierMap.Load(podIdentifier); ok {
+		for _, policyEndpointName := range currentPESet.([]string) {
+			if GetParentNPNameFromPEName(policyEndpointName) != parentNP {
+				policyEndpoints = append(policyEndpoints, policyEndpointName)
 			}
 		}
-	} else {
-		policyEndpoints = append(policyEndpoints, policyEndpointList...)
 	}
+
+	// policyEndpoints now holds only other parents' names, and policyEndpointList only this
+	// parent's policyendpoints
+	policyEndpoints = append(policyEndpoints, policyEndpointList...)
 	podIdentifierMap.Store(podIdentifier, policyEndpoints)
 }
