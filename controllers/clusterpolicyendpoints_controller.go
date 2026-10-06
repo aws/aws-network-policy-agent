@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -86,6 +87,9 @@ type ClusterPolicyEndpointsReconciler struct {
 	// unique) to the last last-change-trigger-time annotation value consumed,
 	// so each trigger time is observed at most once
 	lastObservedTriggerTimes sync.Map
+	// programmingAttempts maps CPE name to its consecutive failed-programming
+	// count, which drives the RequeueAfter ladder. Cleared on success and cleanup.
+	programmingAttempts sync.Map
 
 	// Maps pod Identifier to list of ClusterPolicyEndpoint resources
 	podIdentifierToClusterPolicyEndpointMap      sync.Map
@@ -103,11 +107,20 @@ type ClusterPolicyEndpointsReconciler struct {
 
 func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log().Infof("Received a new reconcile request for ClusterPolicyEndpoint %v", req)
-	if err := r.reconcile(ctx, req); err != nil {
-		log().Errorf("ClusterPolicyEndpoint reconcile error: %v", err)
-		return ctrl.Result{}, err
+	err := r.reconcile(ctx, req)
+	if err == nil {
+		r.programmingAttempts.Delete(req.Name)
+		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{}, nil
+	if errors.Is(err, ErrProgrammingIncomplete) {
+		after := nextRequeueDelay(&r.programmingAttempts, req.Name)
+		log().Errorf("eBPF programming incomplete for ClusterPolicyEndpoint %s, requeueing in %v: %v", req.Name, after, err)
+		policyProgrammingFailures.WithLabelValues("clusterpolicyendpoint").Inc()
+		// nil error is deliberate - see ErrProgrammingIncomplete.
+		return ctrl.Result{RequeueAfter: after}, nil
+	}
+	log().Errorf("ClusterPolicyEndpoint reconcile error: %v", err)
+	return ctrl.Result{}, err
 }
 
 func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
@@ -192,6 +205,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 
 	programmingSucceeded := true
+	var programmingErrs []error
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
@@ -201,18 +215,32 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
 			programmingSucceeded = false
+			// Collect rather than return, so one failing podIdentifier does not
+			// stop the others from being programmed.
+			programmingErrs = append(programmingErrs, fmt.Errorf("podIdentifier %s: %w", podIdentifier, err))
 		}
 	}
 
 	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingSucceeded)
 
+	if len(programmingErrs) > 0 {
+		// Previously returned nil, so a failed cluster policy write was reported
+		// to controller-runtime as a success and never retried. The cp_* tries
+		// have the larger geometry (unit_size 420/432), so they are the more
+		// exposed of the two map families to the allocator race in
+		// aws/aws-network-policy-agent#686.
+		return fmt.Errorf("%w for cluster policy endpoint %s: %w", ErrProgrammingIncomplete,
+			ClusterPolicyEndpoint.Name, errors.Join(programmingErrs...))
+	}
 	return nil
 }
 
 // observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
-// the last-change-trigger-time annotation. Each annotation value is consumed
-// at most once per CPE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// the last-change-trigger-time annotation. Each annotation value is observed at
+// most once per CPE: it is consumed on success, so resyncs and relists never
+// re-observe it. A programming FAILURE deliberately does not consume it, so the
+// retry which eventually succeeds can still report a real latency; inflation is
+// bounded by programmingLatencyMaxAge instead.
 func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint, programmingSucceeded bool) {
 	if cpe.Annotations == nil {
 		return
@@ -232,11 +260,18 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	if prev, ok := r.lastObservedTriggerTimes.Load(cpe.Name); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
+	if !programmingSucceeded {
+		// Deliberately NOT consumed here: programming failures are now requeued,
+		// so the retry that succeeds must still be able to observe this trigger
+		// time. The staleness guard below stops that from inflating the histogram.
+		log().Debugf("Skipping E2E cluster policy programming latency for CPE %s: programming failed", cpe.Name)
+		return
+	}
+	// Consume before the remaining suppression check: a suppressed observation
 	// must never be re-emitted (inflated) by a later resync of the same annotation.
 	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
-	if !programmingSucceeded {
-		log().Debugf("Skipping E2E cluster policy programming latency for CPE %s: programming failed", cpe.Name)
+	if time.Since(triggerTime) > programmingLatencyMaxAge {
+		log().Debugf("Skipping stale E2E cluster policy programming latency for CPE %s", cpe.Name)
 		return
 	}
 	latency := time.Since(triggerTime).Seconds()
