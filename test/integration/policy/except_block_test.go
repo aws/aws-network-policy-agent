@@ -65,6 +65,16 @@ func getPrefix(ipStr string, maskLen int) (string, error) {
 	return fmt.Sprintf("%s/%d", network.String(), maskLen), nil
 }
 
+// hostMask returns the single-host CIDR suffix for the cluster's IP family —
+// "/32" for IPv4, "/128" for IPv6. A "/32" suffix is rejected by the API server
+// on IPv6 addresses.
+func hostMask(ipFamily string) string {
+	if ipFamily == "IPv6" {
+		return "/128"
+	}
+	return "/32"
+}
+
 var _ = Describe("IPBlock Except Test Cases", func() {
 	var (
 		serverPod       *v1.Pod

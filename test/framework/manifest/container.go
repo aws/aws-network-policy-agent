@@ -21,7 +21,7 @@ type Container struct {
 func NewBusyBoxContainerBuilder() *Container {
 	return &Container{
 		name:            "busybox",
-		image:           "e2e-test-images/busybox:1.29-4",
+		image:           "networking-e2e-test-images/busybox:1.38.0",
 		imagePullPolicy: v1.PullIfNotPresent,
 		command:         []string{"sleep", "3600"},
 		args:            []string{},

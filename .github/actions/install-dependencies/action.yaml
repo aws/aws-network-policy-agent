@@ -15,5 +15,11 @@ runs:
     - name: Set up eksctl
       shell: bash
       run: |
-        curl --silent --location "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        # Always install the latest eksctl: fetched fresh from the releases/latest
+        # redirect on every run. GitHub runners are ephemeral, so there is no
+        # cross-run cache to go stale. -fsSL fails fast if the download errors
+        # instead of piping an error page into tar.
+        curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
         sudo mv /tmp/eksctl /usr/local/bin/
+        # Log the installed version so the run can be verified against latest.
+        eksctl version
