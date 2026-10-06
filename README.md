@@ -44,6 +44,21 @@ Set this flag to `true` to enable the collection & logging of policy decision lo
 
 > Notice: Enabling this feature requires one CPU core per node.
 
+#### `policy-event-logs-scope`
+
+Type: String
+
+Default: ACCEPT
+
+Controls which policy decision events are generated when `enable-policy-event-logs` is set to `true`. Valid options are:
+
+- `ACCEPT` — both ACCEPT and DENY events are generated.
+- `DENY` — only DENY events are generated.
+
+The value is case-insensitive and surrounding whitespace is trimmed (for example, `accept` and `  DENY  ` are accepted). If an unrecognized value is provided, the agent logs a warning and falls back to `ACCEPT` instead of failing to start.
+
+When `enable-policy-event-logs` is set to `false`, the scope is internally forced to an `OFF` state and the eBPF datapath skips emitting any policy events (both ACCEPT and DENY). This removes the per-packet ring buffer overhead when policy event logs are not being processed, regardless of the value configured here.
+
 #### `enable-cloudwatch-logs`
 
 Type: Boolean

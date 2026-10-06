@@ -2,11 +2,52 @@ package config
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
 	"github.com/spf13/pflag"
 )
+
+// Valid values for the --policy-event-logs-scope flag.
+const (
+	PolicyEventLogsScopeAccept = "ACCEPT"
+	PolicyEventLogsScopeDeny   = "DENY"
+)
+
+// Policy event scope values written into the eBPF policy_events_scope map.
+// These encode logging verbosity: an event is published only when its verdict
+// (DENY=0, ACCEPT=1) is strictly below the configured scope value. OFF suppresses
+// every event, which is used to eliminate ring buffer overhead when policy event
+// logs are disabled.
+const (
+	PolicyEventsScopeValueOff    uint8 = 0
+	PolicyEventsScopeValueDeny   uint8 = 1
+	PolicyEventsScopeValueAccept uint8 = 2
+)
+
+// ResolvePolicyEventsScopeValue validates the scope string and maps it, together
+// with the enable flag, onto the eBPF scope value. This is the single source of
+// truth for scope handling: it trims and uppercases the input, and an unrecognized
+// value falls back to ACCEPT (the most verbose scope) with a warning rather than
+// failing, so that a misconfigured flag does not crash-loop the agent. When policy
+// event logs are disabled the scope is forced to OFF so the datapath skips ring
+// buffer output entirely.
+func ResolvePolicyEventsScopeValue(enablePolicyEventLogs bool, scope string) uint8 {
+	if !enablePolicyEventLogs {
+		return PolicyEventsScopeValueOff
+	}
+	switch strings.ToUpper(strings.TrimSpace(scope)) {
+	case PolicyEventLogsScopeDeny:
+		return PolicyEventsScopeValueDeny
+	case PolicyEventLogsScopeAccept:
+		return PolicyEventsScopeValueAccept
+	default:
+		logger.Get().Warnf("Invalid policy-event-logs-scope %q, must be one of: ACCEPT, DENY; falling back to %s",
+			scope, PolicyEventLogsScopeAccept)
+		return PolicyEventsScopeValueAccept
+	}
+}
 
 const (
 	flagLogLevel                       = "log-level"
@@ -21,7 +62,9 @@ const (
 	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
+	defaultPolicyEventLogsScope        = "ACCEPT"
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
+	flagPolicyEventLogsScope           = "policy-event-logs-scope"
 	flagEnableCloudWatchLogs           = "enable-cloudwatch-logs"
 	flagEnableIPv6                     = "enable-ipv6"
 	flagEnableNetworkPolicy            = "enable-network-policy"
@@ -58,6 +101,8 @@ type ControllerConfig struct {
 	RuntimeConfig RuntimeConfig
 	// Configuration for enabling profiling
 	EnableProfiling bool
+	// Policy event logs scope
+	PolicyEventLogsScope string
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -80,7 +125,8 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
 		"Table size for network policy agent conntrack cache")
-
+	fs.StringVar(&cfg.PolicyEventLogsScope, flagPolicyEventLogsScope, defaultPolicyEventLogsScope, ""+
+		"Set the policy event logs scope, if set to ACCEPT both ACCEPT and DENY events are generated, if set to DENY only DENY events are generated - ACCEPT, DENY")
 	cfg.RuntimeConfig.BindFlags(fs)
 }
 
@@ -90,5 +136,6 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
 	}
+
 	return nil
 }
