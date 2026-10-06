@@ -600,6 +600,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		state = DEFAULT_DENY
 	}
 
+	// The ClusterNetworkPolicy tier is only ever POLICIES_APPLIED (a CNP applied) or DEFAULT_ALLOW (no CNP), it is never DEFAULT_DENY (even in strict mode).
+	// Thus: Seed the cluster-policy pod-state key with DEFAULT_ALLOW.
+	cpState := DEFAULT_ALLOW
+
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
@@ -613,7 +617,7 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
-		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, true, false)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, cpState, true, false)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
@@ -635,7 +639,7 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
 
-		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, false, true)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, cpState, false, true)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
