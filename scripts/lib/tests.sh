@@ -1,19 +1,19 @@
 function generate_manifest_and_apply(){
 
     # Use Upstream images by default
+    IMAGE_REPOSITORY_PARAMETER=""
     AGNHOST_IMAGE_PARAMETER=""
     CYCLONUS_IMAGE_REPOSITORY="mfenwick100"
     CYCLONUS_IMAGE_TAG="${CYCLONUS_IMAGE_TAG:-v0.5.4}"
     TEST_AGNHOST_IMAGE="${TEST_AGNHOST_IMAGE:-}"
 
     if [[ $TEST_IMAGE_REGISTRY != "registry.k8s.io" ]]; then
+        IMAGE_REPOSITORY_PARAMETER="- --image-repository=$TEST_IMAGE_REGISTRY"
         CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
     fi
 
     if [[ -n "$TEST_AGNHOST_IMAGE" ]]; then
         AGNHOST_IMAGE_PARAMETER="- --agnhost-image=$TEST_AGNHOST_IMAGE"
-    elif [[ $TEST_IMAGE_REGISTRY != "registry.k8s.io" ]]; then
-        AGNHOST_IMAGE_PARAMETER="- --image-repository=$TEST_IMAGE_REGISTRY"
     fi
 
 cat <<EOF | kubectl apply -n netpol -f -
@@ -34,6 +34,7 @@ spec:
             - ./cyclonus
             - generate
             - --retries=2
+            ${IMAGE_REPOSITORY_PARAMETER}
             ${AGNHOST_IMAGE_PARAMETER}
 EOF
 }
