@@ -52,7 +52,8 @@ type MockBpfClient struct {
 	NetworkPolicyMode string
 
 	// Per-identifier failures for UpdateClusterPolicyEbpfMaps, so a test can make one pod
-	// identifier's map writes fail every time while every other identifier succeeds.
+	// identifier's map writes fail every time while every other identifier succeeds. The
+	// call is logged in CallLog but its rules are not recorded.
 	UpdateClusterPolicyEbpfMapsErrFor map[string]error
 
 	// Per-identifier call records. The Last* fields above retain only the most recent
