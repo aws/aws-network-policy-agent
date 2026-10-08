@@ -186,10 +186,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		return err
 	}
 
-	// A failure for one pod identifier must not stop the others from being programmed, or a
-	// single error that never clears would leave every pod this CPE selects on the node
-	// without updates. Each failure is still returned so the request is retried, and state
-	// is committed only after a clean cleanup so a failed cleanup is retried too.
+	// Programming must not wait on cleanup: an error that never clears would otherwise stop
+	// every pod this CPE selects on the node from receiving updates.
 	cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
 	if cleanupErr != nil {
 		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
@@ -201,17 +199,19 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
-			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
+			log().Errorf("Error Parsing cluster policy Endpoint resource %s for podIdentifier %s: %v", ClusterPolicyEndpoint.Name, podIdentifier, err)
 			programmingErr = errors.Join(programmingErr, err)
 			continue
 		}
 		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
-			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
+			log().Errorf("Error configuring Cluster Policy eBPF Probes for podIdentifier %s: %v", podIdentifier, err)
 			programmingErr = errors.Join(programmingErr, err)
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, cleanupErr == nil && programmingErr == nil)
+	if cleanupErr == nil {
+		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
+	}
 
 	return errors.Join(cleanupErr, programmingErr)
 }
@@ -270,6 +270,13 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+	}
+
+	// AttacheBPFProbes skips pods already deleted from the node, so the CPE can still list a
+	// pod that has no programs here. There is nothing to program until a new pod attaches.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		log().Debugf("Skipping cluster policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
+		return nil
 	}
 
 	err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules)

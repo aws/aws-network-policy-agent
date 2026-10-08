@@ -3,6 +3,7 @@ package controllers
 import (
 	"errors"
 	"testing"
+	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
@@ -473,20 +474,20 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
 	})
 
-	t.Run("one identifier failing does not stop another from being programmed", func(t *testing.T) {
+	t.Run("a pod still listed after it left the node is skipped, not retried", func(t *testing.T) {
 		web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
 		fx := newCPEFixture(t)
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 			pods:    []podRef{localPod("web-aaa", "10.1.1.1"), localPod("api-aaa", "10.1.1.2")},
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		// web was deleted on the node before the controller dropped it from the CPE.
 		fx.detachContext(web)
 
-		assert.Error(t, fx.reconcile("cnp-1-aaaaa"),
-			"the failure must be returned so the request is retried")
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
 		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web)
 		state, ok := fx.clusterPolicyState(api)
-		require.True(t, ok, "a programming failure on one identifier must not skip the rest")
+		require.True(t, ok)
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
 	})
 
@@ -719,9 +720,8 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
 
 		fx.reset()
-		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
-		assert.Contains(t, fx.bpf.CallLog, "UpdateClusterPolicyEbpfMaps",
-			"state was not committed, so the next pass must attempt the cleanup again")
+		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed,
+			"the next pass must attempt the failed cleanup again")
 
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 		fx.reset()
@@ -767,10 +767,43 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		// web's rules come from both CPEs, so failing to fetch cnp-2 fails web only.
 		apiErr := errors.New("apiserver unavailable")
 		fx.getErr = map[string]error{"cnp-2-aaaaa": apiErr}
-		assert.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), apiErr)
-		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(api),
-			"an identifier that does not depend on the failing CPE is still programmed")
-		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web,
-			"the identifier whose rules could not be derived is left as it was")
+		// Identifiers are iterated from a map, so repeat until both orders are very likely.
+		for i := 0; i < 20; i++ {
+			fx.reset()
+			require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), apiErr)
+			require.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(api),
+				"an identifier that does not depend on the failing CPE is still programmed")
+			require.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web,
+				"the identifier whose rules could not be derived is left as it was")
+		}
 	})
+}
+
+// A change whose first reconcile fails in cleanup must still be measured once a retry
+// succeeds; consuming the annotation on the failed pass would drop every such sample.
+func TestClusterPolicySlices_LatencyObservedAfterFailedCleanup(t *testing.T) {
+	stuck := identifierOf("stuck-aaa")
+	fx := newCPEFixture(t)
+	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+		pods:    []podRef{localPod("stuck-aaa", "10.1.1.1"), localPod("resident-aaa", "10.1.1.2")},
+		ingress: []ruleRef{deny("192.168.90.1/32")}})
+	fx.reconcileAll()
+
+	fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: errors.New("map write failed")}
+	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+		pods:    []podRef{localPod("resident-aaa", "10.1.1.2")},
+		ingress: []ruleRef{deny("192.168.90.1/32")}})
+	cpe := fx.store["cnp-1-aaaaa"]
+	cpe.Annotations = map[string]string{LastChangeTriggerTimeAnnotation: time.Now().Format(time.RFC3339Nano)}
+	fx.store["cnp-1-aaaaa"] = cpe
+
+	before := histSampleCount(t, clusterPolicyProgrammingLatency)
+	require.Error(t, fx.reconcile("cnp-1-aaaaa"))
+	assert.Equal(t, uint64(0), histSampleCount(t, clusterPolicyProgrammingLatency)-before,
+		"a failed pass must not record a sample")
+
+	fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before,
+		"the retry that succeeds must record the change it finally applied")
 }

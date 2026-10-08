@@ -8,9 +8,11 @@ import (
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // A workload's last pod leaves a node while the workload keeps running elsewhere. Its eBPF
@@ -133,17 +135,22 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 
 	BeforeAll(func() {
 		By("Picking two schedulable worker nodes", func() {
+			// NodeName bypasses the scheduler, so skip nodes the agent does not run on or that
+			// would evict the pods: non-Linux, Fargate, cordoned, NoExecute-tainted, not ready.
 			nodes := &v1.NodeList{}
-			Expect(fw.K8sClient.List(ctx, nodes)).To(Succeed())
+			Expect(fw.K8sClient.List(ctx, nodes, client.MatchingLabels{"kubernetes.io/os": "linux"})).To(Succeed())
 			var ready []string
 			for _, n := range nodes.Items {
-				if n.Spec.Unschedulable {
+				if n.Spec.Unschedulable || n.Labels["eks.amazonaws.com/compute-type"] == "fargate" {
 					continue
 				}
-				for _, c := range n.Status.Conditions {
-					if c.Type == v1.NodeReady && c.Status == v1.ConditionTrue {
-						ready = append(ready, n.Name)
-					}
+				if lo.ContainsBy(n.Spec.Taints, func(t v1.Taint) bool { return t.Effect == v1.TaintEffectNoExecute }) {
+					continue
+				}
+				if lo.ContainsBy(n.Status.Conditions, func(c v1.NodeCondition) bool {
+					return c.Type == v1.NodeReady && c.Status == v1.ConditionTrue
+				}) {
+					ready = append(ready, n.Name)
 				}
 			}
 			if len(ready) < 2 {
@@ -154,6 +161,7 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 
 		By("Creating the namespaces", func() {
 			for _, ns := range []string{subjectNamespace, serverNamespace} {
+				_ = fw.NamespaceManager.DeleteAndWaitTillNamespaceDeleted(ctx, ns)
 				err := fw.K8sClient.Create(ctx, &v1.Namespace{ObjectMeta: metaV1.ObjectMeta{
 					Name:   ns,
 					Labels: map[string]string{"kubernetes.io/metadata.name": ns},
@@ -222,6 +230,10 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 
 		By("Scheduling a new workload on the first node", func() {
 			newcomer = sleeper("newcomer", nodeA, map[string]string{"departed-a": "yes"})
+			// reachable is false on any exec failure, so prove the pod can reach server-2,
+			// which no rule denies yet, before relying on it being unreachable.
+			Eventually(func() bool { return reachable(newcomer.Name, server2IP) }, 60*time.Second, 5*time.Second).
+				Should(BeTrue())
 		})
 
 		By("Changing the policy so it also denies server-2", func() {
