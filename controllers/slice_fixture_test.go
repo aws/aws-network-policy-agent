@@ -141,6 +141,8 @@ type cpeFixture struct {
 	r     *ClusterPolicyEndpointsReconciler
 	bpf   *ebpf.MockBpfClient
 	store map[string]policyk8sawsv1.ClusterPolicyEndpoint
+	// getErr makes Get fail for the named CPEs, modelling an API error while deriving rules.
+	getErr map[string]error
 }
 
 func newCPEFixture(t *testing.T) *cpeFixture {
@@ -169,6 +171,9 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 	mockClient.EXPECT().
 		Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
 		DoAndReturn(func(_ context.Context, key types.NamespacedName, obj *policyk8sawsv1.ClusterPolicyEndpoint, _ ...client.GetOption) error {
+			if err := fx.getErr[key.Name]; err != nil {
+				return err
+			}
 			cpe, ok := fx.store[key.Name]
 			if !ok {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "clusterpolicyendpoints"}, key.Name)
