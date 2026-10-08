@@ -2,11 +2,18 @@ function generate_manifest_and_apply(){
 
     # Use Upstream images by default
     IMAGE_REPOSITORY_PARAMETER=""
+    AGNHOST_IMAGE_PARAMETER=""
     CYCLONUS_IMAGE_REPOSITORY="mfenwick100"
+    CYCLONUS_IMAGE_TAG="${CYCLONUS_IMAGE_TAG:-v0.5.4}"
+    TEST_AGNHOST_IMAGE="${TEST_AGNHOST_IMAGE:-}"
 
     if [[ $TEST_IMAGE_REGISTRY != "registry.k8s.io" ]]; then
         IMAGE_REPOSITORY_PARAMETER="- --image-repository=$TEST_IMAGE_REGISTRY"
         CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
+    fi
+
+    if [[ -n "$TEST_AGNHOST_IMAGE" ]]; then
+        AGNHOST_IMAGE_PARAMETER="- --agnhost-image=$TEST_AGNHOST_IMAGE"
     fi
 
 cat <<EOF | kubectl apply -n netpol -f -
@@ -22,12 +29,13 @@ spec:
       containers:
         - name: cyclonus
           imagePullPolicy: Always
-          image: ${CYCLONUS_IMAGE_REPOSITORY}/cyclonus:v0.5.4
+          image: ${CYCLONUS_IMAGE_REPOSITORY}/cyclonus:${CYCLONUS_IMAGE_TAG}
           command:
             - ./cyclonus
             - generate
             - --retries=2
             ${IMAGE_REPOSITORY_PARAMETER}
+            ${AGNHOST_IMAGE_PARAMETER}
 EOF
 }
 
@@ -84,17 +92,23 @@ function run_performance_tests(){
 function run_ginkgo_suite(){
     local suite_binary="$1"
     local timeout="${2:-15m}"
+    local test_agnhost_image="${TEST_AGNHOST_IMAGE:-}"
     : "${GINKGO_TEST_BUILD_DIR:?run_ginkgo_suite requires GINKGO_TEST_BUILD_DIR}"
     : "${CLUSTER_NAME:?run_ginkgo_suite requires CLUSTER_NAME}"
     : "${KUBE_CONFIG_PATH:?run_ginkgo_suite requires KUBE_CONFIG_PATH}"
     : "${TEST_IMAGE_REGISTRY:?run_ginkgo_suite requires TEST_IMAGE_REGISTRY}"
     : "${IP_FAMILY:?run_ginkgo_suite requires IP_FAMILY}"
+    local image_parameters=()
+    if [[ -n "$test_agnhost_image" ]]; then
+        image_parameters+=("--test-agnhost-image=$test_agnhost_image")
+    fi
     echo "Running ${suite_binary} (timeout ${timeout})"
     CGO_ENABLED=0 ginkgo -v -timeout "$timeout" --no-color --fail-on-pending \
         "$GINKGO_TEST_BUILD_DIR/$suite_binary" -- \
         --cluster-kubeconfig="$KUBE_CONFIG_PATH" \
         --cluster-name="$CLUSTER_NAME" \
         --test-image-registry="$TEST_IMAGE_REGISTRY" \
+        "${image_parameters[@]}" \
         --ip-family="$IP_FAMILY" || TEST_FAILED="true"
 }
 

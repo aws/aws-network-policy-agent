@@ -202,7 +202,7 @@ var _ = Describe("BPF verifier complexity budget", func() {
 	BeforeEach(func() {
 		By("Deploying a server pod", func() {
 			container := manifest.NewAgnHostContainerBuilder().
-				ImageRepository(fw.Options.TestImageRegistry).
+				Image(fw.Options.AgnHostImage()).
 				Args([]string{"/agnhost netexec"}).
 				AddContainerPort(v1.ContainerPort{ContainerPort: 8080}).
 				Build()

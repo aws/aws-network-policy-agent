@@ -52,7 +52,7 @@ var _ = Describe("Default Allow Mode Test Cases", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				clientApp := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
+					Image(fw.Options.AgnHostImage()).
 					Args([]string{"while true; do wget http://delay-service.policy.svc.cluster.local:8080 --spider -T 90; if [ $? == 0 ]; then echo \"Success\"; else echo \"Fail\"; fi; sleep 60; done "}).
 					Build()
 

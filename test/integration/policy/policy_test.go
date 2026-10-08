@@ -34,7 +34,7 @@ var _ = Describe("Network Policy Test Cases", func() {
 
 			By("Creating a pod which tries to reach external network", func() {
 				agnhostContainer := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
+					Image(fw.Options.AgnHostImage()).
 					Args([]string{"while true; do wget https://www.google.com --spider -T 1; if [ $? == 0 ]; then echo \"Success\"; else echo \"Fail\"; fi; sleep 1s; done"}).
 					Build()
 

@@ -2,6 +2,7 @@ package framework
 
 import (
 	"flag"
+	"fmt"
 
 	"github.com/pkg/errors"
 	"k8s.io/client-go/tools/clientcmd"
@@ -21,6 +22,7 @@ type Options struct {
 	NgNameLabelVal    string
 	EKSEndpoint       string
 	TestImageRegistry string
+	TestAgnHostImage  string
 	IpFamily          string
 	IsAutoCluster     bool
 }
@@ -33,6 +35,7 @@ func (options *Options) BindFlags() {
 	flag.StringVar(&options.NgNameLabelVal, "ng-name-label-val", "", "label value with the nodegroup name")
 	flag.StringVar(&options.EKSEndpoint, "eks-endpoint", "", "optional eks api server endpoint")
 	flag.StringVar(&options.TestImageRegistry, "test-image-registry", "617930562442.dkr.ecr.us-west-2.amazonaws.com", `AWS registry where the e2e test images are stored`)
+	flag.StringVar(&options.TestAgnHostImage, "test-agnhost-image", "", `Full agnhost image reference; defaults to the e2e-test-images repository in test-image-registry`)
 	flag.StringVar(&options.IpFamily, "ip-family", "IPv4", `IP family for the cluster`)
 	flag.BoolVar(&options.IsAutoCluster, "is-auto-cluster", false, "Set to true if running on auto-managed cluster (affects DNS configuration)")
 }
@@ -48,4 +51,11 @@ func (options *Options) Validate() error {
 		return errors.Errorf("%s must be set!", "test-image-registry")
 	}
 	return nil
+}
+
+func (options *Options) AgnHostImage() string {
+	if options.TestAgnHostImage != "" {
+		return options.TestAgnHostImage
+	}
+	return fmt.Sprintf("%s/e2e-test-images/agnhost:2.45", options.TestImageRegistry)
 }

@@ -78,7 +78,7 @@ var _ = Describe("Domain-based Cluster Network Policy Tests", Ordered, func() {
 
 			By("Creating test deployment", func() {
 				container := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
+					Image(fw.Options.AgnHostImage()).
 					Command([]string{"/bin/sh", "-c"}).
 					Args([]string{"while true; do sleep 30; done"}).
 					Build()
