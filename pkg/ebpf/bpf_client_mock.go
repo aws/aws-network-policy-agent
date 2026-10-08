@@ -51,6 +51,10 @@ type MockBpfClient struct {
 	// Empty means "standard", preserving the original behavior.
 	NetworkPolicyMode string
 
+	// Per-identifier failures for UpdateClusterPolicyEbpfMaps, so a test can make one pod
+	// identifier's map writes fail every time while every other identifier succeeds.
+	UpdateClusterPolicyEbpfMapsErrFor map[string]error
+
 	// Per-identifier call records. The Last* fields above retain only the most recent
 	// call, which cannot distinguish outcomes when one reconcile programs several
 	// identifiers.
@@ -139,6 +143,9 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateClusterPolicyEbpfMaps")
 	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
+	if err := m.UpdateClusterPolicyEbpfMapsErrFor[podIdentifier]; err != nil {
 		return err
 	}
 	m.LastClusterPolicyIngressRules = ingressFirewallRules

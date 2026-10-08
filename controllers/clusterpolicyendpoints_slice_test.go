@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"testing"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -480,7 +481,8 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		fx.detachContext(web)
 
-		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		assert.Error(t, fx.reconcile("cnp-1-aaaaa"),
+			"the failure must be returned so the request is retried")
 
 		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web)
 		state, ok := fx.clusterPolicyState(api)
@@ -669,4 +671,106 @@ func TestClusterPolicySlices_RestartReconstruction(t *testing.T) {
 
 	assert.ElementsMatch(t, want, after.clusterPolicyRules(nginx),
 		"a restarted agent must rebuild the same rules from the same slices")
+}
+
+// A pod identifier whose eBPF writes fail every time must cost only that identifier. Every
+// other pod the CPE selects keeps receiving policy, and the failure keeps being retried.
+func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
+	stuck, resident, fresh := identifierOf("stuck-aaa"), identifierOf("resident-aaa"), identifierOf("fresh-aaa")
+	writeFailed := errors.New("map write failed")
+
+	// stuck is deselected while its pod keeps running, so cleanup must clear its maps, and
+	// that write fails on every attempt.
+	stuckCleanup := func(t *testing.T) *cpeFixture {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("stuck-aaa", "10.1.1.1"), localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		return fx
+	}
+
+	t.Run("a cleanup that never succeeds does not block changes to the same CPE", func(t *testing.T) {
+		fx := stuckCleanup(t)
+		for i := 0; i < 3; i++ {
+			require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
+		}
+
+		fx.reset()
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("resident-aaa", "10.1.1.2"), localPod("fresh-aaa", "10.1.1.3")},
+			ingress: []ruleRef{deny("192.168.90.1/32"), deny("192.168.90.9/32")}})
+		assert.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed, "the failing cleanup is still retried")
+
+		want := []string{"Deny 192.168.90.1/32", "Deny 192.168.90.9/32"}
+		assert.ElementsMatch(t, want, fx.clusterPolicyRules(resident), "a rule change must reach a running pod")
+		assert.ElementsMatch(t, want, fx.clusterPolicyRules(fresh), "a new pod must be programmed")
+		state, ok := fx.clusterPolicyState(fresh)
+		require.True(t, ok)
+		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	})
+
+	t.Run("a failed cleanup is retried and commits once it succeeds", func(t *testing.T) {
+		fx := stuckCleanup(t)
+		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
+
+		fx.reset()
+		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
+		assert.Contains(t, fx.bpf.CallLog, "UpdateClusterPolicyEbpfMaps",
+			"state was not committed, so the next pass must attempt the cleanup again")
+
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+		fx.reset()
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		fx.assertClusterPolicyRulesCleared(stuck)
+
+		fx.reset()
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, stuck,
+			"once committed, the cleanup is not repeated")
+	})
+
+	t.Run("a programming failure is retried and recovers", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("stuck-aaa", "10.1.1.1"), localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
+
+		assert.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed,
+			"a programming failure must be returned so it is retried, not dropped")
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(resident))
+
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(stuck))
+	})
+
+	t.Run("a rule derivation failure for one identifier does not skip the others", func(t *testing.T) {
+		web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+				pods:    []podRef{localPod("web-aaa", "10.1.1.1"), localPod("api-aaa", "10.1.1.2")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: "cnp-2-aaaaa", parent: "cnp-2",
+				pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+		fx.reset()
+
+		// web's rules come from both CPEs, so failing to fetch cnp-2 fails web only.
+		apiErr := errors.New("apiserver unavailable")
+		fx.getErr = map[string]error{"cnp-2-aaaaa": apiErr}
+		assert.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), apiErr)
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(api),
+			"an identifier that does not depend on the failing CPE is still programmed")
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, web,
+			"the identifier whose rules could not be derived is left as it was")
+	})
 }

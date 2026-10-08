@@ -186,28 +186,34 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		return err
 	}
 
-	if err := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false); err != nil {
-		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", err)
-		return err
+	// A failure for one pod identifier must not stop the others from being programmed, or a
+	// single error that never clears would leave every pod this CPE selects on the node
+	// without updates. Each failure is still returned so the request is retried, and state
+	// is committed only after a clean cleanup so a failed cleanup is retried too.
+	cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
+	if cleanupErr != nil {
+		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
+	} else {
+		r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 	}
-	r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 
-	programmingSucceeded := true
+	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
 			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
-			return err
+			programmingErr = errors.Join(programmingErr, err)
+			continue
 		}
 		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
-			programmingSucceeded = false
+			programmingErr = errors.Join(programmingErr, err)
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingSucceeded)
+	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, cleanupErr == nil && programmingErr == nil)
 
-	return nil
+	return errors.Join(cleanupErr, programmingErr)
 }
 
 // observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
