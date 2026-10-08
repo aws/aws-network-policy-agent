@@ -16,6 +16,9 @@
 # AWS_EKS_NODEAGENT: Optional
 # AWS_CNI_IMAGE: Optional
 # AWS_CNI_IMAGE_INIT: Optional
+# TEST_IMAGE_REPOSITORY_PREFIX: Optional repository prefix used to construct the agnhost image
+# TEST_AGNHOST_IMAGE: Optional full agnhost image reference; takes precedence over the repository prefix
+# CYCLONUS_IMAGE_TAG: Optional, defaults to v0.5.4
 
 set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
@@ -37,10 +40,17 @@ source "${DIR}/lib/tests.sh"
 : "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
+: "${TEST_IMAGE_REPOSITORY_PREFIX:=""}"
+: "${TEST_AGNHOST_IMAGE:=""}"
+: "${CYCLONUS_IMAGE_TAG:="v0.5.4"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
 : "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE:=""}"
 : "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
+
+if [[ -z "$TEST_AGNHOST_IMAGE" && -n "$TEST_IMAGE_REPOSITORY_PREFIX" ]]; then
+    TEST_AGNHOST_IMAGE="${TEST_IMAGE_REGISTRY}/${TEST_IMAGE_REPOSITORY_PREFIX}/agnhost:2.45"
+fi
 
 TEST_FAILED="false"
 

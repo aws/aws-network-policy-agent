@@ -76,7 +76,7 @@ var _ = Describe("Strict Mode Test Cases", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				serverContainer := manifest.NewAgnHostContainerBuilder().
-					ImageRepository(fw.Options.TestImageRegistry).
+					Image(fw.Options.AgnHostImage()).
 					Args([]string{"/agnhost netexec"}).
 					AddContainerPort(v1.ContainerPort{ContainerPort: serverPort}).
 					Build()
