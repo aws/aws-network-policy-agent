@@ -142,9 +142,10 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 
 	// deriveTargetPodsForParentCNP scrubs only the parent's *remaining* CPEs from stale
 	// identifiers. When siblings exist the deleted CPE is not in that list, so its name
-	// keeps the identifier entry alive and cleanupClusterPolicyPod would attempt an eBPF
-	// update on a detached context instead of taking the HasBPFContext-guarded clear path.
-	// Scrub it explicitly before cleanup runs.
+	// would linger and the identifier's entry would never drain. Scrub it here so the entry
+	// drains: cleanupClusterPolicyPod's presence check and
+	// deriveClusterPolicyIngressAndEgressFirewallRules both read it on later reconciles, and
+	// the deleted CPE is no longer fetchable.
 	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
 		for _, pod := range existingPods.([]npatypes.Pod) {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -185,28 +186,34 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		return err
 	}
 
-	if err := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false); err != nil {
-		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", err)
-		return err
+	// Programming must not wait on cleanup: an error that never clears would otherwise stop
+	// every pod this CPE selects on the node from receiving updates.
+	cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
+	if cleanupErr != nil {
+		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
+	} else {
+		r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 	}
-	r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 
-	programmingSucceeded := true
+	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
-			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
-			return err
+			log().Errorf("Error Parsing cluster policy Endpoint resource %s for podIdentifier %s: %v", ClusterPolicyEndpoint.Name, podIdentifier, err)
+			programmingErr = errors.Join(programmingErr, err)
+			continue
 		}
 		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
-			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
-			programmingSucceeded = false
+			log().Errorf("Error configuring Cluster Policy eBPF Probes for podIdentifier %s: %v", podIdentifier, err)
+			programmingErr = errors.Join(programmingErr, err)
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingSucceeded)
+	if cleanupErr == nil {
+		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
+	}
 
-	return nil
+	return errors.Join(cleanupErr, programmingErr)
 }
 
 // observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
@@ -263,6 +270,13 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+	}
+
+	// AttacheBPFProbes skips pods already deleted from the node, so the CPE can still list a
+	// pod that has no programs here. There is nothing to program until a new pod attaches.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		log().Debugf("Skipping cluster policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
+		return nil
 	}
 
 	err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules)
@@ -463,6 +477,14 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusF
 func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, isDeleteFlow bool) error {
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
 
+	// The map consulted below is populated for pods on every node, so it cannot tell us
+	// whether this node still holds programs for the identifier. Only the eBPF context can,
+	// and every write below needs it, so when it is gone there is nothing here to clean up.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		log().Debugf("Skipping cluster policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
+		return nil
+	}
+
 	if _, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
 		// A sibling CPE (from this or another parent CNP) still targets the identifier —
 		// recompute rules from what remains.
@@ -478,12 +500,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 		return nil
 	}
 
-	// Nothing selects this identifier anymore; clear its eBPF maps. Skip if probes
-	// were already detached — UpdateClusterPolicyEbpfMaps would fail without context.
-	if !r.ebpfClient.HasBPFContext(podIdentifier) {
-		log().Debugf("Skipping cluster policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return nil
-	}
+	// Nothing selects this identifier anymore; clear its eBPF maps.
 	log().Debugf("No cluster policies left for podIdentifier %s, clearing cluster policy maps", podIdentifier)
 	if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
 		log().Errorf("cluster policy map clear failed for podIdentifier %s: %v", podIdentifier, err)
