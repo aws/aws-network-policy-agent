@@ -1,6 +1,6 @@
 module github.com/aws/aws-network-policy-agent
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/aws/amazon-network-policy-controller-k8s v1.1.10
