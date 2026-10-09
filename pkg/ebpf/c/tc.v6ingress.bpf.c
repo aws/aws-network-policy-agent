@@ -420,7 +420,7 @@ int handle_ingress(struct __sk_buff *skb)
 			return BPF_DROP;
 		}
 
-		__u8 ct_pod_state_val = GET_CT_VAL(pst->state, clusterpolicy_pst->state);
+		__u8 ct_pod_state_val = GET_CT_VAL(clusterpolicy_pst->state, pst->state);
 
 		//Check if it's an existing flow
 		flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);
