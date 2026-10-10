@@ -18,6 +18,8 @@ func NewMockBpfClient() *bpfClient {
 		egressProgToPodsMap:             new(sync.Map),
 		globalMaps:                      new(sync.Map),
 		hostMask:                        "/32",
+		ingressInMemoryMap:              new(sync.Map),
+		egressInMemoryMap:               new(sync.Map),
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
 	}

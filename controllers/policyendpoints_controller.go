@@ -266,6 +266,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	}
 
 	programmingSucceeded := true
+	var programmingErr error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
@@ -292,6 +293,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		if err != nil {
 			log().Errorf("Error configuring eBPF Probes %v", err)
 			programmingSucceeded = false
+			programmingErr = errors.Join(programmingErr, err)
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
@@ -300,7 +302,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed)
 	r.observePolicyProgrammingLatency(policyEndpoint, programmingSucceeded)
 
-	return nil
+	return programmingErr
 }
 
 // observePolicyProgrammingLatency emits the E2E latency histogram from the
