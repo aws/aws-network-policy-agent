@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 
 	"sync"
 	"time"
@@ -66,6 +67,32 @@ func log() logger.Logger {
 }
 
 var (
+	// errno="unknown" means utils.MapErrnoLabel no longer matches the SDK's
+	// error text.
+	bpfMapOpErr = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_op_errors_total",
+			Help: "BPF map mutations that still failed after retries, by operation and errno",
+		},
+		[]string{"op", "errno"},
+	)
+
+	bpfMapMutationRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_mutation_retries_total",
+			Help: "BPF map mutation attempts retried after a transient errno",
+		},
+		[]string{"errno"},
+	)
+
+	bpfMapMutationRetriesExhausted = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_bpf_map_mutation_retries_exhausted_total",
+			Help: "BPF map mutations still failing with a transient errno after every retry, left to the controller requeue",
+		},
+		[]string{"errno"},
+	)
+
 	sdkAPILatency = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name: "awsnodeagent_aws_ebpf_sdk_latency_ms",
@@ -117,6 +144,9 @@ func prometheusRegister() {
 	if !prometheusRegistered {
 		metrics.Registry.MustRegister(sdkAPILatency)
 		metrics.Registry.MustRegister(sdkAPIErr)
+		metrics.Registry.MustRegister(bpfMapOpErr)
+		metrics.Registry.MustRegister(bpfMapMutationRetries)
+		metrics.Registry.MustRegister(bpfMapMutationRetriesExhausted)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINRetries)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINExhausted)
 		prometheusRegistered = true
@@ -686,6 +716,11 @@ func (l *bpfClient) getInterfaceCountFromBackupFile(pod types.NamespacedName, po
 	return 0, errors.New("interface count not found in podNameToInterfaceCount cache")
 }
 
+// ErrProbeAttachSkipped means probe attachment was skipped because the pod's
+// interface count is unknown on a multi-NIC node. The PolicyEndpoint
+// reconcilers don't retry it; the CNI ADD path still fails on it.
+var ErrProbeAttachSkipped = errors.New("probe attach skipped")
+
 // getInterfaceCountForPod determines the number of interfaces for a pod
 // Returns the interface count or an error if it cannot be determined
 func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentifier string, providedCount int) (int, error) {
@@ -708,7 +743,8 @@ func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentif
 	}
 
 	// No interface count available and multi-NIC enabled - skip attachment
-	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
+	return 0, fmt.Errorf("%w: multiNIC enabled and interface count is unknown for pod %s/%s",
+		ErrProbeAttachSkipped, pod.Namespace, pod.Name)
 }
 
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
@@ -1256,7 +1292,12 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 	// so repeated calls are no-ops and this function stays idempotent.
 	if ingressProgInfo.Program.ProgFD != 0 {
 		mapToUpdate := ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		err := writePodState("pod_state_create", "pod_state BPF_MAP_UPDATE_ELEM(NOEXIST)", int(mapToUpdate.MapID), func() error {
+			return mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)))
+		})
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
+		if err != nil {
 			log().Errorf("Ingress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-ingress").Inc()
 			ingressErr = fmt.Errorf("ingress pod state entry create: %w", err)
@@ -1264,7 +1305,12 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 	}
 	if egressProgInfo.Program.ProgFD != 0 {
 		mapToUpdate := egressProgInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
-		if err := mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue))); err != nil {
+		err := writePodState("pod_state_create", "pod_state BPF_MAP_UPDATE_ELEM(NOEXIST)", int(mapToUpdate.MapID), func() error {
+			return mapToUpdate.CreateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)))
+		})
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
+		if err != nil {
 			log().Errorf("Egress Pod State entry create failed: %v", err)
 			sdkAPIErr.WithLabelValues("createPodStateEntry-egress").Inc()
 			egressErr = fmt.Errorf("egress pod state entry create: %w", err)
@@ -1303,7 +1349,11 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 		mapToUpdate = ingressProgInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
 		log().Infof("Pod has an Ingress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", ingressProgFD, utils.TC_INGRESS_POD_STATE_MAP, keyval, podStateValue.state)
 		start := time.Now()
-		ingressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		ingressErr = writePodState("pod_state_update", "pod_state BPF_MAP_UPDATE_ELEM", int(mapToUpdate.MapID), func() error {
+			return mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		})
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
 		sdkAPILatency.WithLabelValues("updateEbpfMap-ingress-podstate", fmt.Sprint(ingressErr != nil)).Observe(msSince(start))
 		if ingressErr != nil {
 			log().Errorf("Ingress Pod State Map update failed: %v", ingressErr)
@@ -1317,7 +1367,11 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 
 		log().Infof("Pod has an Egress hook attached. Update the corresponding map progFD: %d, mapName: %s, key: %d, value: %d", egressProgFD, utils.TC_EGRESS_POD_STATE_MAP, keyval, podStateValue.state)
 		start := time.Now()
-		egressErr = mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		egressErr = writePodState("pod_state_update", "pod_state BPF_MAP_UPDATE_ELEM", int(mapToUpdate.MapID), func() error {
+			return mapToUpdate.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&keyval)), uintptr(unsafe.Pointer(&podStateValue)), 0)
+		})
+		runtime.KeepAlive(&keyval)
+		runtime.KeepAlive(&podStateValue)
 		sdkAPILatency.WithLabelValues("updateEbpfMap-egress-podstate", fmt.Sprint(egressErr != nil)).Observe(msSince(start))
 		if egressErr != nil {
 			log().Errorf("Egress Map update failed: %v", egressErr)
@@ -1396,8 +1450,6 @@ func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace stri
 }
 
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
-	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1405,8 +1457,9 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 	}
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
+	start := time.Now()
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()
@@ -1416,8 +1469,6 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 }
 
 func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
-	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1425,8 +1476,9 @@ func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewall
 	}
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
+	start := time.Now()
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()

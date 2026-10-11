@@ -33,6 +33,9 @@ type MockBpfClient struct {
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
 
+	// AttacheBPFProbesErrByPod maps "namespace/name" to an attach error.
+	AttacheBPFProbesErrByPod map[string]error
+
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
@@ -49,6 +52,9 @@ type MockBpfClient struct {
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
+	if err, ok := m.AttacheBPFProbesErrByPod[pod.Namespace+"/"+pod.Name]; ok {
+		return err
+	}
 	return nil
 }
 

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -191,28 +192,37 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	}
 	r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
 
-	programmingSucceeded := true
+	// Returned so the workqueue requeues on eBPF programming failures.
+	var programmingErr error
+	programmedAny := false
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
 		if err != nil {
 			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", ClusterPolicyEndpoint.Name, err)
-			return err
+			return errors.Join(programmingErr, err)
 		}
-		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
+		programmed, err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
+		if programmed {
+			programmedAny = true
+		}
+		if err != nil {
 			log().Errorf("Error configuring Cluster Policy eBPF Probes %v", err)
-			programmingSucceeded = false
+			programmingErr = errors.Join(programmingErr,
+				fmt.Errorf("configure cluster policy eBPF probes for podIdentifier %s: %w", podIdentifier, err))
 		}
 	}
 
-	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingSucceeded)
+	nothingProgrammed := len(targetPodIdentifiers) > 0 && !programmedAny
+	r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil && !nothingProgrammed)
 
-	return nil
+	return programmingErr
 }
 
 // observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
-// the last-change-trigger-time annotation. Each annotation value is consumed
-// at most once per CPE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// the last-change-trigger-time annotation. Each annotation value is observed at
+// most once per CPE, so stale rewrites/resyncs/relists never re-observe it.
+// A programming failure leaves the annotation unconsumed so the retry that
+// succeeds records the full latency.
 func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint, programmingSucceeded bool) {
 	if cpe.Annotations == nil {
 		return
@@ -232,13 +242,12 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	if prev, ok := r.lastObservedTriggerTimes.Load(cpe.Name); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
-	// must never be re-emitted (inflated) by a later resync of the same annotation.
-	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
 	if !programmingSucceeded {
 		log().Debugf("Skipping E2E cluster policy programming latency for CPE %s: programming failed", cpe.Name)
 		return
 	}
+	// Consume before the clock-skew check so a skewed value is never re-observed.
+	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
 	latency := time.Since(triggerTime).Seconds()
 	if latency < 0 {
 		// Clock skew between NPC (control plane) and this node
@@ -249,29 +258,47 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	log().Debugf("E2E cluster policy programming latency: %.3fs for CPE %s", latency, cpe.Name)
 }
 
-func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
+// configureClusterPolicyBPFProbes mirrors configureeBPFProbes and returns true
+// only if the maps were updated.
+func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) (bool, error) {
 
+	// Accumulated so one failing pod doesn't skip the shared map update.
+	var attachErr error
 	for _, pod := range targetPods {
 		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 		if currentPodIdentifier != podIdentifier {
 			continue
 		}
 
-		err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
-		if err != nil {
+		if err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN); err != nil {
+			if errors.Is(err, ebpf.ErrProbeAttachSkipped) {
+				// Retrying can't change the outcome, so don't requeue for it.
+				log().Infof("Probe attach skipped for pod %s/%s, not treating as a programming failure: %v",
+					pod.Namespace, pod.Name, err)
+				continue
+			}
 			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
-			return err
+			attachErr = errors.Join(attachErr,
+				fmt.Errorf("attach probes for pod %s/%s: %w", pod.Namespace, pod.Name, err))
+			continue
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 
-	err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules)
-	if err != nil {
-		log().Errorf("cluster policy Map updates failed for podIdentifier %s: %v", podIdentifier, err)
-		return err
+	// No context means every pod of this identifier was skipped or deleted.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		if attachErr == nil {
+			log().Infof("No eBPF context for podIdentifier %s, nothing to program", podIdentifier)
+		}
+		return false, attachErr
 	}
 
-	return nil
+	if err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules); err != nil {
+		log().Errorf("cluster policy Map updates failed for podIdentifier %s: %v", podIdentifier, err)
+		return false, errors.Join(attachErr, err)
+	}
+
+	return true, attachErr
 }
 
 func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentifier string, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {

@@ -45,6 +45,8 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 	future := now.Add(1 * time.Hour).UTC().Format(time.RFC3339Nano)
 
 	type observeCall struct {
+		// sleepBefore lets a case wait for a near-future trigger time to pass.
+		sleepBefore          time.Duration
 		pe                   *policyendpoint.PolicyEndpoint
 		programmingSucceeded bool
 	}
@@ -56,6 +58,9 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 		name     string
 		calls    []observeCall
 		observed uint64 // expected number of new observations
+		// skewAhead, if set, sets each trigger time to time.Now()+skewAhead when the
+		// subtest starts.
+		skewAhead time.Duration
 	}{
 		{
 			name:     "no annotations",
@@ -104,6 +109,16 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 2,
 		},
 		{
+			// A skewed value stays consumed after the trigger time passes.
+			name:      "clock-skew suppression consumes the annotation",
+			skewAhead: 150 * time.Millisecond,
+			calls: []observeCall{
+				{pe: newPEWithTriggerTime("pe-skew", "ns", ""), programmingSucceeded: true},
+				{pe: newPEWithTriggerTime("pe-skew", "ns", ""), programmingSucceeded: true, sleepBefore: 300 * time.Millisecond},
+			},
+			observed: 0,
+		},
+		{
 			name: "negative latency (clock skew) skipped but consumed",
 			calls: []observeCall{
 				obs(newPEWithTriggerTime("pe-1", "ns", future)),
@@ -112,13 +127,23 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 0,
 		},
 		{
-			name: "programming failure suppresses observation AND consumes trigger time",
-			// a later resync of the same annotation must not emit an inflated value
+			name: "programming failure leaves trigger time unconsumed so the requeue observes it",
+			// The retry after a programming failure records the latency.
 			calls: []observeCall{
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
 			},
-			observed: 0,
+			observed: 1,
+		},
+		{
+			name: "repeated programming failures observe once, on the attempt that succeeds",
+			calls: []observeCall{
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+			},
+			observed: 1,
 		},
 		{
 			name: "new annotation after programming failure is observed",
@@ -135,8 +160,17 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			r := &PolicyEndpointsReconciler{
 				trackerStartTime: now.Add(-1 * time.Hour),
 			}
+			if tt.skewAhead > 0 {
+				ts := time.Now().Add(tt.skewAhead).UTC().Format(time.RFC3339Nano)
+				for _, c := range tt.calls {
+					c.pe.Annotations = map[string]string{LastChangeTriggerTimeAnnotation: ts}
+				}
+			}
 			before := histSampleCount(t, policyProgrammingLatency)
 			for _, c := range tt.calls {
+				if c.sleepBefore > 0 {
+					time.Sleep(c.sleepBefore)
+				}
 				r.observePolicyProgrammingLatency(c.pe, c.programmingSucceeded)
 			}
 			assert.Equal(t, tt.observed, histSampleCount(t, policyProgrammingLatency)-before)
@@ -191,11 +225,23 @@ func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
 	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = fresher
-	r.observeClusterPolicyProgrammingLatency(cpe, false) // programming failed: consumed, not observed
-	r.observeClusterPolicyProgrammingLatency(cpe, true)  // same annotation: stays consumed
-	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, false) // programming failed: NOT consumed, not observed
+	r.observeClusterPolicyProgrammingLatency(cpe, true)  // the requeue's retry succeeds: observed
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, true) // now consumed: not re-observed
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+
+	// A skewed value stays consumed after the trigger time passes.
+	skewSoon := time.Now().Add(150 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	cpe.Annotations[LastChangeTriggerTimeAnnotation] = skewSoon
+	beforeSkew := histSampleCount(t, clusterPolicyProgrammingLatency)
+	r.observeClusterPolicyProgrammingLatency(cpe, true) // negative latency: suppressed, consumed
+	time.Sleep(300 * time.Millisecond)
+	r.observeClusterPolicyProgrammingLatency(cpe, true) // now positive, but already consumed
+	assert.Equal(t, uint64(0), histSampleCount(t, clusterPolicyProgrammingLatency)-beforeSkew,
+		"a skew-suppressed annotation must stay consumed")
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest
 	r.observeClusterPolicyProgrammingLatency(cpe, true) // changed annotation, observed
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 }

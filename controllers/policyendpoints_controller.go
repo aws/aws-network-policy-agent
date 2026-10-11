@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -265,14 +266,17 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		return err
 	}
 
-	programmingSucceeded := true
+	// Returned so the workqueue requeues on eBPF programming failures, which
+	// can be transient (e.g. ENOMEM from bpf_mem_alloc on Graviton5).
+	var programmingErr error
+	programmedAny := false
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace, policyEndpoint.Name, false)
 		if err != nil {
 			log().Errorf("Error Parsing policy Endpoint resource %s: %v", policyEndpoint.Name, err)
-			return err
+			return errors.Join(programmingErr, err)
 		}
 
 		if len(ingressRules) == 0 && !isIngressIsolated {
@@ -288,25 +292,32 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		}
 
 		// Setup/configure eBPF probes/maps for local pods
-		err = r.configureeBPFProbes(ctx, podIdentifier, targetPods, ingressRules, egressRules)
+		programmed, err := r.configureeBPFProbes(ctx, podIdentifier, targetPods, ingressRules, egressRules)
+		if programmed {
+			programmedAny = true
+		}
 		if err != nil {
 			log().Errorf("Error configuring eBPF Probes %v", err)
-			programmingSucceeded = false
+			programmingErr = errors.Join(programmingErr,
+				fmt.Errorf("configure eBPF probes for podIdentifier %s: %w", podIdentifier, err))
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
 	}
 
 	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed)
-	r.observePolicyProgrammingLatency(policyEndpoint, programmingSucceeded)
+	// Don't record success if pods were present but none were programmed.
+	nothingProgrammed := len(podIdentifiers) > 0 && !programmedAny
+	r.observePolicyProgrammingLatency(policyEndpoint, programmingErr == nil && !nothingProgrammed)
 
-	return nil
+	return programmingErr
 }
 
 // observePolicyProgrammingLatency emits the E2E latency histogram from the
-// last-change-trigger-time annotation. Each annotation value is consumed at
-// most once per PE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// last-change-trigger-time annotation. Each annotation value is observed at
+// most once per PE, so stale rewrites/resyncs/relists never re-observe it.
+// A programming failure leaves the annotation unconsumed so the retry that
+// succeeds records the full latency.
 func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, programmingSucceeded bool) {
 	if pe.Annotations == nil {
 		return
@@ -327,13 +338,12 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	if prev, ok := r.lastObservedTriggerTimes.Load(peKey); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
-	// must never be re-emitted (inflated) by a later resync of the same annotation.
-	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
 	if !programmingSucceeded {
 		log().Debugf("Skipping E2E policy programming latency for PE %s/%s: programming failed", pe.Namespace, pe.Name)
 		return
 	}
+	// Consume before the clock-skew check so a skewed value is never re-observed.
+	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
 	latency := time.Since(triggerTime).Seconds()
 	if latency < 0 {
 		// Clock skew between NPC (control plane) and this node
@@ -344,11 +354,14 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	log().Debugf("E2E policy programming latency: %.3fs for PE %s/%s", latency, pe.Namespace, pe.Name)
 }
 
+// configureeBPFProbes attaches probes for the pods of podIdentifier and updates
+// its eBPF maps. It returns true only if the maps were updated.
 func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, podIdentifier string,
-	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
-	var err error
-
+	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) (bool, error) {
 	//Loop over target pods and setup/configure/update eBPF probes/maps
+	// Attach failures are accumulated, not returned, because pods of the same
+	// identifier share maps and the others still need the update below.
+	var attachErr error
 	for _, pod := range targetPods {
 		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 		if currentPodIdentifier != podIdentifier {
@@ -356,20 +369,36 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			continue
 		}
 
-		err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN)
-		if err != nil {
+		if err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN); err != nil {
+			if errors.Is(err, ebpf.ErrProbeAttachSkipped) {
+				// Retrying can't change the outcome, so don't requeue for it.
+				log().Infof("Probe attach skipped for pod %s/%s, not treating as a programming failure: %v",
+					pod.Namespace, pod.Name, err)
+				continue
+			}
 			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
-			return err
+			attachErr = errors.Join(attachErr,
+				fmt.Errorf("attach probes for pod %s/%s: %w", pod.Namespace, pod.Name, err))
+			continue
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 
-	err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED)
-	if err != nil {
-		log().Errorf("Map updates failed for podIdentifier %s: %v", podIdentifier, err)
-		return err
+	// No context means every pod of this identifier was skipped or has been
+	// deleted, so there is nothing to program. Checked even when attachErr is
+	// nil, because a deleted pod's attach returns nil.
+	if !r.ebpfClient.HasBPFContext(podIdentifier) {
+		if attachErr == nil {
+			log().Infof("No eBPF context for podIdentifier %s, nothing to program", podIdentifier)
+		}
+		return false, attachErr
 	}
-	return nil
+
+	if err := r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED); err != nil {
+		log().Errorf("Map updates failed for podIdentifier %s: %v", podIdentifier, err)
+		return false, errors.Join(attachErr, err)
+	}
+	return true, attachErr
 }
 
 func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod npatypes.Pod,

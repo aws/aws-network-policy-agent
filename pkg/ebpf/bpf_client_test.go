@@ -1,7 +1,6 @@
 package ebpf
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -278,7 +277,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			gotErr := testBpfClient.UpdateEbpfMaps(tt.podIdentifier, tt.ingressFirewallRules,
 				tt.egressFirewallRules)
-			assert.Equal(t, gotErr, tt.wantErr)
+			assert.Equal(t, tt.wantErr, gotErr)
 		})
 	}
 }
@@ -335,7 +334,7 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
-			assert.Equal(t, gotErr, tt.wantErr)
+			assert.Equal(t, tt.wantErr, gotErr)
 		})
 	}
 }
@@ -420,6 +419,8 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		numInterfaces     int
 		isMultiNICEnabled bool
 		wantErr           error
+		wantErrIs         error
+		wantErrContains   string
 		wantTCAttachCalls int
 	}{
 		{
@@ -446,7 +447,8 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			podIdentifier:     "test-pod-skip",
 			numInterfaces:     0,
 			isMultiNICEnabled: true,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErrIs:         ErrProbeAttachSkipped,
+			wantErrContains:   "testNS/testPod",
 			wantTCAttachCalls: 0,
 		},
 		{
@@ -529,7 +531,14 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			}
 
 			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces)
-			assert.Equal(t, tt.wantErr, gotError)
+			if tt.wantErrContains != "" {
+				assert.ErrorContains(t, gotError, tt.wantErrContains)
+			}
+			if tt.wantErrIs != nil {
+				assert.ErrorIs(t, gotError, tt.wantErrIs)
+			} else {
+				assert.Equal(t, tt.wantErr, gotError)
+			}
 		})
 	}
 }
@@ -798,6 +807,8 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 		podNameToInterfaceCountData map[string]int
 		wantCount                   int
 		wantErr                     error
+		wantErrIs                   error
+		wantErrContains             string
 	}{
 		{
 			name:          "Provided count takes precedence",
@@ -825,7 +836,8 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 			providedCount:     0,
 			isMultiNICEnabled: true,
 			wantCount:         0,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErrIs:         ErrProbeAttachSkipped,
+			wantErrContains:   "testNS/testPod",
 		},
 	}
 
@@ -842,7 +854,14 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 
 			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(testPod, "test-pod-id", tt.providedCount)
 			assert.Equal(t, tt.wantCount, gotCount)
-			assert.Equal(t, tt.wantErr, gotErr)
+			if tt.wantErrContains != "" {
+				assert.ErrorContains(t, gotErr, tt.wantErrContains)
+			}
+			if tt.wantErrIs != nil {
+				assert.ErrorIs(t, gotErr, tt.wantErrIs)
+			} else {
+				assert.Equal(t, tt.wantErr, gotErr)
+			}
 		})
 	}
 }
