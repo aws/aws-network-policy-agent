@@ -1,6 +1,7 @@
 package framework
 
 import (
+	policyk8sawsv1alpha1 "github.com/aws/amazon-network-policy-controller-k8s/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/clusternetworkpolicy"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/deployment"
 	"github.com/aws/aws-network-policy-agent/test/framework/resources/k8s/namespace"
@@ -38,6 +39,8 @@ func New(options Options) *Framework {
 
 	k8sSchema := runtime.NewScheme()
 	clientgoscheme.AddToScheme(k8sSchema)
+	// Register networking.k8s.aws/v1alpha1 so typed CNP/CPE list calls work.
+	Expect(policyk8sawsv1alpha1.AddToScheme(k8sSchema)).To(Succeed())
 
 	k8sClient, err := client.New(config, client.Options{Scheme: k8sSchema})
 	Expect(err).NotTo(HaveOccurred())

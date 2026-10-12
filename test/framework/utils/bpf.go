@@ -35,6 +35,55 @@ func BuildBPFCheckPod(namespace, nodeName string) *v1.Pod {
 	}
 }
 
+// Mounted at the host's own path so callers can pass the agent's pin paths as-is.
+const bpffsMountPath = "/sys/fs/bpf"
+
+// Not "app": callers sweep by this label, and "app" is reused across the suite.
+const BPFFSReaderPodLabelKey = "test.npa/role"
+const BPFFSReaderPodLabelValue = "bpffs-reader"
+
+// BuildBPFFSReaderPod runs command to completion on nodeName with the host's
+// bpffs mounted read-only, for inspecting pinned BPF objects. Callers read the
+// result from the pod log.
+//
+// Not privileged, unlike BuildBPFCheckPod. CAP_BPF is enough, but it is required
+// rather than optional: without it the kernel zeroes xlated_prog_len and the
+// other dump-gated fields instead of returning an error, so a caller that drops
+// it silently reads zeros.
+func BuildBPFFSReaderPod(namespace, nodeName, image string, command []string) *v1.Pod {
+	hostPathDir := v1.HostPathDirectory
+	allowPrivilegeEscalation := false
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("bpffs-reader-%d", time.Now().UnixNano()), Namespace: namespace,
+			Labels: map[string]string{BPFFSReaderPodLabelKey: BPFFSReaderPodLabelValue},
+		},
+		Spec: v1.PodSpec{
+			NodeName: nodeName, RestartPolicy: v1.RestartPolicyNever,
+			Containers: []v1.Container{{
+				Name: "reader", Image: image, ImagePullPolicy: v1.PullIfNotPresent,
+				Command: command,
+				SecurityContext: &v1.SecurityContext{
+					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+					Capabilities: &v1.Capabilities{
+						Drop: []v1.Capability{"ALL"},
+						Add:  []v1.Capability{"BPF"},
+					},
+				},
+				VolumeMounts: []v1.VolumeMount{
+					{Name: "host-bpffs", MountPath: bpffsMountPath, ReadOnly: true},
+				},
+			}},
+			Volumes: []v1.Volume{{
+				Name: "host-bpffs",
+				VolumeSource: v1.VolumeSource{
+					HostPath: &v1.HostPathVolumeSource{Path: bpffsMountPath, Type: &hostPathDir},
+				},
+			}},
+		},
+	}
+}
+
 // BPFState is the parsed view of `aws-eks-na-cli ebpf loaded-ebpfdata` output.
 type BPFState struct {
 	ProgIDs    map[string]int // pinPath basename -> prog ID
