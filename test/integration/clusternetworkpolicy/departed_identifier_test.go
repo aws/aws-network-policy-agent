@@ -15,15 +15,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// A workload's last pod leaves a node while the workload keeps running elsewhere. Its eBPF
-// programs on that node are torn down, but a second ClusterNetworkPolicy still selects it
-// through the pod on the other node. The reconcile that cleans up after the departed pod
-// must not stall: pods scheduled on that node afterwards must be enforced, and policy
-// changes must still reach the pods already running there.
-//
-// The second policy selects only the sibling pod on the other node, so its
-// ClusterPolicyEndpoint does not change when the pod departs and nothing else reconciles it.
-// That is the shape that left the reconcile failing on every retry.
+// A workload's last pod leaves a node while the workload keeps running elsewhere, and a
+// second ClusterNetworkPolicy selects it only through the pod on the other node. After the
+// departure, pods scheduled on that node must be enforced and policy changes must still
+// reach the pods already running there.
 var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leaves a node", Ordered, func() {
 	const (
 		subjectNamespace = "departed-subject"
@@ -183,11 +178,11 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 			resident = sleeper("resident", nodeA, map[string]string{"departed-a": "yes"})
 		})
 
-		By("Applying the policy under test and a policy that selects only the sibling", func() {
-			cnp := underTestPolicy(hostCIDR(server1IP))
-			Expect(fw.ClusterNetworkPolicyManager.CreateClusterNetworkPolicy(ctx, cnp)).To(Succeed())
-			policies = append(policies, cnp)
-
+		By("Applying a policy that selects only the sibling, then the policy under test", func() {
+			// The sibling policy goes first: with its default single worker, each agent handles CPE
+			// events in the order they arrive, so once the policy under test is enforced on the
+			// first node, that node has also recorded the sibling policy's claim on the workload,
+			// which is what makes the cleanup fail.
 			sibling := manifest.NewClusterNetworkPolicyBuilder().
 				Name(siblingPolicy).
 				Priority(200).
@@ -201,6 +196,12 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 				Build()
 			Expect(fw.ClusterNetworkPolicyManager.CreateClusterNetworkPolicy(ctx, sibling)).To(Succeed())
 			policies = append(policies, sibling)
+			Eventually(func() bool { return cpeListsPod(siblingPolicy, victimOther.Name) }, 60*time.Second, 2*time.Second).
+				Should(BeTrue())
+
+			cnp := underTestPolicy(hostCIDR(server1IP))
+			Expect(fw.ClusterNetworkPolicyManager.CreateClusterNetworkPolicy(ctx, cnp)).To(Succeed())
+			policies = append(policies, cnp)
 		})
 
 		By("Waiting for enforcement on the first node", func() {

@@ -124,7 +124,8 @@ function install_network_policy_helm(){
 #
 # The container is selected by name rather than by index so a future template change cannot
 # quietly move the check onto a sidecar, and the read is retried because the Deployment may
-# not be observable the instant the apply returns.
+# not be observable the instant the apply returns. Args are printed one per line and matched
+# whole, so the check does not depend on how kubectl renders a list and =2 cannot match =20.
 function verify_endpoint_chunk_size() {
     local expected="$1"
     local name="amazon-network-policy-controller-k8s"
@@ -134,19 +135,19 @@ function verify_endpoint_chunk_size() {
 
     for _ in $(seq 1 12); do
         args=$(kubectl get "deployment/$name" -n kube-system \
-            -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$name\")].args}" 2>/dev/null) || true
+            -o jsonpath="{range .spec.template.spec.containers[?(@.name==\"$name\")].args[*]}{@}{\"\\n\"}{end}" 2>/dev/null) || true
         if [[ -n $args ]]; then
             break
         fi
         sleep 5
     done
 
-    echo "Controller args: $args"
+    echo "Controller args: $(echo "$args" | tr '\n' ' ')"
     if [[ -z $args ]]; then
         echo "Could not read args from container $name in deployment $name"
         return 1
     fi
-    if [[ $args != *"\"--endpoint-chunk-size=$expected\""* ]]; then
+    if ! grep -qxF -- "--endpoint-chunk-size=$expected" <<<"$args"; then
         echo "Expected endpoint-chunk-size=$expected in the controller args, not found"
         return 1
     fi

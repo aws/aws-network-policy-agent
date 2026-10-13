@@ -43,16 +43,15 @@ type MockBpfClient struct {
 	LastClusterPolicyIngressRules []fwrp.EbpfFirewallRules
 	LastClusterPolicyEgressRules  []fwrp.EbpfFirewallRules
 
-	// podIdentifiers whose probes are detached. Empty by default so HasBPFContext reports
-	// true, preserving the original success-path behavior. Also fails every map write for
-	// that identifier, the way the real client's context lookup does.
+	// podIdentifiers whose probes are detached: HasBPFContext reports false for them and
+	// every map write for them fails, as with the real client.
 	PodIdentifiersWithoutBPFContext map[string]bool
 
 	// Pods already deleted on the node. AttacheBPFProbes skips them, as production does;
 	// attaching any other pod registers its identifier's context.
 	DeletedPods map[types.NamespacedName]bool
 
-	// Empty means "standard", preserving the original behavior.
+	// Empty means "standard".
 	NetworkPolicyMode string
 
 	// Per-identifier failures for UpdateClusterPolicyEbpfMaps, so a test can make one pod
@@ -107,8 +106,9 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
-	if !m.DeletedPods[pod] {
-		delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
+	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
+	if !m.DeletedPods[pod] && m.PodIdentifiersWithoutBPFContext[podIdentifier] {
+		m.ForgetIdentifier(podIdentifier)
 	}
 	return nil
 }
@@ -120,8 +120,9 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 
 // ForgetIdentifier models an identifier coming back to the node with fresh maps: it
 // registers the context again and drops seeded and recorded pod state, while recorded rule
-// writes are kept. DeleteBPFProbes does not call it, because the mock has no notion of a
-// shared program FD, so tests decide when an identifier really went away and came back.
+// writes are kept. AttacheBPFProbes calls it when a pod attaches to a torn-down identifier.
+// DeleteBPFProbes does not tear anything down, because the mock has no notion of a shared
+// program FD, so tests decide when an identifier really went away.
 func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
 	delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
 	for k := range m.podStateSeeded {
@@ -141,11 +142,14 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
+	if m.UpdateEbpfMapsErr != nil {
+		return m.UpdateEbpfMapsErr
+	}
 	m.LastIngressRules = ingressFirewallRules
 	m.LastEgressRules = egressFirewallRules
 	recordRules(&m.IngressByIdentifier, podIdentifier, ingressFirewallRules)
 	recordRules(&m.EgressByIdentifier, podIdentifier, egressFirewallRules)
-	return m.UpdateEbpfMapsErr
+	return nil
 }
 
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
@@ -156,11 +160,14 @@ func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingres
 	if err := m.UpdateClusterPolicyEbpfMapsErrFor[podIdentifier]; err != nil {
 		return err
 	}
+	if m.UpdateClusterPolicyEbpfMapsErr != nil {
+		return m.UpdateClusterPolicyEbpfMapsErr
+	}
 	m.LastClusterPolicyIngressRules = ingressFirewallRules
 	m.LastClusterPolicyEgressRules = egressFirewallRules
 	recordRules(&m.ClusterPolicyIngressByIdentifier, podIdentifier, ingressFirewallRules)
 	recordRules(&m.ClusterPolicyEgressByIdentifier, podIdentifier, egressFirewallRules)
-	return m.UpdateClusterPolicyEbpfMapsErr
+	return nil
 }
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
@@ -168,8 +175,11 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
+	if m.UpdatePodStateEbpfMapsErr != nil {
+		return m.UpdatePodStateEbpfMapsErr
+	}
 	m.recordPodState(podIdentifier, key, state)
-	return m.UpdatePodStateEbpfMapsErr
+	return nil
 }
 
 func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
@@ -194,10 +204,13 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
+	if m.CreatePodStateEbpfEntryIfNotExistsErr != nil {
+		return m.CreatePodStateEbpfEntryIfNotExistsErr
+	}
 	if !m.podStateSeeded[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] {
 		m.recordPodState(podIdentifier, key, state)
 	}
-	return m.CreatePodStateEbpfEntryIfNotExistsErr
+	return nil
 }
 
 func (m *MockBpfClient) ClearDeletedPod(podNamespacedName string) {
@@ -220,9 +233,8 @@ func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int)
 	m.podStateSeeded[k] = true
 }
 
-// contextErr reproduces the real client's context lookup, which every map write performs
-// before touching a map and which fails once the probes are detached. Without it the mock
-// is more forgiving than production and cannot reproduce cleanup failures.
+// contextErr fails a map write for an identifier whose probes are detached, as the real
+// client's context lookup does.
 func (m *MockBpfClient) contextErr(podIdentifier string) error {
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)

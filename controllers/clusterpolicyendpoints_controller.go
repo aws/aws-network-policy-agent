@@ -142,12 +142,8 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 		return err
 	}
 
-	// deriveTargetPodsForParentCNP scrubs only the parent's *remaining* CPEs from stale
-	// identifiers. When siblings exist the deleted CPE is not in that list, so its name
-	// would linger and the identifier's entry would never drain. Scrub it here so the entry
-	// drains: cleanupClusterPolicyPod's presence check and
-	// deriveClusterPolicyIngressAndEgressFirewallRules both read it on later reconciles, and
-	// the deleted CPE is no longer fetchable.
+	// Remove the deleted CPE from the identifiers it tracked on this node. Derive removes only
+	// the parent's remaining CPEs, and later reconciles read these entries.
 	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
 		for _, pod := range existingPods.([]npatypes.Pod) {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -157,23 +153,35 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 
 	log().Infof("cleanUpClusterPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
 
-	if len(targetPods) > 0 {
-		if err := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, targetPods, targetPodIdentifiers, false); err != nil {
-			log().Errorf("failed to update cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
-			return err
-		}
+	_, updateErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, targetPods, targetPodIdentifiers, false)
+	if updateErr != nil {
+		log().Errorf("failed to update cluster policy bpf probes for policy endpoint %s : %v", req.Name, updateErr)
+	}
+	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, podsToBeCleanedUp, targetPodIdentifiers, true)
+	if cleanupErr != nil {
+		log().Errorf("failed to clean up cluster policy bpf probes for policy endpoint %s : %v", req.Name, cleanupErr)
 	}
 
-	if len(podsToBeCleanedUp) > 0 {
-		if err := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, podsToBeCleanedUp, targetPodIdentifiers, true); err != nil {
-			log().Errorf("failed to clean up cluster policy bpf probes for policy endpoint %s : %v", req.Name, err)
-			return err
+	// Same tracking as reconcileClusterPolicyEndpoint.
+	trackedPods := append(slices.Clone(targetPods), failedCleanups...)
+	trackedPodIdentifiers := maps.Clone(targetPodIdentifiers)
+	for _, pod := range failedCleanups {
+		trackedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
+	}
+	r.commitClusterPolicyEndpointState(resourceName, trackedPods, trackedPodIdentifiers, parentCPEList)
+
+	// Until every cleanup succeeds, the deleted CPE's entry holds the ones that failed, so the
+	// retry repeats only those. If the CPE is in parentCPEList (its deletion is in progress,
+	// or it is the parent's last CPE), the commit above has already written its entry.
+	err = errors.Join(updateErr, cleanupErr)
+	if !slices.Contains(parentCPEList, resourceName) {
+		if err != nil {
+			r.ClusterPolicyEndpointSelectorMap.Store(resourceName, failedCleanups)
+		} else {
+			r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
 		}
 	}
-
-	r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
-	r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
-	return nil
+	return err
 }
 
 func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx context.Context, ClusterPolicyEndpoint *policyk8sawsv1.ClusterPolicyEndpoint) error {
@@ -188,21 +196,21 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		return err
 	}
 
-	// Programming must not wait on cleanup: an error that never clears would otherwise stop
-	// every pod this CPE selects on the node from receiving updates.
-	cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
-	// Record everything programmed below so it can be cleaned up later. If cleanup failed, also
-	// keep the pods it was cleaning up so the retry and the CPE delete flow still find them.
-	committedPods, committedPodIdentifiers := targetPods, targetPodIdentifiers
+	// Programming runs whether or not cleanup succeeded, so a failing cleanup does not hold
+	// back the other pods this CPE selects.
+	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
 	if cleanupErr != nil {
 		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
-		committedPods = append(slices.Clone(targetPods), podsToBeCleanedUp...)
-		committedPodIdentifiers = maps.Clone(targetPodIdentifiers)
-		for _, pod := range podsToBeCleanedUp {
-			committedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
-		}
 	}
-	r.commitClusterPolicyEndpointState(resourceName, committedPods, committedPodIdentifiers, parentCPEList)
+
+	// Track the pods programmed below, so they can be cleaned up later, and the pods whose
+	// cleanup failed, so the retry and the CPE delete flow still find them.
+	trackedPods := append(slices.Clone(targetPods), failedCleanups...)
+	trackedPodIdentifiers := maps.Clone(targetPodIdentifiers)
+	for _, pod := range failedCleanups {
+		trackedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
+	}
+	r.commitClusterPolicyEndpointState(resourceName, trackedPods, trackedPodIdentifiers, parentCPEList)
 
 	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
@@ -218,8 +226,9 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		}
 	}
 
-	// A failed cleanup used to return before this point, leaving the annotation for the retry
-	// to measure, so it still does. A derive failure used to return too, but now consumes it.
+	// Latency is recorded only for a pass whose cleanup succeeded, so the retry after a failed
+	// cleanup measures the change. A programming error consumes the annotation without
+	// recording a sample.
 	if cleanupErr == nil {
 		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
 	}
@@ -417,10 +426,6 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	var stalePodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
 
-	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
-		currentPods = append(currentPods, existingPods.([]npatypes.Pod)...)
-	}
-
 	parentCPEObjects, err := r.getClusterPolicyEndpointsOfParentCNP(ctx, parentCNPName)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -428,7 +433,6 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	log().Infof("Parent Cluster Network Policy resource Name: %s Total Cluster Policy Endpoints for Parent CNP: Count: %d", parentCNPName, len(parentCPEObjects))
 
 	if len(parentCPEObjects) == 0 {
-		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
 		stalePodIdentifiers = utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, resourceName, nil)
 		parentCPEList = []string{resourceName}
 	} else {
@@ -445,6 +449,15 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 		}
 		stalePodIdentifiers = utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, resourceName, targetPodIdentifiers)
 	}
+
+	// Commit records the parent's pods under every one of its CPEs, so a CPE reconciled before
+	// it has an entry of its own, such as a new slice, finds them under a sibling.
+	for _, cpeName := range lo.Uniq(append([]string{resourceName}, parentCPEList...)) {
+		if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(cpeName); ok {
+			currentPods = append(currentPods, existingPods.([]npatypes.Pod)...)
+		}
+	}
+	currentPods = lo.Uniq(currentPods)
 
 	for _, cpeName := range parentCPEList {
 		for _, sid := range stalePodIdentifiers {
@@ -474,15 +487,18 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(Cluster
 	return targetPods, podIdentifiers
 }
 
-func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusForPods(ctx context.Context, ClusterPolicyEndpointName string, cleanupPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) error {
+// updateClusterPolicyEnforcementStatusForPods returns the pods whose cleanup failed.
+func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusForPods(ctx context.Context, ClusterPolicyEndpointName string, cleanupPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, error) {
+	var failed []npatypes.Pod
 	var err error
 	for _, cleanupPod := range cleanupPods {
 		if cleanupErr := r.cleanupClusterPolicyPod(ctx, cleanupPod, ClusterPolicyEndpointName, isDeleteFlow); cleanupErr != nil {
 			log().Errorf("Cluster Policy Cleanup/Update unsuccessful for Pod Name: %s Namespace: %s ", cleanupPod.Name, cleanupPod.Namespace)
+			failed = append(failed, cleanupPod)
 			err = errors.Join(err, cleanupErr)
 		}
 	}
-	return err
+	return failed, err
 }
 
 func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, isDeleteFlow bool) error {
@@ -511,7 +527,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 		return nil
 	}
 
-	// Nothing selects this identifier anymore; clear its eBPF maps.
+	// Nothing selects this identifier; clear its eBPF maps.
 	log().Debugf("No cluster policies left for podIdentifier %s, clearing cluster policy maps", podIdentifier)
 	if err := r.updateClusterPolicyBPFMaps(podIdentifier, nil, nil); err != nil {
 		log().Errorf("cluster policy map clear failed for podIdentifier %s: %v", podIdentifier, err)
@@ -521,9 +537,8 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 }
 
 // commitClusterPolicyEndpointState updates the two maps derive left untouched. Runs after
-// cleanup. When reconcileClusterPolicyEndpoint's cleanup fails it also passes the pods it
-// was cleaning up, so DeriveStalePodIdentifiers produces the same stale set on the retry.
-// Keys clusterNetworkPolicyToPodIdentifierMap by
+// cleanup. Callers also pass the pods whose cleanup failed, so the retry derives them as
+// stale again. Keys clusterNetworkPolicyToPodIdentifierMap by
 // GetParentNPNameFromPEName(resourceName) — the same derivation the reader uses, so writes
 // and reads agree when GenerateName truncates the CPE base (CNP names >= 58 chars).
 func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(

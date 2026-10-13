@@ -317,10 +317,8 @@ func (fx *cpeFixture) clusterPolicyState(podIdentifier string) (int, bool) {
 	return state, ok
 }
 
-// assertNoContextError is the generic detector for this bug class. A reconcile that tried
-// to write eBPF maps for an identifier whose probes are already detached fails with
-// "no bpf context registered"; naming the string keeps an unrelated failure from passing
-// as the expected outcome, or masquerading as this defect.
+// assertNoContextError fails on any reconcile error, and names the case of a write to an
+// identifier whose probes are detached ("no bpf context registered") so it is easy to spot.
 func assertNoContextError(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
