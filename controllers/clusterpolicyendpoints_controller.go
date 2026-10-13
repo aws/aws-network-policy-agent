@@ -19,7 +19,9 @@ package controllers
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -189,11 +191,18 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	// Programming must not wait on cleanup: an error that never clears would otherwise stop
 	// every pod this CPE selects on the node from receiving updates.
 	cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
+	// Record everything programmed below so it can be cleaned up later. If cleanup failed, also
+	// keep the pods it was cleaning up so the retry and the CPE delete flow still find them.
+	committedPods, committedPodIdentifiers := targetPods, targetPodIdentifiers
 	if cleanupErr != nil {
 		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
-	} else {
-		r.commitClusterPolicyEndpointState(resourceName, targetPods, targetPodIdentifiers, parentCPEList)
+		committedPods = append(slices.Clone(targetPods), podsToBeCleanedUp...)
+		committedPodIdentifiers = maps.Clone(targetPodIdentifiers)
+		for _, pod := range podsToBeCleanedUp {
+			committedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
+		}
 	}
+	r.commitClusterPolicyEndpointState(resourceName, committedPods, committedPodIdentifiers, parentCPEList)
 
 	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
@@ -509,9 +518,9 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 	return nil
 }
 
-// commitClusterPolicyEndpointState updates the two maps derive left untouched. Runs only
-// after cleanup succeeds so a failure leaves DeriveStalePodIdentifiers producing the same
-// stale set on the requeued reconcile. Keys clusterNetworkPolicyToPodIdentifierMap by
+// commitClusterPolicyEndpointState updates the two maps derive left untouched. Runs after
+// cleanup; when cleanup failed the caller passes the pods it was cleaning up as well, so
+// DeriveStalePodIdentifiers produces the same stale set on the requeued reconcile. Keys clusterNetworkPolicyToPodIdentifierMap by
 // GetParentNPNameFromPEName(resourceName) — the same derivation the reader uses, so writes
 // and reads agree when GenerateName truncates the CPE base (CNP names >= 58 chars).
 func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(
