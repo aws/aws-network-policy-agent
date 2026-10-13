@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"errors"
-	"k8s.io/apimachinery/pkg/types"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Programming path: a parent CNP split across several ClusterPolicyEndpoints must be
