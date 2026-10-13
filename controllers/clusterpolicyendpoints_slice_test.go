@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"errors"
+	"k8s.io/apimachinery/pkg/types"
 	"testing"
 	"time"
 
@@ -482,6 +483,7 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		// web was deleted on the node before the controller dropped it from the CPE.
 		fx.detachContext(web)
+		fx.bpf.DeletedPods = map[types.NamespacedName]bool{{Name: "web-aaa", Namespace: "np-target"}: true}
 
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 
@@ -489,6 +491,19 @@ func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 		state, ok := fx.clusterPolicyState(api)
 		require.True(t, ok)
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	})
+
+	t.Run("a new identifier is programmed once its first pod attaches", func(t *testing.T) {
+		web := identifierOf("web-aaa")
+		fx := newCPEFixture(t)
+		// No programs exist for web until the reconcile attaches them.
+		fx.detachContext(web)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(web))
 	})
 
 	t.Run("draining every identifier from the node does not error", func(t *testing.T) {
@@ -764,6 +779,30 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 		fx.assertClusterPolicyRulesCleared(fresh)
 		fx.assertClusterPolicyRulesCleared(resident)
+		fx.assertClusterPolicyRulesCleared(stuck)
+	})
+
+	t.Run("a failed cleanup of an identifier still selected elsewhere is retried", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("stuck-aaa", "10.1.1.1"), remotePod("stuck-bbb", "10.1.2.1"),
+				localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+
+		// Only the local pod is deselected; the remote one keeps stuck's identifier listed in
+		// the CPE, so every reconcile re-adds the CPE to its entry and only the stale
+		// identifiers the failed pass committed get it scrubbed again.
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{remotePod("stuck-bbb", "10.1.2.1"), localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
+
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+		fx.reset()
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		fx.assertClusterPolicyRulesCleared(stuck)
 	})
 
 	t.Run("a programming failure is retried and recovers", func(t *testing.T) {

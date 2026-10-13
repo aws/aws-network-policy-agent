@@ -218,6 +218,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		}
 	}
 
+	// Same samples as before programming stopped waiting on cleanup: a failed cleanup used to
+	// return before this point, leaving the annotation for the retry to measure.
 	if cleanupErr == nil {
 		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
 	}
@@ -404,8 +406,8 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 // deriveTargetPodsForParentCNP scrubs the parent's CPEs out of every stale identifier's
 // podIdentifierToClusterPolicyEndpointMap entry so cleanupClusterPolicyPod's presence check
 // only sees sibling CPEs from OTHER parents. Leaves ClusterPolicyEndpointSelectorMap and
-// clusterNetworkPolicyToPodIdentifierMap untouched — the caller commits those AFTER cleanup
-// via commitClusterPolicyEndpointState so a failed cleanup can be retried.
+// clusterNetworkPolicyToPodIdentifierMap untouched for the caller to commit via
+// commitClusterPolicyEndpointState once cleanup has run.
 func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx context.Context, parentCNPName, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod, []string, error) {
 	var newTargetPods []npatypes.Pod
 	var podsToBeCleanedUp []npatypes.Pod
@@ -519,8 +521,9 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 }
 
 // commitClusterPolicyEndpointState updates the two maps derive left untouched. Runs after
-// cleanup; when cleanup failed the caller passes the pods it was cleaning up as well, so
-// DeriveStalePodIdentifiers produces the same stale set on the requeued reconcile. Keys clusterNetworkPolicyToPodIdentifierMap by
+// cleanup. When reconcileClusterPolicyEndpoint's cleanup fails it also passes the pods it
+// was cleaning up, so DeriveStalePodIdentifiers produces the same stale set on the retry.
+// Keys clusterNetworkPolicyToPodIdentifierMap by
 // GetParentNPNameFromPEName(resourceName) — the same derivation the reader uses, so writes
 // and reads agree when GenerateName truncates the CPE base (CNP names >= 58 chars).
 func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(
