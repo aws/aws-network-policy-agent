@@ -146,7 +146,7 @@ function verify_endpoint_chunk_size() {
         echo "Could not read args from container $name in deployment $name"
         return 1
     fi
-    if [[ $args != *"endpoint-chunk-size=$expected"* ]]; then
+    if [[ $args != *"\"--endpoint-chunk-size=$expected\""* ]]; then
         echo "Expected endpoint-chunk-size=$expected in the controller args, not found"
         return 1
     fi
