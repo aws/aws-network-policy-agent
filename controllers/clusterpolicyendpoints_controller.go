@@ -218,8 +218,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 		}
 	}
 
-	// Same samples as before programming stopped waiting on cleanup: a failed cleanup used to
-	// return before this point, leaving the annotation for the retry to measure.
+	// A failed cleanup used to return before this point, leaving the annotation for the retry
+	// to measure, so it still does. A derive failure used to return too, but now consumes it.
 	if cleanupErr == nil {
 		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
 	}
