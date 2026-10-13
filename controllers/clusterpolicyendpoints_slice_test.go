@@ -734,6 +734,38 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 			"once committed, the cleanup is not repeated")
 	})
 
+	// fresh is programmed during a pass whose cleanup fails, so the state that pass commits
+	// must still record it, or nothing would remove its rules later.
+	freshAddedWhileStuck := func(t *testing.T) *cpeFixture {
+		fx := stuckCleanup(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("resident-aaa", "10.1.1.2"), localPod("fresh-aaa", "10.1.1.3")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
+		require.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(fresh))
+		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+		fx.reset()
+		return fx
+	}
+
+	t.Run("a pod added while cleanup fails is cleaned up when later deselected", func(t *testing.T) {
+		fx := freshAddedWhileStuck(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("resident-aaa", "10.1.1.2")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+		fx.assertClusterPolicyRulesCleared(fresh)
+		fx.assertClusterPolicyRulesCleared(stuck)
+	})
+
+	t.Run("a pod added while cleanup fails is cleaned up when its CPE is deleted", func(t *testing.T) {
+		fx := freshAddedWhileStuck(t)
+		fx.deleteSlice("cnp-1-aaaaa")
+		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+		fx.assertClusterPolicyRulesCleared(fresh)
+		fx.assertClusterPolicyRulesCleared(resident)
+	})
+
 	t.Run("a programming failure is retried and recovers", func(t *testing.T) {
 		fx := newCPEFixture(t)
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
