@@ -85,6 +85,7 @@ jobs:
       KERNEL_LINE: ${{ matrix.candidate.kernel_line }}
       AMI_ID: ${{ matrix.candidate.image_id }}
       KUBECONFIG: ${{ github.workspace }}/.kube/config
+      TEST_IMAGE_REGISTRY: ${{ secrets.TEST_IMAGE_REGISTRY }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
