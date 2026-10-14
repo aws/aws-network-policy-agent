@@ -120,7 +120,10 @@ func main() {
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
-		ebpfClient.ReAttachEbpfProbes()
+		if err := ebpfClient.ReAttachEbpfProbes(); err != nil {
+			log.Errorf("unable to reattach eBPF probes %v", err)
+			os.Exit(1)
+		}
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
 

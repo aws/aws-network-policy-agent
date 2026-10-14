@@ -648,6 +648,45 @@ func TestGetBPFMapPinPathFromPodIdentifier(t *testing.T) {
 	}
 }
 
+func TestGetBPFMapNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		direction string
+		want      BPFMapNames
+	}{
+		{
+			name:      "ingress",
+			direction: "ingress",
+			want: BPFMapNames{
+				NetworkPolicy:        TC_INGRESS_MAP,
+				ClusterNetworkPolicy: TC_CLUSTER_POLICY_INGRESS_MAP,
+				PodState:             TC_INGRESS_POD_STATE_MAP,
+			},
+		},
+		{
+			name:      "egress",
+			direction: "egress",
+			want: BPFMapNames{
+				NetworkPolicy:        TC_EGRESS_MAP,
+				ClusterNetworkPolicy: TC_CLUSTER_POLICY_EGRESS_MAP,
+				PodState:             TC_EGRESS_POD_STATE_MAP,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := GetBPFMapNames(tt.direction)
+			assert.True(t, ok)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, []string{tt.want.NetworkPolicy, tt.want.ClusterNetworkPolicy, tt.want.PodState}, got.Required())
+		})
+	}
+
+	_, ok := GetBPFMapNames("unknown")
+	assert.False(t, ok)
+}
+
 func TestGetPolicyEndpointIdentifier(t *testing.T) {
 	type args struct {
 		policyName      string

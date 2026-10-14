@@ -14,7 +14,6 @@ import (
 	"github.com/samber/lo"
 
 	mock_bpfclient "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser/mocks"
-	mock_bpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps/mocks"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	mock_tc "github.com/aws/aws-ebpf-sdk-go/pkg/tc/mocks"
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -137,8 +136,9 @@ func TestLoadBPFProgram(t *testing.T) {
 				pinPath: {
 					Program: goebpfprogs.BpfProgram{ProgFD: 7},
 					Maps: map[string]goebpfmaps.BpfMap{
-						utils.TC_INGRESS_MAP:           {MapFD: 100},
-						utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
+						utils.TC_INGRESS_MAP:                {MapFD: 100},
+						utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 101},
+						utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 102},
 					},
 				},
 			},
@@ -151,6 +151,22 @@ func TestLoadBPFProgram(t *testing.T) {
 				pinPath: {
 					Program: goebpfprogs.BpfProgram{ProgFD: 7},
 					Maps:    map[string]goebpfmaps.BpfMap{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			// A partial map set: non-empty, valid progFD, but the pod state map is
+			// absent. Indexing it later would yield a zero-valued BpfMap with FD 0
+			// and every write would fail with EINVAL, so the load must be rejected.
+			name: "program loaded without the pod state map",
+			loadReturn: map[string]goelf.BpfData{
+				pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: 7},
+					Maps: map[string]goebpfmaps.BpfMap{
+						utils.TC_INGRESS_MAP:                {MapFD: 100},
+						utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 102},
+					},
 				},
 			},
 			wantErr: true,
@@ -198,6 +214,196 @@ func TestLoadBPFProgram(t *testing.T) {
 	}
 }
 
+func TestLoadBPFProgramRejectsIncompleteMapSet(t *testing.T) {
+	for _, direction := range []string{"ingress", "egress"} {
+		mapNames, ok := utils.GetBPFMapNames(direction)
+		if !assert.True(t, ok, "map names must exist for %s", direction) {
+			continue
+		}
+
+		for _, failureMode := range []string{"missing", "zero FD", "renamed"} {
+			for _, missingMapName := range mapNames.Required() {
+				t.Run(fmt.Sprintf("%s/%s/%s", direction, failureMode, missingMapName), func(t *testing.T) {
+					maps := make(map[string]goebpfmaps.BpfMap, len(mapNames.Required()))
+					for index, mapName := range mapNames.Required() {
+						maps[mapName] = goebpfmaps.BpfMap{MapFD: uint32(100 + index)}
+					}
+					if failureMode == "missing" {
+						delete(maps, missingMapName)
+					} else if failureMode == "zero FD" {
+						mapInfo := maps[missingMapName]
+						mapInfo.MapFD = 0
+						maps[missingMapName] = mapInfo
+					} else {
+						delete(maps, missingMapName)
+						maps["unexpected_map"] = goebpfmaps.BpfMap{MapFD: 999}
+					}
+
+					pinPath := utils.GetBPFPinPathFromPodIdentifier("test-abcd", direction)
+					ctrl := gomock.NewController(t)
+					defer ctrl.Finish()
+					mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+					mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
+						map[string]goelf.BpfData{
+							pinPath: {
+								Program: goebpfprogs.BpfProgram{ProgFD: 7},
+								Maps:    maps,
+							},
+						}, map[string]goebpfmaps.BpfMap{}, nil)
+
+					testBpfClient := &bpfClient{bpfSDKClient: mockBpfClient}
+					_, _, err := testBpfClient.loadBPFProgram("handle_"+direction, direction, "test-abcd")
+					if !assert.Error(t, err) {
+						return
+					}
+					assert.Contains(t, err.Error(), missingMapName)
+				})
+			}
+		}
+	}
+}
+
+func TestLoadBPFProgramCleansUpRejectedLoadResources(t *testing.T) {
+	const podIdentifier = "test-abcd"
+	direction := "ingress"
+	pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
+	incomplete := testBPFData(direction, 0)
+
+	programFile, err := os.CreateTemp(t.TempDir(), "program")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer programFile.Close()
+	incomplete.Program.ProgFD = int(programFile.Fd())
+	delete(incomplete.Maps, utils.TC_INGRESS_POD_STATE_MAP)
+
+	mapNames, ok := utils.GetBPFMapNames(direction)
+	if !assert.True(t, ok) {
+		return
+	}
+	loadedMapData := make(map[string]goebpfmaps.BpfMap, len(mapNames.Required()))
+	mapFiles := make([]*os.File, 0, len(mapNames.Required()))
+	for _, mapName := range mapNames.Required() {
+		mapFile, createErr := os.CreateTemp(t.TempDir(), mapName)
+		if !assert.NoError(t, createErr) {
+			return
+		}
+		mapFiles = append(mapFiles, mapFile)
+		loadedMapData[mapName] = goebpfmaps.BpfMap{MapFD: uint32(mapFile.Fd())}
+	}
+	defer func() {
+		for _, mapFile := range mapFiles {
+			_ = mapFile.Close()
+		}
+	}()
+
+	globalFile, err := os.CreateTemp(t.TempDir(), "global")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer globalFile.Close()
+	loadedMapData["global_map"] = goebpfmaps.BpfMap{MapFD: uint32(globalFile.Fd())}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(
+		map[string]goelf.BpfData{pinPath: incomplete}, loadedMapData, nil)
+
+	_, _, err = (&bpfClient{bpfSDKClient: mockBpfClient}).loadBPFProgram("handle_ingress", direction, podIdentifier)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), utils.TC_INGRESS_POD_STATE_MAP)
+	assert.Error(t, programFile.Close(), "rejected program must be closed by cleanup")
+	for _, mapFile := range mapFiles {
+		assert.Error(t, mapFile.Close(), "rejected local map must be closed by cleanup")
+	}
+	assert.NoError(t, globalFile.Close(), "shared maps must not be closed by local cleanup")
+}
+
+func TestDeleteBPFProgramAndMapsClearsCleanedHandles(t *testing.T) {
+	const podIdentifier = "test-abcd"
+
+	programFile, err := os.CreateTemp(t.TempDir(), "program")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer programFile.Close()
+
+	mapNames, ok := utils.GetBPFMapNames("ingress")
+	if !assert.True(t, ok) {
+		return
+	}
+	mapFiles := make(map[string]*os.File, len(mapNames.Required()))
+	defer func() {
+		for _, mapFile := range mapFiles {
+			_ = mapFile.Close()
+		}
+	}()
+	maps := make(map[string]goebpfmaps.BpfMap, len(mapNames.Required()))
+	for _, mapName := range mapNames.Required() {
+		mapFile, createErr := os.CreateTemp(t.TempDir(), mapName)
+		if !assert.NoError(t, createErr) {
+			return
+		}
+		mapFiles[mapName] = mapFile
+		maps[mapName] = goebpfmaps.BpfMap{MapFD: uint32(mapFile.Fd())}
+	}
+
+	testBpfClient := &bpfClient{policyEndpointeBPFContext: new(sync.Map)}
+	testBpfClient.policyEndpointeBPFContext.Store(podIdentifier, BPFContext{
+		ingressPgmInfo: goelf.BpfData{
+			Program: goebpfprogs.BpfProgram{ProgFD: int(programFile.Fd())},
+			Maps:    maps,
+		},
+	})
+
+	assert.NoError(t, testBpfClient.deleteBPFProgramAndMaps(podIdentifier, "ingress"))
+
+	value, ok := testBpfClient.policyEndpointeBPFContext.Load(podIdentifier)
+	if !assert.True(t, ok) {
+		return
+	}
+	context := value.(BPFContext)
+	assert.Zero(t, context.ingressPgmInfo.Program.ProgFD)
+	for _, mapName := range mapNames.Required() {
+		assert.Zero(t, context.ingressPgmInfo.Maps[mapName].MapFD)
+	}
+	assert.Error(t, programFile.Close(), "cleaned program handle must not remain open")
+	for mapName, mapFile := range mapFiles {
+		assert.Error(t, mapFile.Close(), "%s handle must not remain open", mapName)
+	}
+}
+
+type recordingInMemoryBPFMap struct {
+	refreshCalls int
+	lastContents map[string][]byte
+}
+
+func (m *recordingInMemoryBPFMap) BulkRefresh(contents map[string][]byte) error {
+	m.refreshCalls++
+	m.lastContents = contents
+	return nil
+}
+
+func testBPFData(direction string, progFD int) goelf.BpfData {
+	mapNames, ok := utils.GetBPFMapNames(direction)
+	if !ok {
+		panic(fmt.Sprintf("unsupported test direction %q", direction))
+	}
+
+	maps := make(map[string]goebpfmaps.BpfMap, len(mapNames.Required()))
+	for index, mapName := range mapNames.Required() {
+		maps[mapName] = goebpfmaps.BpfMap{
+			MapFD: uint32(100 + index),
+			MapID: uint32(200 + index),
+		}
+	}
+	return goelf.BpfData{
+		Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+		Maps:    maps,
+	}
+}
+
 func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 	protocolTCP := corev1.ProtocolTCP
 	var port80 int32 = 80
@@ -227,21 +433,15 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 		},
 	}
 
-	sampleIngressPgmInfo := goelf.BpfData{
-		Maps: map[string]goebpfmaps.BpfMap{
-			utils.TC_INGRESS_MAP: {
-				MapFD: uint32(ingressMapFD),
-				MapID: uint32(ingressMapID),
-			},
-		},
+	sampleIngressPgmInfo := testBPFData("ingress", 21)
+	sampleIngressPgmInfo.Maps[utils.TC_INGRESS_MAP] = goebpfmaps.BpfMap{
+		MapFD: uint32(ingressMapFD),
+		MapID: uint32(ingressMapID),
 	}
-	sampleEgressPgmInfo := goelf.BpfData{
-		Maps: map[string]goebpfmaps.BpfMap{
-			utils.TC_EGRESS_MAP: {
-				MapFD: uint32(egressMapFD),
-				MapID: uint32(egressMapID),
-			},
-		},
+	sampleEgressPgmInfo := testBPFData("egress", 22)
+	sampleEgressPgmInfo.Maps[utils.TC_EGRESS_MAP] = goebpfmaps.BpfMap{
+		MapFD: uint32(egressMapFD),
+		MapID: uint32(egressMapID),
 	}
 
 	tests := []struct {
@@ -261,24 +461,30 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ingressMap := &recordingInMemoryBPFMap{}
+			egressMap := &recordingInMemoryBPFMap{}
 			testBpfClient := &bpfClient{
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
+				ingressInMemoryMap:        new(sync.Map),
+				egressInMemoryMap:         new(sync.Map),
+				fwRuleProcessor:           fwrp.NewFirewallRuleProcessor("10.1.1.1", "/32", false),
 			}
-
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			mockMapClient := mock_bpfmaps.NewMockBpfMapAPIs(ctrl)
-			mockMapClient.EXPECT().BulkRefreshMapEntries(gomock.Any()).AnyTimes()
 
 			sampleBPFContext := BPFContext{
 				ingressPgmInfo: sampleIngressPgmInfo,
 				egressPgmInfo:  sampleEgressPgmInfo,
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
+			testBpfClient.ingressInMemoryMap.Store(tt.podIdentifier, ingressMap)
+			testBpfClient.egressInMemoryMap.Store(tt.podIdentifier, egressMap)
 			gotErr := testBpfClient.UpdateEbpfMaps(tt.podIdentifier, tt.ingressFirewallRules,
 				tt.egressFirewallRules)
-			assert.Equal(t, gotErr, tt.wantErr)
+			assert.Equal(t, tt.wantErr, gotErr)
+			assert.Equal(t, 1, ingressMap.refreshCalls)
+			assert.Equal(t, 1, egressMap.refreshCalls)
+			assert.NotEmpty(t, ingressMap.lastContents)
+			assert.NotEmpty(t, egressMap.lastContents)
 		})
 	}
 }
@@ -286,21 +492,15 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 	ingressPodStateMapFD, ingressPodStateMapID, egressPodStateMapFD, egressPodStateMapID := 11, 12, 13, 14
 
-	sampleIngressPgmInfo := goelf.BpfData{
-		Maps: map[string]goebpfmaps.BpfMap{
-			utils.TC_INGRESS_POD_STATE_MAP: {
-				MapFD: uint32(ingressPodStateMapFD),
-				MapID: uint32(ingressPodStateMapID),
-			},
-		},
+	sampleIngressPgmInfo := testBPFData("ingress", 31)
+	sampleIngressPgmInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP] = goebpfmaps.BpfMap{
+		MapFD: uint32(ingressPodStateMapFD),
+		MapID: uint32(ingressPodStateMapID),
 	}
-	sampleEgressPgmInfo := goelf.BpfData{
-		Maps: map[string]goebpfmaps.BpfMap{
-			utils.TC_EGRESS_POD_STATE_MAP: {
-				MapFD: uint32(egressPodStateMapFD),
-				MapID: uint32(egressPodStateMapID),
-			},
-		},
+	sampleEgressPgmInfo := testBPFData("egress", 32)
+	sampleEgressPgmInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP] = goebpfmaps.BpfMap{
+		MapFD: uint32(egressPodStateMapFD),
+		MapID: uint32(egressPodStateMapID),
 	}
 
 	tests := []struct {
@@ -319,15 +519,18 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			originalUpdateBPFMapEntry := updateBPFMapEntry
+			t.Cleanup(func() { updateBPFMapEntry = originalUpdateBPFMapEntry })
+			var updatedMapFDs []uint32
+			updateBPFMapEntry = func(mapInfo goebpfmaps.BpfMap, key, value uintptr, flags uint64) error {
+				updatedMapFDs = append(updatedMapFDs, mapInfo.MapFD)
+				return nil
+			}
+
 			testBpfClient := &bpfClient{
 				hostMask:                  "/32",
 				policyEndpointeBPFContext: new(sync.Map),
 			}
-
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			mockMapClient := mock_bpfmaps.NewMockBpfMapAPIs(ctrl)
-			mockMapClient.EXPECT().CreateUpdateMapEntry(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 
 			sampleBPFContext := BPFContext{
 				ingressPgmInfo: sampleIngressPgmInfo,
@@ -335,7 +538,124 @@ func TestBpfClient_UpdatePodStateEbpfMaps(t *testing.T) {
 			}
 			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY, tt.state, true, true)
-			assert.Equal(t, gotErr, tt.wantErr)
+			assert.Equal(t, tt.wantErr, gotErr)
+			assert.ElementsMatch(t, []uint32{uint32(ingressPodStateMapFD), uint32(egressPodStateMapFD)}, updatedMapFDs)
+		})
+	}
+}
+
+func TestBpfClient_UpdatePodStateEbpfMapsMissingMapPreservesContext(t *testing.T) {
+	// A recovered or reloaded BPFContext can carry a program whose ProgFD is set while the
+	// pod state map is absent from its Maps set. Indexing without checking presence yields a
+	// zero-valued BpfMap, so the write targets FD 0 and the kernel returns EINVAL. Returning
+	// that error keeps a missing pod-state map from being treated as a successful update.
+	tests := []struct {
+		name           string
+		podIdentifier  string
+		ingressPgmInfo goelf.BpfData
+		egressPgmInfo  goelf.BpfData
+		updateIngress  bool
+		updateEgress   bool
+		wantErrSubstr  string
+	}{
+		{
+			name:          "ingress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			ingressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 45},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			updateIngress: true,
+			wantErrSubstr: utils.TC_INGRESS_POD_STATE_MAP,
+		},
+		{
+			name:          "egress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			egressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 49},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			updateEgress:  true,
+			wantErrSubstr: utils.TC_EGRESS_POD_STATE_MAP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, BPFContext{
+				ingressPgmInfo: tt.ingressPgmInfo,
+				egressPgmInfo:  tt.egressPgmInfo,
+			})
+
+			gotErr := testBpfClient.UpdatePodStateEbpfMaps(tt.podIdentifier, POD_STATE_MAP_KEY,
+				DEFAULT_ALLOW, tt.updateIngress, tt.updateEgress)
+
+			// The failure must surface to the caller so reconciliation can retry.
+			assert.Error(t, gotErr)
+			assert.Contains(t, gotErr.Error(), tt.wantErrSubstr)
+
+			// The context and its handles remain owned by the client so attached filters and
+			// shadow-map ownership remain available for a retry.
+			_, stillCached := testBpfClient.policyEndpointeBPFContext.Load(tt.podIdentifier)
+			assert.True(t, stillCached, "bpf context ownership must be preserved after a pod state map failure")
+		})
+	}
+}
+
+func TestBpfClient_CreatePodStateEbpfEntryIfNotExistsMissingMapPreservesContext(t *testing.T) {
+	// Same hazard as the update path, on the function that seeds the entry in the first place.
+	// A missing pod_state entry is exactly what makes the datapath drop every packet, so an
+	// unnoticed failure here is at least as damaging as a failed update.
+	tests := []struct {
+		name           string
+		podIdentifier  string
+		ingressPgmInfo goelf.BpfData
+		egressPgmInfo  goelf.BpfData
+		wantErrSubstr  string
+	}{
+		{
+			name:          "ingress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			ingressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 45},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_INGRESS_POD_STATE_MAP,
+		},
+		{
+			name:          "egress pod state map absent from context",
+			podIdentifier: "sample_pod_identifier",
+			egressPgmInfo: goelf.BpfData{
+				Program: goebpfprogs.BpfProgram{ProgFD: 49},
+				Maps:    map[string]goebpfmaps.BpfMap{},
+			},
+			wantErrSubstr: utils.TC_EGRESS_POD_STATE_MAP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testBpfClient := &bpfClient{
+				hostMask:                  "/32",
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, BPFContext{
+				ingressPgmInfo: tt.ingressPgmInfo,
+				egressPgmInfo:  tt.egressPgmInfo,
+			})
+
+			gotErr := testBpfClient.CreatePodStateEbpfEntryIfNotExists(tt.podIdentifier,
+				POD_STATE_MAP_KEY, DEFAULT_ALLOW)
+
+			assert.Error(t, gotErr)
+			assert.Contains(t, gotErr.Error(), tt.wantErrSubstr)
+
+			_, stillCached := testBpfClient.policyEndpointeBPFContext.Load(tt.podIdentifier)
+			assert.True(t, stillCached, "bpf context ownership must be preserved after a pod state entry failure")
 		})
 	}
 }
@@ -534,7 +854,67 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 	}
 }
 
+func TestAttachBPFProbeDoesNotDetachUnverifiedFilter(t *testing.T) {
+	tests := []struct {
+		name       string
+		attach     func(*bpfClient) error
+		attachCall func(*mock_tc.MockBpfTc)
+	}{
+		{
+			name: "ingress",
+			attach: func(client *bpfClient) error {
+				_, err := client.attachIngressBPFProbe("mockedveth0", "sample-pod-default")
+				return err
+			},
+			attachCall: func(mockTCClient *mock_tc.MockBpfTc) {
+				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", 3, utils.TC_INGRESS_PROG).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCEgressDetach(gomock.Any()).Times(0)
+			},
+		},
+		{
+			name: "egress",
+			attach: func(client *bpfClient) error {
+				_, err := client.attachEgressBPFProbe("mockedveth0", "sample-pod-default")
+				return err
+			},
+			attachCall: func(mockTCClient *mock_tc.MockBpfTc) {
+				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", 3, utils.TC_EGRESS_PROG).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCIngressDetach(gomock.Any()).Times(0)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+			tt.attachCall(mockTCClient)
+
+			testBpfClient := &bpfClient{
+				bpfTCClient:               mockTCClient,
+				policyEndpointeBPFContext: new(sync.Map),
+			}
+			testBpfClient.policyEndpointeBPFContext.Store("sample-pod-default", BPFContext{
+				ingressPgmInfo: goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: 3}},
+				egressPgmInfo:  goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: 3}},
+			})
+
+			assert.EqualError(t, tt.attach(testBpfClient), utils.ErrFileExists)
+		})
+	}
+}
+
 func TestRecoverBPFState(t *testing.T) {
+	originalNewInMemoryBpfMap := newInMemoryBpfMap
+	t.Cleanup(func() { newInMemoryBpfMap = originalNewInMemoryBpfMap })
+	newInMemoryBpfMap = func(bpfMap *goebpfmaps.BpfMap) (*InMemoryBpfMap, error) {
+		return &InMemoryBpfMap{
+			bpfMap:   bpfMap,
+			contents: make(map[string][]byte),
+		}, nil
+	}
+
 	sampleConntrackMap := goebpfmaps.BpfMap{
 		MapFD: 2,
 	}
@@ -556,18 +936,8 @@ func TestRecoverBPFState(t *testing.T) {
 	}
 
 	ProgramAndMap := map[string]goelf.BpfData{
-		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_ingress": {
-			Program: goebpfprogs.BpfProgram{
-				ProgFD: 1,
-			},
-			Maps: make(map[string]goebpfmaps.BpfMap),
-		},
-		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_egress": {
-			Program: goebpfprogs.BpfProgram{
-				ProgFD: 2,
-			},
-			Maps: make(map[string]goebpfmaps.BpfMap),
-		},
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_ingress": testBPFData("ingress", 1),
+		"/sys/fs/bpf/globals/aws/programs/hello-udp-748dc8d996-default_handle_egress":  testBPFData("egress", 2),
 	}
 
 	type bpfContextValidation struct {
@@ -648,12 +1018,8 @@ func TestRecoverBPFState(t *testing.T) {
 			currentProgramAndMap: lo.Assign(
 				ProgramAndMap,
 				map[string]goelf.BpfData{
-					"/sys/fs/bpf/globals/aws/programs/hello-udp-1234-default_handle_ingress": {
-						Program: goebpfprogs.BpfProgram{
-							ProgFD: 3,
-						},
-						Maps: make(map[string]goebpfmaps.BpfMap),
-					},
+					"/sys/fs/bpf/globals/aws/programs/hello-udp-1234-default_handle_ingress": testBPFData("ingress", 3),
+					"/sys/fs/bpf/globals/aws/programs/hello-udp-1234-default_handle_egress":  testBPFData("egress", 4),
 				},
 			),
 			want: want{
@@ -668,7 +1034,7 @@ func TestRecoverBPFState(t *testing.T) {
 					},
 					"hello-udp-1234-default": {
 						ingressProbeFd: 3,
-						egressProbeFd:  0,
+						egressProbeFd:  4,
 					},
 				},
 			},
@@ -716,6 +1082,107 @@ func TestRecoverBPFState(t *testing.T) {
 		})
 	}
 
+}
+
+func TestRecoverBPFStateRejectsIncompleteMapSet(t *testing.T) {
+	const podIdentifier = "hello-udp-748dc8d996-default"
+	pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
+	incomplete := testBPFData("ingress", 1)
+	delete(incomplete.Maps, utils.TC_INGRESS_POD_STATE_MAP)
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(nil, nil)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{
+		pinPath: incomplete,
+	}, nil)
+
+	context := new(sync.Map)
+	_, _, _, _, _, err := NewMockBpfClient().recoverBPFState(
+		mock_tc.NewMockBpfTc(ctrl),
+		mockBpfClient,
+		context,
+		new(sync.Map),
+		false,
+		false,
+		false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), utils.TC_INGRESS_POD_STATE_MAP)
+	assert.Equal(t, 0, sizeOfSyncMap(context), "invalid recovered state must not be published")
+}
+
+func TestRecoverBPFStateRejectsMissingDirection(t *testing.T) {
+	const podIdentifier = "hello-udp-748dc8d996-default"
+	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(nil, nil)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{
+		ingressPinPath: testBPFData("ingress", 1),
+	}, nil)
+
+	client := NewMockBpfClient()
+	context := new(sync.Map)
+	_, _, _, _, _, err := client.recoverBPFState(
+		mock_tc.NewMockBpfTc(ctrl),
+		mockBpfClient,
+		context,
+		new(sync.Map),
+		false,
+		false,
+		false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing egress direction")
+	assert.Equal(t, 0, sizeOfSyncMap(context), "incomplete recovered directions must not be published")
+	assert.Equal(t, 0, sizeOfSyncMap(client.ingressInMemoryMap))
+	assert.Equal(t, 0, sizeOfSyncMap(client.egressInMemoryMap))
+}
+
+func TestRecoverBPFStateRejectsShadowHydrationFailure(t *testing.T) {
+	const podIdentifier = "hello-udp-748dc8d996-default"
+	programAndMaps := map[string]goelf.BpfData{
+		utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress"): testBPFData("ingress", 1),
+		utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress"):  testBPFData("egress", 2),
+	}
+
+	originalNewInMemoryBpfMap := newInMemoryBpfMap
+	t.Cleanup(func() { newInMemoryBpfMap = originalNewInMemoryBpfMap })
+	newInMemoryBpfMap = func(*goebpfmaps.BpfMap) (*InMemoryBpfMap, error) {
+		return nil, errors.New("shadow hydration failed")
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(nil, nil)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(programAndMaps, nil)
+
+	client := NewMockBpfClient()
+	context := new(sync.Map)
+	_, _, _, _, _, err := client.recoverBPFState(
+		mock_tc.NewMockBpfTc(ctrl),
+		mockBpfClient,
+		context,
+		new(sync.Map),
+		false,
+		false,
+		false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "shadow hydration failed")
+	assert.Equal(t, 0, sizeOfSyncMap(context), "failed shadow hydration must not publish context")
+	assert.Equal(t, 0, sizeOfSyncMap(client.ingressInMemoryMap))
+	assert.Equal(t, 0, sizeOfSyncMap(client.egressInMemoryMap))
+	assert.Equal(t, 0, sizeOfSyncMap(client.clusterPolicyIngressInMemoryMap))
+	assert.Equal(t, 0, sizeOfSyncMap(client.clusterPolicyEgressInMemoryMap))
 }
 
 func sizeOfSyncMap(m *sync.Map) int {
@@ -869,8 +1336,9 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_ingress": {
 				Program: goebpfprogs.BpfProgram{ProgFD: 10},
 				Maps: map[string]goebpfmaps.BpfMap{
-					utils.TC_INGRESS_MAP:           {MapFD: 100},
-					utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
+					utils.TC_INGRESS_MAP:                {MapFD: 100},
+					utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 101},
+					utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 102},
 				},
 			},
 		},
@@ -882,8 +1350,9 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_egress": {
 				Program: goebpfprogs.BpfProgram{ProgFD: 11},
 				Maps: map[string]goebpfmaps.BpfMap{
-					utils.TC_EGRESS_MAP:           {MapFD: 110},
-					utils.TC_EGRESS_POD_STATE_MAP: {MapFD: 111},
+					utils.TC_EGRESS_MAP:                {MapFD: 110},
+					utils.TC_CLUSTER_POLICY_EGRESS_MAP: {MapFD: 111},
+					utils.TC_EGRESS_POD_STATE_MAP:      {MapFD: 112},
 				},
 			},
 		},
