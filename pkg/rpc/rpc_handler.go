@@ -83,8 +83,11 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 	podIdentifier := utils.GetPodIdentifier(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
 	isFirstPodInPodIdentifier := s.policyReconciler.GeteBPFClient().IsFirstPodInPodIdentifier(podIdentifier)
 	s.policyReconciler.GeteBPFClient().ClearDeletedPod(utils.GetPodNamespacedName(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE))
+	// A CNI ADD proves the pod exists, so podConfirmedLive=true: a stale tombstone
+	// must not veto this attach. Any skip comes back as ErrAttachSkippedPodDeleted
+	// and fails the RPC, so a live pod is never reported as enforced.
 	err = s.policyReconciler.GeteBPFClient().AttacheBPFProbes(types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE},
-		podIdentifier, int(in.InterfaceCount))
+		podIdentifier, int(in.InterfaceCount), true)
 	if err != nil {
 		log().Errorf("Attaching eBPF probe failed for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, err)
 		return nil, err

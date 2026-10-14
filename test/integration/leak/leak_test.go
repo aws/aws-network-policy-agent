@@ -14,6 +14,7 @@ import (
 	network "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -23,6 +24,10 @@ const (
 	podsPerJob    = 100
 	pollInterval  = 10 * time.Second
 	cronJobName   = "churn-generator"
+	agentLogPath  = "/var/log/aws-routed-eni/network-policy-agent.log"
+	// Logged once per completed egress probe attach, so a pod appearing twice has
+	// been attached twice.
+	egressAttachMarker = "Successfully attached Egress TC probe for pod: "
 )
 
 var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
@@ -31,6 +36,11 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 		defaultDenyPolicy *network.NetworkPolicy
 		cronJob           *batchv1.CronJob
 		workerNodes       []v1.Node
+		// node name -> check pod name / pre-churn state, so the assertions below
+		// can compare against the node as it was before this run.
+		checkPods      map[string]string
+		baselineIdents map[string]map[string]bool
+		logOffsets     map[string]int
 	)
 
 	It("should not leak BPF progs/maps after high pod churn with network policy", func() {
@@ -40,10 +50,29 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(len(workerNodes)).To(BeNumerically(">=", 1))
 		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
-			node.Labels["test-node"] = "true"
-			err = fw.K8sClient.Update(ctx, &node)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(setNodeTestLabel(node.Name, true)).ToNot(HaveOccurred())
 		})
+
+		By("Deploying node-shell check pods and snapshotting pre-churn BPF state")
+		// The suite has to tolerate a node that is already dirty. Leaked pins never
+		// self-reclaim, so any earlier run's leftovers would otherwise fail this
+		// test forever, no matter how correct the agent is. Snapshot first and
+		// assert on the delta.
+		checkPods = map[string]string{}
+		baselineIdents = map[string]map[string]bool{}
+		logOffsets = map[string]int{}
+		for _, node := range workerNodes {
+			checkPodName := fmt.Sprintf("leak-check-%s", node.Name)
+			checkPod := buildNodeCheckPod(checkPodName, node.Name)
+			_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, 2*time.Minute)
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(func() {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
+			})
+			checkPods[node.Name] = checkPodName
+			baselineIdents[node.Name] = churnIdentifiersOnNode(checkPodName)
+			logOffsets[node.Name] = agentLogLineCount(checkPodName)
+		}
 
 		By("Creating a default deny network policy")
 		defaultDenyPolicy = buildDefaultDenyNetworkPolicy()
@@ -70,25 +99,14 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 		// Wait for all churn pods to terminate
 		time.Sleep(2 * time.Minute)
 
-		By("Deploying node-shell check pods on each node to verify no leaked BPF state")
 		for _, node := range workerNodes {
-			checkPodName := fmt.Sprintf("leak-check-%s", node.Name)
-			checkPod := buildNodeCheckPod(checkPodName, node.Name)
+			checkPodName := checkPods[node.Name]
 
-			_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, 2*time.Minute)
-			Expect(err).ToNot(HaveOccurred())
-			DeferCleanup(func() {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
-			})
+			By(fmt.Sprintf("Checking for newly leaked BPF pins on node %s", node.Name))
+			assertNoNewChurnLeaks(baselineIdents[node.Name], churnIdentifiersOnNode(checkPodName), node.Name)
 
-			By(fmt.Sprintf("Checking BPF maps on node %s", node.Name))
-			mapsOutput, err := fw.PodManager.ExecInPod(namespace, checkPodName,
-				[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
-			Expect(err).ToNot(HaveOccurred())
-
-			// No churn pod BPF artifacts should remain
-			// Only system pods (coredns, aws-node, etc.) should have pinned progs/maps
-			assertNoChurnPodLeaks(mapsOutput, node.Name)
+			By(fmt.Sprintf("Checking for ghost re-attaches on node %s", node.Name))
+			assertNoGhostReattaches(checkPodName, node.Name, logOffsets[node.Name])
 		}
 	})
 
@@ -103,8 +121,9 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, defaultDenyPolicy)
 		}
 		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
-			delete(node.Labels, "test-node")
-			fw.K8sClient.Update(ctx, &node)
+			if err := setNodeTestLabel(node.Name, false); err != nil {
+				AddReportEntry(fmt.Sprintf("failed to remove test-node label from %s: %v", node.Name, err))
+			}
 		})
 	})
 })
@@ -238,17 +257,125 @@ func getWorkerNodes() ([]v1.Node, error) {
 	}), nil
 }
 
-// assertNoChurnPodLeaks checks that no BPF artifacts from churn pods remain.
-// Churn pods have identifier containing "churn-generator" in their BPF pin paths.
-func assertNoChurnPodLeaks(output, nodeName string) {
+// setNodeTestLabel adds or removes the churn scheduling label on a node.
+//
+// It re-reads the node inside a conflict retry rather than updating a copy from
+// an earlier List. Node objects are rewritten constantly by their kubelet, so a
+// List-then-Update races even seconds later -- and in the cleanup path the copy
+// is tens of minutes stale, which silently left the label behind on every node.
+func setNodeTestLabel(nodeName string, present bool) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node := &v1.Node{}
+		if err := fw.K8sClient.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+			return err
+		}
+		_, has := node.Labels["test-node"]
+		if has == present {
+			return nil
+		}
+		if present {
+			if node.Labels == nil {
+				node.Labels = map[string]string{}
+			}
+			node.Labels["test-node"] = "true"
+		} else {
+			delete(node.Labels, "test-node")
+		}
+		return fw.K8sClient.Update(ctx, node)
+	})
+}
+
+// churnIdentifiersOnNode returns the set of podIdentifiers belonging to churn
+// pods that currently have pinned BPF programs or maps on the node.
+func churnIdentifiersOnNode(checkPodName string) map[string]bool {
+	output, err := fw.PodManager.ExecInPod(namespace, checkPodName,
+		[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
+	Expect(err).ToNot(HaveOccurred())
+
+	idents := map[string]bool{}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || !strings.Contains(line, cronJobName) {
 			continue
 		}
-		Expect(line).ToNot(ContainSubstring(cronJobName),
-			fmt.Sprintf("Leaked BPF artifact found on node %s: %s", nodeName, line))
+		idents[churnIdentifierFromLine(line)] = true
 	}
+	return idents
+}
+
+// churnIdentifierFromLine pulls the "churn-generator-<generation>" token out of a
+// loaded-ebpfdata line so pins for the same identifier collapse to one entry
+// regardless of direction or whether it is a program or a map.
+func churnIdentifierFromLine(line string) string {
+	for _, field := range strings.FieldsFunc(line, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '/' || r == ':'
+	}) {
+		if strings.HasPrefix(field, cronJobName) {
+			return field
+		}
+	}
+	return line
+}
+
+// assertNoNewChurnLeaks fails only on identifiers that were not already pinned
+// before this run. Pre-existing leaks are reported, not failed on: they cannot
+// self-reclaim, so failing on them would make the suite permanently red on any
+// node that ever ran an affected build.
+func assertNoNewChurnLeaks(baseline, post map[string]bool, nodeName string) {
+	var leaked []string
+	for ident := range post {
+		if !baseline[ident] {
+			leaked = append(leaked, ident)
+		}
+	}
+	if len(baseline) > 0 {
+		AddReportEntry(fmt.Sprintf("node %s carried %d pre-existing leaked churn identifier(s) into this run; not counted against it",
+			nodeName, len(baseline)))
+	}
+	Expect(leaked).To(BeEmpty(),
+		fmt.Sprintf("node %s leaked %d new churn identifier(s) during this run: %v", nodeName, len(leaked), leaked))
+}
+
+// agentLogLineCount records how long the agent log already is, so the ghost
+// assertion can ignore everything an earlier run wrote.
+func agentLogLineCount(checkPodName string) int {
+	output, err := fw.PodManager.ExecInPod(namespace, checkPodName,
+		[]string{"chroot", "/host", "/bin/sh", "-c",
+			"wc -l < " + agentLogPath + " 2>/dev/null || echo 0"})
+	Expect(err).ToNot(HaveOccurred())
+
+	var lines int
+	// A missing or empty log is fine; it just means no offset to skip.
+	fmt.Sscanf(strings.TrimSpace(output), "%d", &lines)
+	return lines
+}
+
+// assertNoGhostReattaches checks the invariant that each churn pod completes at
+// most one attach. A pod attached twice is the ghost re-add: the second attach
+// re-inserts it into the shared progFD -> pods set after its delete already
+// removed it, which keeps isProgFdShared true for the last pod of the identifier
+// so its programs and maps are never unpinned.
+//
+// This is independent of pin scanning, so unlike assertNoNewChurnLeaks it is
+// unaffected by state left behind on the node.
+func assertNoGhostReattaches(checkPodName, nodeName string, logOffset int) {
+	// tail -n +N skips lines written before this run, which avoids having to
+	// parse the agent's JSON timestamps.
+	script := fmt.Sprintf(
+		"tail -n +%d %s 2>/dev/null | grep -F %q | grep -F %q "+
+			"| sed -e 's/.*for pod: //' -e 's/ in namespace.*//' | sort | uniq -d",
+		logOffset+1, agentLogPath, egressAttachMarker, cronJobName)
+
+	output, err := fw.PodManager.ExecInPod(namespace, checkPodName,
+		[]string{"chroot", "/host", "/bin/sh", "-c", script})
+	Expect(err).ToNot(HaveOccurred())
+
+	ghosts := lo.Filter(strings.Split(strings.TrimSpace(output), "\n"), func(s string, _ int) bool {
+		return strings.TrimSpace(s) != ""
+	})
+	Expect(ghosts).To(BeEmpty(),
+		fmt.Sprintf("node %s: %d churn pod(s) completed more than one attach (ghost re-add): %v",
+			nodeName, len(ghosts), ghosts))
 }
 
 func waitForChurnOrBail(jobStuckTimeout time.Duration) {
