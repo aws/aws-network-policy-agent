@@ -127,6 +127,7 @@ jobs:
       IP_FAMILY: ${{ matrix.ip-family }}
       CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
       KUBECONFIG: ${{ github.workspace }}/.kube/config
+      TEST_IMAGE_REGISTRY: ${{ secrets.TEST_IMAGE_REGISTRY }}
     steps:
       - uses: actions/checkout@v4
         with:
