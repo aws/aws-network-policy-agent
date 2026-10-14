@@ -6,7 +6,7 @@ spec:
     restartPolicy: Never
     nodeName: $NODE
     containers:
-      - image: ${TEST_IMAGE_REGISTRY}/aws-network-policy-test-agent:latest
+      - image: ${TEST_AGENT_IMAGE_REPOSITORY}/aws-network-policy-test-agent:latest
         name: check-bpf-cleanup
         command: ["./check-bpf-cleanup-agent"]
         volumeMounts:
