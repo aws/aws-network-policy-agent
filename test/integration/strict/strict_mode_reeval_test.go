@@ -1,6 +1,7 @@
 package strict
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -14,6 +15,14 @@ import (
 )
 
 const streamLogPath = "/tmp/strict-reeval-stream.log"
+
+// cleanupCtx returns a child of the suite context bounded by
+// utils.CleanupTimeout, so a delete that polls for a resource to disappear
+// fails fast if a finalizer is stuck instead of hanging the spec until the
+// suite-wide timeout. The caller must defer the returned cancel.
+func cleanupCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, utils.CleanupTimeout)
+}
 
 var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 	// Scenario 1 of 4: removing the last ClusterNetworkPolicy.
@@ -118,7 +127,9 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("removing the final ClusterNetworkPolicy", func() {
-				err := fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
+				delCtx, cancel := cleanupCtx()
+				defer cancel()
+				err := fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, clientCNP)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -140,17 +151,19 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 		})
 
 		AfterEach(func() {
+			delCtx, cancel := cleanupCtx()
+			defer cancel()
 			if clientCNP != nil {
-				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
+				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, clientCNP)
 			}
 			if clientPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, clientPod)
 			}
 			if serverPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, serverPod)
 			}
 			if serverNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, serverNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, serverNetworkPolicy)
 			}
 		})
 	})
@@ -282,7 +295,9 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("removing the last NetworkPolicy", func() {
-				err := fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy)
+				delCtx, cancel := cleanupCtx()
+				defer cancel()
+				err := fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, clientNetworkPolicy)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -304,20 +319,22 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 		})
 
 		AfterEach(func() {
+			delCtx, cancel := cleanupCtx()
+			defer cancel()
 			if decoyCNP != nil {
-				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, decoyCNP)
+				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, decoyCNP)
 			}
 			if clientNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, clientNetworkPolicy)
 			}
 			if clientPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, clientPod)
 			}
 			if serverPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, serverPod)
 			}
 			if serverNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, serverNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, serverNetworkPolicy)
 			}
 		})
 	})
@@ -458,20 +475,22 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 		})
 
 		AfterEach(func() {
+			delCtx, cancel := cleanupCtx()
+			defer cancel()
 			if clientNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, clientNetworkPolicy)
 			}
 			if allowCNP != nil {
-				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, allowCNP)
+				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, allowCNP)
 			}
 			if clientPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, clientPod)
 			}
 			if serverPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, serverPod)
 			}
 			if serverNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, serverNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, serverNetworkPolicy)
 			}
 		})
 	})
@@ -601,12 +620,14 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 
 			By("removing both the NetworkPolicy and the ClusterNetworkPolicy concurrently", func() {
 				// Started concurrently, not sequentially: each Delete call blocks until its own resource is confirmed gone
+				delCtx, cancel := cleanupCtx()
+				defer cancel()
 				npErrCh := make(chan error, 1)
 				cnpErrCh := make(chan error, 1)
 
-				go func() { npErrCh <- fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy) }()
+				go func() { npErrCh <- fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, clientNetworkPolicy) }()
 				go func() {
-					cnpErrCh <- fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
+					cnpErrCh <- fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, clientCNP)
 				}()
 
 				Expect(<-npErrCh).ToNot(HaveOccurred())
@@ -631,20 +652,22 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 		})
 
 		AfterEach(func() {
+			delCtx, cancel := cleanupCtx()
+			defer cancel()
 			if clientCNP != nil {
-				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, clientCNP)
+				fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(delCtx, clientCNP)
 			}
 			if clientNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, clientNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, clientNetworkPolicy)
 			}
 			if clientPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, clientPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, clientPod)
 			}
 			if serverPod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, serverPod)
 			}
 			if serverNetworkPolicy != nil {
-				fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, serverNetworkPolicy)
+				fw.NetworkPolicyManager.DeleteNetworkPolicy(delCtx, serverNetworkPolicy)
 			}
 		})
 	})
