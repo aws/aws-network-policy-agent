@@ -110,7 +110,7 @@ type pod_state struct {
 }
 
 func msSince(start time.Time) float64 {
-	return float64(time.Since(start) / time.Millisecond)
+	return float64(time.Since(start)) / float64(time.Millisecond)
 }
 
 func prometheusRegister() {
