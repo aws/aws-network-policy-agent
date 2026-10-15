@@ -150,6 +150,12 @@ EBPF_SOURCE_EGRESS_TC := ./pkg/ebpf/c/tc.v4egress.bpf.c
 EBPF_BINARY_EGRESS_TC := ./pkg/ebpf/c/tc.v4egress.bpf.o
 EBPF_SOURCE_V6_INGRESS_TC := ./pkg/ebpf/c/tc.v6ingress.bpf.c
 EBPF_BINARY_V6_INGRESS_TC := ./pkg/ebpf/c/tc.v6ingress.bpf.o
+# Ingress programs that also shorten the kernel conntrack entry of denied
+# connections (nf_conntrack kfuncs, kernel 6.0+). Built from the same sources
+# with -DNPA_CT_SHORTEN_ON_DENY, because kfunc calls must resolve at load time;
+# see pkg/ebpf/c/ct_deny.h.
+EBPF_BINARY_INGRESS_TC_CT_DENY := ./pkg/ebpf/c/tc.v4ingress.ctdeny.bpf.o
+EBPF_BINARY_V6_INGRESS_TC_CT_DENY := ./pkg/ebpf/c/tc.v6ingress.ctdeny.bpf.o
 EBPF_SOURCE_V6_EGRESS_TC := ./pkg/ebpf/c/tc.v6egress.bpf.c
 EBPF_BINARY_V6_EGRESS_TC := ./pkg/ebpf/c/tc.v6egress.bpf.o
 EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v4events.bpf.c
@@ -164,6 +170,8 @@ build-bpf: ## Build BPF.
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_EGRESS_TC) -o $(EBPF_BINARY_EGRESS_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_EGRESS_TC) -o $(EBPF_BINARY_V6_EGRESS_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC_CT_DENY)
+	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC_CT_DENY)
 
 # If you wish built the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
