@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
+	goebpfbtf "github.com/aws/aws-ebpf-sdk-go/pkg/btf"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfmetrics "github.com/aws/aws-ebpf-sdk-go/pkg/metrics"
@@ -26,6 +28,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -59,7 +62,20 @@ var (
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
 	deletedPodsMinAge                                = 5 * time.Minute
+
+	// TC_INGRESS_CT_DENY_BINARY and TC_V6_INGRESS_CT_DENY_BINARY are ingress
+	// binaries that also shorten the kernel conntrack entry of denied TCP
+	// connections. They call nf_conntrack kfuncs, so need kernel 6.0+.
+	TC_INGRESS_CT_DENY_BINARY    = "tc.v4ingress.ctdeny.bpf.o"
+	TC_V6_INGRESS_CT_DENY_BINARY = "tc.v6ingress.ctdeny.bpf.o"
 )
+
+// ctDenyKfuncs are the kernel functions the ct-deny ingress binaries call.
+var ctDenyKfuncs = []string{"bpf_skb_ct_lookup", "bpf_ct_change_timeout", "bpf_ct_release"}
+
+// checkKfuncs reports whether the running kernel has the given kfuncs. Tests
+// replace it to fake the kernel.
+var checkKfuncs = goebpfbtf.CheckKfuncs
 
 func log() logger.Logger {
 	return logger.Get()
@@ -173,10 +189,6 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		ingressBinary, egressBinary, eventsBinary,
 			cliBinary, hostMask = TC_V6_INGRESS_BINARY, TC_V6_EGRESS_BINARY, EVENTS_V6_BINARY, EKS_V6_CLI_BINARY, IPv6_HOST_MASK
 	}
-	ebpfClient.ingressBinary, ebpfClient.egressBinary,
-		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
-
-	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
@@ -192,12 +204,34 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		log().Errorf("Failed to increase RLIMIT on the node but moving forward %v", err)
 	}
 
+	// Use the ingress binary that also shortens the kernel conntrack entry of
+	// denied connections if the kernel supports it and it loads here. The
+	// choice is made once, before the binaries are compared and the pods'
+	// programs recovered, so every pod runs the same variant. The probe load
+	// needs the global maps, so on a node without them yet (first start) the
+	// ct-deny binary is probed below, once the events binary has created them.
+	ingressBinary, probeCtDenyLater := ebpfClient.chooseIngressBinary(enableIPv6)
+	ebpfClient.ingressBinary, ebpfClient.egressBinary,
+		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
+
+	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
+
 	//Compare BPF binaries
 	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
 		bpfBinaries, hostBinaryPath)
 	if err != nil {
 		//Log the error and move on
 		log().Errorf("Probe validation/update failed but will continue to load %v", err)
+	}
+	// Normally only the selected variant's binary is on the host: the previous
+	// run removed the other one (removeOtherIngressBinary), so a switch shows up
+	// above as a missing host copy. If both are present, the previous run may
+	// have stopped before that removal, and the pods may still run the other
+	// variant even though the selected binary matches its host copy. Reload to
+	// be sure.
+	if otherIngressBinaryInstalled(enableIPv6, ingressBinary, hostBinaryPath) {
+		log().Info("Ingress binary variant changed since the last run, reloading ingress probes")
+		ingressUpdateRequired = true
 	}
 	log().Info("Probe validation Done")
 
@@ -208,6 +242,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		log().Errorf("Failed to copy the eBPF binaries to host path....error: %v", err)
 	}
 	log().Info("Copied eBPF binaries to the host directory")
+	removeOtherIngressBinary(enableIPv6, ingressBinary, hostBinaryPath)
 
 	var interfaceNametoIngressPinPath map[string]string
 	var interfaceNametoEgressPinPath map[string]string
@@ -249,6 +284,15 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			return nil, err
 		}
 		log().Info("Successfully loaded events probe")
+		// The events binary's maps replaced the ones the ct-deny probe recovered
+		// in the SDK's cache, so those FDs are no longer referenced. With the
+		// events binary unchanged, recoverBPFState used them as the agent's
+		// global map FDs instead of recovering the maps again, so they stay open.
+		if eventsUpdateRequired {
+			for _, m := range ebpfClient.probeGlobalMaps {
+				closeFD(int(m.MapFD))
+			}
+		}
 
 		for mapName, mapInfo := range globalMapInfo {
 			if mapName == AWS_CONNTRACK_MAP {
@@ -270,6 +314,18 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			sdkAPIErr.WithLabelValues("RecoveryFailed").Inc()
 			return nil, err
 		}
+	}
+
+	// First start: no pod has an ingress program yet, so switching to the
+	// regular binary here still leaves every pod on one variant. Put its host
+	// copy back so the next start, or a rollback, compares the right binary.
+	if probeCtDenyLater && !ebpfClient.ctDenyBinaryLoads(ingressBinary) {
+		ingressBinary, _ = ingressBinaries(enableIPv6)
+		ebpfClient.ingressBinary = ingressBinary
+		if err := cp.InstallBPFBinaries([]string{ingressBinary}, hostBinaryPath); err != nil {
+			log().Errorf("Failed to copy %s to the host directory: %v", ingressBinary, err)
+		}
+		removeOtherIngressBinary(enableIPv6, ingressBinary, hostBinaryPath)
 	}
 
 	ebpfClient.conntrackClient = conntrack.NewConntrackClient(conntrackMap, enableIPv6)
@@ -324,8 +380,14 @@ type bpfClient struct {
 	egressPodToProgMap *sync.Map
 	// Stores info on the global maps the agent creates
 	globalMaps *sync.Map
-	// Ingress eBPF probe binary
+	// Ingress eBPF probe binary: the ct-deny or the regular one, chosen once in
+	// NewBpfClient (see chooseIngressBinary) and not changed afterwards
 	ingressBinary string
+	// Global maps chooseIngressBinary recovered for the ct-deny probe. Their
+	// FDs are in the SDK's map cache, so recoverBPFState reuses them instead
+	// of recovering the maps again, and they are only closed once the events
+	// binary has replaced them in the cache. Only used during NewBpfClient.
+	probeGlobalMaps map[string]goebpfmaps.BpfMap
 	// Egress eBPF probe binary
 	egressBinary string
 	// host IP Mask - will be initialized based on the IP family
@@ -402,7 +464,8 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 				log().Info("change detected in event probe binaries..")
 				break
 			}
-			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY {
+			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY ||
+				bpfProbe == TC_INGRESS_CT_DENY_BINARY || bpfProbe == TC_V6_INGRESS_CT_DENY_BINARY {
 				log().Info("change detected in ingress probe binaries.. ")
 				updateIngressProbe = true
 			}
@@ -437,7 +500,10 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
 	if !updateEventsProbe {
-		recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
+		recoveredGlobalMaps, err := l.probeGlobalMaps, error(nil)
+		if recoveredGlobalMaps == nil {
+			recoveredGlobalMaps, err = eBPFSDKClient.RecoverGlobalMaps()
+		}
 		if err != nil {
 			log().Errorf("failed to recover global maps %v", err)
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
@@ -1003,6 +1069,134 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 		}
 	}
 	return nil
+}
+
+// ingressBinaries returns the regular and the ct-deny ingress binary for the
+// IP family.
+func ingressBinaries(enableIPv6 bool) (string, string) {
+	if enableIPv6 {
+		return TC_V6_INGRESS_BINARY, TC_V6_INGRESS_CT_DENY_BINARY
+	}
+	return TC_INGRESS_BINARY, TC_INGRESS_CT_DENY_BINARY
+}
+
+// otherIngressBinary returns the ingress binary variant that is not in use:
+// the ct-deny binary when the regular one is selected, and vice versa.
+func otherIngressBinary(enableIPv6 bool, ingressBinary string) string {
+	binary, ctDenyBinary := ingressBinaries(enableIPv6)
+	if ingressBinary == ctDenyBinary {
+		return binary
+	}
+	return ctDenyBinary
+}
+
+// otherIngressBinaryInstalled reports whether the host copy of the unused
+// ingress variant exists. See the call site for when that happens. If that
+// can't be determined, it reports true: an unneeded reload is harmless, while
+// a missed one would leave pods running the other variant.
+func otherIngressBinaryInstalled(enableIPv6 bool, ingressBinary, hostBinaryPath string) bool {
+	path := hostBinaryPath + otherIngressBinary(enableIPv6, ingressBinary)
+	_, err := os.Stat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log().Errorf("Failed to check for %s, reloading ingress probes: %v", path, err)
+		return true
+	}
+	return err == nil
+}
+
+// removeOtherIngressBinary deletes the host copy of the unused ingress
+// variant. While the ct-deny binary is in use this removes the regular
+// binary's host copy, so that an agent without ct-deny support (for example
+// after a rollback) finds it missing, detects a change and reloads the pod
+// ingress programs instead of recovering the ct-deny ones.
+func removeOtherIngressBinary(enableIPv6 bool, ingressBinary, hostBinaryPath string) {
+	path := hostBinaryPath + otherIngressBinary(enableIPv6, ingressBinary)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log().Errorf("Failed to remove %s: %v", path, err)
+	}
+}
+
+// ctDenyProbePinPrefix is the pin prefix the ct-deny probe loads under. It
+// can't match a pod's pins, including the "name-namespace" ones of agents
+// before v1.4.0: pod names and namespaces are lowercase (RFC 1123), and pod
+// identifiers only add "-", "@" and "_" (utils.GetPodIdentifier).
+const ctDenyProbePinPrefix = "CTDENY_PROBE"
+
+// closeFD closes a file descriptor the probe load opened. A variable so that
+// tests don't close real descriptors.
+var closeFD = unix.Close
+
+// chooseIngressBinary returns the ingress binary to use for this run. It is
+// the ct-deny binary if the kernel has the nf_conntrack kfuncs it calls and a
+// probe load of it succeeds, and the regular binary otherwise (kernels before
+// 6.0, such as AL2's 5.10, or no BTF, or a verifier that rejects it).
+//
+// The probe needs the global maps the ingress programs reference. If they
+// can't be recovered (the agent's first start on the node), it returns the
+// ct-deny binary with probeLater set, and the caller probes it once the
+// events binary has created them.
+func (l *bpfClient) chooseIngressBinary(enableIPv6 bool) (binary string, probeLater bool) {
+	binary, ctDenyBinary := ingressBinaries(enableIPv6)
+	if err := checkKfuncs(ctDenyKfuncs); err != nil {
+		log().Warnf("Kernel lacks the conntrack kfuncs for shortening denied connections, using %s: %v", binary, err)
+		return binary, false
+	}
+	// Recovering the global maps puts their FDs in the SDK's map cache, which
+	// the probe load relocates against. They stay open: see probeGlobalMaps.
+	globalMaps, err := l.bpfSDKClient.RecoverGlobalMaps()
+	if err != nil || len(globalMaps) == 0 {
+		log().Infof("Global maps not present yet, probing %s after they are created", ctDenyBinary)
+		return ctDenyBinary, true
+	}
+	l.probeGlobalMaps = globalMaps
+	if !l.ctDenyBinaryLoads(ctDenyBinary) {
+		return binary, false
+	}
+	return ctDenyBinary, false
+}
+
+// ctDenyBinaryLoads loads ctDenyBinary once under ctDenyProbePinPrefix, then
+// removes everything the load created, and reports whether it loaded. It needs
+// the global maps in the SDK's cache.
+func (l *bpfClient) ctDenyBinaryLoads(ctDenyBinary string) bool {
+	// Pins left by an agent that stopped during an earlier probe.
+	removeCtDenyProbePins()
+	progs, maps, err := l.bpfSDKClient.LoadBpfFile(ctDenyBinary, ctDenyProbePinPrefix)
+	fds := map[int]struct{}{}
+	for _, p := range progs {
+		fds[p.Program.ProgFD] = struct{}{}
+	}
+	// Only the maps this load created: the global maps it references come
+	// from the SDK's cache and aren't returned here.
+	for _, m := range maps {
+		fds[int(m.MapFD)] = struct{}{}
+	}
+	for fd := range fds {
+		if fd > 0 {
+			closeFD(fd)
+		}
+	}
+	removeCtDenyProbePins()
+	if err != nil {
+		log().Errorf("%s failed to load, using the regular ingress binary: %v", ctDenyBinary, err)
+		sdkAPIErr.WithLabelValues("LoadBpfFile-CtDenyProbe").Inc()
+		return false
+	}
+	log().Infof("Denied TCP connections will have their kernel conntrack entries shortened, using %s", ctDenyBinary)
+	return true
+}
+
+// removeCtDenyProbePins removes the programs and maps pinned under
+// ctDenyProbePinPrefix.
+func removeCtDenyProbePins() {
+	for _, dir := range []string{utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY, utils.BPF_MAPS_PIN_PATH_DIRECTORY} {
+		pins, _ := filepath.Glob(dir + ctDenyProbePinPrefix + "_*")
+		for _, pin := range pins {
+			if err := os.Remove(pin); err != nil && !os.IsNotExist(err) {
+				log().Errorf("Failed to remove probe pin %s: %v", pin, err)
+			}
+		}
+	}
 }
 
 func (l *bpfClient) loadBPFProgram(fileName string, direction string,
