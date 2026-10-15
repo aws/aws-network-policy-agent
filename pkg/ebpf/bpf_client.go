@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
+	goebpfbtf "github.com/aws/aws-ebpf-sdk-go/pkg/btf"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfmetrics "github.com/aws/aws-ebpf-sdk-go/pkg/metrics"
@@ -59,7 +60,20 @@ var (
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
 	deletedPodsMinAge                                = 5 * time.Minute
+
+	// TC_INGRESS_CT_DENY_BINARY and TC_V6_INGRESS_CT_DENY_BINARY are ingress
+	// binaries that also shorten the kernel conntrack entry of denied TCP
+	// connections. They call nf_conntrack kfuncs, so need kernel 6.0+.
+	TC_INGRESS_CT_DENY_BINARY    = "tc.v4ingress.ctdeny.bpf.o"
+	TC_V6_INGRESS_CT_DENY_BINARY = "tc.v6ingress.ctdeny.bpf.o"
 )
+
+// ctDenyKfuncs are the kernel functions the ct-deny ingress binaries call.
+var ctDenyKfuncs = []string{"bpf_skb_ct_lookup", "bpf_ct_change_timeout", "bpf_ct_release"}
+
+// checkKfuncs reports whether the running kernel has the given kfuncs. Tests
+// replace it to fake the kernel.
+var checkKfuncs = goebpfbtf.CheckKfuncs
 
 func log() logger.Logger {
 	return logger.Get()
@@ -171,6 +185,11 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		ingressBinary, egressBinary, eventsBinary,
 			cliBinary, hostMask = TC_V6_INGRESS_BINARY, TC_V6_EGRESS_BINARY, EVENTS_V6_BINARY, EKS_V6_CLI_BINARY, IPv6_HOST_MASK
 	}
+	// Use the ingress binary that also shortens the kernel conntrack entry of
+	// denied connections if the kernel supports it, and keep the regular one
+	// to fall back to.
+	ebpfClient.ingressFallbackBinary = ingressBinary
+	ingressBinary = selectIngressBinary(enableIPv6)
 	ebpfClient.ingressBinary, ebpfClient.egressBinary,
 		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
 
@@ -197,6 +216,10 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		//Log the error and move on
 		log().Errorf("Probe validation/update failed but will continue to load %v", err)
 	}
+	if otherIngressBinaryInstalled(enableIPv6, ingressBinary, hostBinaryPath) {
+		log().Info("Ingress binary variant changed since the last run, reloading ingress probes")
+		ingressUpdateRequired = true
+	}
 	log().Info("Probe validation Done")
 
 	//Copy the latest binaries to /opt/cni/bin
@@ -206,6 +229,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		log().Errorf("Failed to copy the eBPF binaries to host path....error: %v", err)
 	}
 	log().Info("Copied eBPF binaries to the host directory")
+	removeOtherIngressBinary(enableIPv6, ingressBinary, hostBinaryPath)
 
 	var interfaceNametoIngressPinPath map[string]string
 	var interfaceNametoEgressPinPath map[string]string
@@ -324,6 +348,11 @@ type bpfClient struct {
 	globalMaps *sync.Map
 	// Ingress eBPF probe binary
 	ingressBinary string
+	// Ingress eBPF probe binary to switch to if ingressBinary fails to load.
+	// Equal to ingressBinary unless the ct-deny binary was selected.
+	ingressFallbackBinary string
+	// Guards ingressBinary, which changes if the ct-deny binary fails to load
+	ingressBinaryLock sync.RWMutex
 	// Egress eBPF probe binary
 	egressBinary string
 	// host IP Mask - will be initialized based on the IP family
@@ -397,7 +426,8 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 				log().Info("change detected in event probe binaries..")
 				break
 			}
-			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY {
+			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY ||
+				bpfProbe == TC_INGRESS_CT_DENY_BINARY || bpfProbe == TC_V6_INGRESS_CT_DENY_BINARY {
 				log().Info("change detected in ingress probe binaries.. ")
 				updateIngressProbe = true
 			}
@@ -815,7 +845,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 		ingressEbpfProgEntry := peBPFContext.ingressPgmInfo
 		progFD = ingressEbpfProgEntry.Program.ProgFD
 	} else {
-		ingressProgInfo, progFD, err = l.loadBPFProgram(l.ingressBinary, "ingress", podIdentifier)
+		ingressProgInfo, progFD, err = l.loadIngressBPFProgram(podIdentifier)
 		if err != nil {
 			return 0, err
 		}
@@ -993,6 +1023,102 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 		}
 	}
 	return nil
+}
+
+// otherIngressBinary returns the ingress binary variant that is not in use:
+// the ct-deny binary when the regular one is selected, and vice versa.
+func otherIngressBinary(enableIPv6 bool, ingressBinary string) string {
+	binary, ctDenyBinary := TC_INGRESS_BINARY, TC_INGRESS_CT_DENY_BINARY
+	if enableIPv6 {
+		binary, ctDenyBinary = TC_V6_INGRESS_BINARY, TC_V6_INGRESS_CT_DENY_BINARY
+	}
+	if ingressBinary == ctDenyBinary {
+		return binary
+	}
+	return ctDenyBinary
+}
+
+// otherIngressBinaryInstalled reports whether the host copy of the unused
+// ingress variant exists, which means the previous run may have loaded pod
+// ingress programs from it. checkAndUpdateBPFBinaries only compares the
+// selected binary with its own host copy, so without this, switching
+// variants would keep recovering the old variant's programs.
+func otherIngressBinaryInstalled(enableIPv6 bool, ingressBinary, hostBinaryPath string) bool {
+	_, err := os.Stat(hostBinaryPath + otherIngressBinary(enableIPv6, ingressBinary))
+	return err == nil
+}
+
+// removeOtherIngressBinary deletes the host copy of the unused ingress
+// variant. While the ct-deny binary is in use this removes the regular
+// binary's host copy, so that an agent without ct-deny support (for example
+// after a rollback) finds it missing, detects a change and reloads the pod
+// ingress programs instead of recovering the ct-deny ones.
+func removeOtherIngressBinary(enableIPv6 bool, ingressBinary, hostBinaryPath string) {
+	path := hostBinaryPath + otherIngressBinary(enableIPv6, ingressBinary)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log().Errorf("Failed to remove %s: %v", path, err)
+	}
+}
+
+// selectIngressBinary returns the ct-deny ingress binary if the running kernel
+// has the nf_conntrack kfuncs it calls, and the regular ingress binary
+// otherwise (kernels before 6.0, such as AL2's 5.10, or no BTF).
+func selectIngressBinary(enableIPv6 bool) string {
+	binary, ctDenyBinary := TC_INGRESS_BINARY, TC_INGRESS_CT_DENY_BINARY
+	if enableIPv6 {
+		binary, ctDenyBinary = TC_V6_INGRESS_BINARY, TC_V6_INGRESS_CT_DENY_BINARY
+	}
+	if err := checkKfuncs(ctDenyKfuncs); err != nil {
+		log().Warnf("Kernel lacks the conntrack kfuncs for shortening denied connections, using %s: %v", binary, err)
+		return binary
+	}
+	log().Infof("Denied TCP connections will have their kernel conntrack entries shortened, using %s", ctDenyBinary)
+	return ctDenyBinary
+}
+
+// loadIngressBPFProgram loads the ingress binary for podIdentifier. If the
+// ct-deny binary fails to load, for example because this kernel's verifier
+// rejects its kfunc calls, the agent switches to the regular ingress binary
+// for this and all later loads.
+func (l *bpfClient) loadIngressBPFProgram(podIdentifier string) (map[string]goelf.BpfData, int, error) {
+	binary := l.getIngressBinary()
+
+	progInfo, progFD, err := l.loadBPFProgram(binary, "ingress", podIdentifier)
+	if err != nil {
+		// Nothing else to try if the regular binary is the one that failed.
+		if binary == l.ingressFallbackBinary || l.ingressFallbackBinary == "" {
+			return nil, -1, err
+		}
+		return l.loadIngressFallbackBPFProgram(binary, podIdentifier, err)
+	}
+	return progInfo, progFD, nil
+}
+
+// loadIngressFallbackBPFProgram loads the regular ingress binary after binary
+// failed with loadErr, and switches to it for all later loads if it succeeds.
+func (l *bpfClient) loadIngressFallbackBPFProgram(binary, podIdentifier string, loadErr error) (map[string]goelf.BpfData, int, error) {
+	log().Errorf("Failed to load %s, falling back to %s: %v", binary, l.ingressFallbackBinary, loadErr)
+	progInfo, progFD, err := l.loadBPFProgram(l.ingressFallbackBinary, "ingress", podIdentifier)
+	if err != nil {
+		return nil, -1, err
+	}
+	sdkAPIErr.WithLabelValues("LoadBpfFile-CtDenyFallback").Inc()
+	l.setIngressBinary(l.ingressFallbackBinary)
+	return progInfo, progFD, nil
+}
+
+// getIngressBinary returns the ingress binary to load, under ingressBinaryLock.
+func (l *bpfClient) getIngressBinary() string {
+	l.ingressBinaryLock.RLock()
+	defer l.ingressBinaryLock.RUnlock()
+	return l.ingressBinary
+}
+
+// setIngressBinary sets the ingress binary to load, under ingressBinaryLock.
+func (l *bpfClient) setIngressBinary(binary string) {
+	l.ingressBinaryLock.Lock()
+	defer l.ingressBinaryLock.Unlock()
+	l.ingressBinary = binary
 }
 
 func (l *bpfClient) loadBPFProgram(fileName string, direction string,
