@@ -369,6 +369,14 @@ int handle_egress(struct __sk_buff *skb)
         if (ip->nexthdr == 58) {
         	return BPF_OK;
         }
+
+		// MLD is ICMPv6 carried behind a Hop-by-Hop (Router Alert) header
+		if (ip->nexthdr == 0) {
+			struct ipv6_opt_hdr *hbh = data + sizeof(*ip);
+			if ((void *)(hbh + 1) <= data_end && hbh->nexthdr == 58) {
+				return BPF_OK;
+			}
+		}
    
 		switch (ip->nexthdr) {
 			case IPPROTO_TCP:
