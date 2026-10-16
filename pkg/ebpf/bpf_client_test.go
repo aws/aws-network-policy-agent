@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	// "unsafe"
@@ -263,6 +265,7 @@ func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testBpfClient := &bpfClient{
 				hostMask:                  "/32",
+				fwRuleProcessor:           fwrp.NewFirewallRuleProcessor("10.1.1.1", "/32", false),
 				policyEndpointeBPFContext: new(sync.Map),
 			}
 
@@ -479,7 +482,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			egressPodToProgMap:        new(sync.Map),
 			ingressProgToPodsMap:      new(sync.Map),
 			egressProgToPodsMap:       new(sync.Map),
-			podIdentifierLock:         new(sync.Map),
 			deletedPods:               new(sync.Map),
 		}
 
@@ -512,7 +514,6 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				egressPodToProgMap:        new(sync.Map),
 				ingressProgToPodsMap:      new(sync.Map),
 				egressProgToPodsMap:       new(sync.Map),
-				podIdentifierLock:         new(sync.Map),
 				isMultiNICEnabled:         tt.isMultiNICEnabled,
 				podNameToInterfaceCount:   new(sync.Map),
 				deletedPods:               new(sync.Map),
@@ -528,7 +529,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 				return fmt.Sprintf("mockedveth%d", interfaceIndex), nil
 			}
 
-			gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces)
+			_, gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces, false)
 			assert.Equal(t, tt.wantErr, gotError)
 		})
 	}
@@ -778,7 +779,7 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 				}
 				testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			}
-			gotIsMapUpdateRequired := testBpfClient.IsFirstPodInPodIdentifier(tt.podIdentifier)
+			gotIsMapUpdateRequired := testBpfClient.isFirstPodInPodIdentifier(tt.podIdentifier)
 			assert.Equal(t, tt.want, gotIsMapUpdateRequired)
 		})
 	}
@@ -900,7 +901,6 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		egressPodToProgMap:        new(sync.Map),
 		ingressProgToPodsMap:      new(sync.Map),
 		egressProgToPodsMap:       new(sync.Map),
-		podIdentifierLock:         new(sync.Map),
 		isMultiNICEnabled:         true,
 		ingressBinary:             "tc.v4ingress.bpf.o",
 		egressBinary:              "tc.v4egress.bpf.o",
@@ -911,7 +911,7 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 		return fmt.Sprintf("mockedveth%d", interfaceIndex), nil
 	}
 
-	err := testBpfClient.AttacheBPFProbes(testPod, podIdentifier, 2)
+	_, err := testBpfClient.AttacheBPFProbes(testPod, podIdentifier, 2, false)
 	assert.NoError(t, err)
 
 	podNamespacedName := utils.GetPodNamespacedName(testPod.Name, testPod.Namespace)
@@ -1107,19 +1107,18 @@ func TestAttacheBPFProbes_SkipsDeletedPod(t *testing.T) {
 	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	testBpfClient := &bpfClient{
-		podIdentifierLock: new(sync.Map),
-		deletedPods:       new(sync.Map),
-		bpfTCClient:       mockTCClient,
+		deletedPods: new(sync.Map),
+		bpfTCClient: mockTCClient,
 	}
 
 	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
 	testBpfClient.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 
-	err := testBpfClient.AttacheBPFProbes(pod, utils.GetPodIdentifier(pod.Name, pod.Namespace), 1)
+	_, err := testBpfClient.AttacheBPFProbes(pod, utils.GetPodIdentifier(pod.Name, pod.Namespace), 1, false)
 	assert.NoError(t, err)
 }
 
-func TestAttacheBPFProbes_ProceedsAfterClearDeletedPod(t *testing.T) {
+func TestAttacheBPFProbes_ConfirmedLiveClearsDeletedMarker(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1143,7 +1142,6 @@ func TestAttacheBPFProbes_ProceedsAfterClearDeletedPod(t *testing.T) {
 		egressPodToProgMap:        new(sync.Map),
 		ingressProgToPodsMap:      new(sync.Map),
 		egressProgToPodsMap:       new(sync.Map),
-		podIdentifierLock:         new(sync.Map),
 		deletedPods:               new(sync.Map),
 	}
 	testBpfClient.policyEndpointeBPFContext.Store(podIdentifier, BPFContext{
@@ -1154,15 +1152,16 @@ func TestAttacheBPFProbes_ProceedsAfterClearDeletedPod(t *testing.T) {
 		return "mockedveth0", nil
 	}
 
-	// Delete then clear — simulates CNI DEL followed by CNI ADD
+	// CNI DEL of the previous pod with this name, then CNI ADD of the new one
 	testBpfClient.deletedPods.Store(podNamespacedName, time.Now())
-	testBpfClient.ClearDeletedPod(podNamespacedName)
 
-	err := testBpfClient.AttacheBPFProbes(pod, podIdentifier, 1)
+	_, err := testBpfClient.AttacheBPFProbes(pod, podIdentifier, 1, true)
 	assert.NoError(t, err)
 
 	_, attached := testBpfClient.ingressPodToProgMap.Load(podNamespacedName)
 	assert.True(t, attached)
+	_, stillMarked := testBpfClient.deletedPods.Load(podNamespacedName)
+	assert.False(t, stillMarked)
 }
 
 func TestDeleteBPFProbes_AddsPodToDeletedMap(t *testing.T) {
@@ -1171,7 +1170,6 @@ func TestDeleteBPFProbes_AddsPodToDeletedMap(t *testing.T) {
 		egressPodToProgMap:   new(sync.Map),
 		ingressProgToPodsMap: new(sync.Map),
 		egressProgToPodsMap:  new(sync.Map),
-		podIdentifierLock:    new(sync.Map),
 		deletedPods:          new(sync.Map),
 	}
 
@@ -1206,4 +1204,566 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 		return true
 	})
 	assert.Equal(t, 400, remaining)
+}
+
+// newRaceTestBpfClient returns a bpfClient wired for exercising per-podIdentifier
+// state without a kernel. Shadow maps are pre-seeded with the entries an empty
+// rule set computes to, so BulkRefresh never issues a map syscall.
+func newRaceTestBpfClient(t *testing.T) (*bpfClient, map[string][]byte) {
+	t.Helper()
+	fwRuleProcessor := fwrp.NewFirewallRuleProcessor("10.1.1.1", "/32", false)
+	seed, err := fwRuleProcessor.ComputeMapEntriesFromEndpointRules(nil)
+	assert.NoError(t, err)
+	client := &bpfClient{
+		hostMask:                        "/32",
+		fwRuleProcessor:                 fwRuleProcessor,
+		policyEndpointeBPFContext:       new(sync.Map),
+		ingressPodToProgMap:             new(sync.Map),
+		egressPodToProgMap:              new(sync.Map),
+		ingressProgToPodsMap:            new(sync.Map),
+		egressProgToPodsMap:             new(sync.Map),
+		ingressInMemoryMap:              new(sync.Map),
+		egressInMemoryMap:               new(sync.Map),
+		clusterPolicyIngressInMemoryMap: new(sync.Map),
+		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		deletedPods:                     new(sync.Map),
+	}
+	return client, seed
+}
+
+// seededShadowMap builds shadow maps preloaded with a copy of seed, standing in
+// for a kernel read.
+func seededShadowMap(seed map[string][]byte) func(*goebpfmaps.BpfMap) (*InMemoryBpfMap, error) {
+	return func(bpfMap *goebpfmaps.BpfMap) (*InMemoryBpfMap, error) {
+		contents := make(map[string][]byte, len(seed))
+		for k, v := range seed {
+			contents[k] = v
+		}
+		return &InMemoryBpfMap{bpfMap: bpfMap, contents: contents}, nil
+	}
+}
+
+// lockWaiters reports how many goroutines hold or wait on podIdentifier's lock.
+func lockWaiters(client *bpfClient, podIdentifier string) int {
+	client.podIdentifierLocks.mu.Lock()
+	defer client.podIdentifierLocks.mu.Unlock()
+	if m := client.podIdentifierLocks.locks[podIdentifier]; m != nil {
+		return m.refs
+	}
+	return 0
+}
+
+// receiveWithin returns the next value from ch, failing the test if none
+// arrives within a second, e.g. because the sending goroutine was stopped by a
+// mock expectation failure.
+func receiveWithin[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Second):
+		t.Fatal("no result within a second")
+		var zero T
+		return zero
+	}
+}
+
+// disposableFD returns a descriptor the test owns, for program handles that
+// real teardown code will close: DeleteBPFProbes unpins and closes the
+// program FDs it finds in the context, so a made-up number could close an
+// unrelated descriptor of the test process.
+func disposableFD(t *testing.T) int {
+	t.Helper()
+	fd, err := syscall.Open(os.DevNull, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	return fd
+}
+
+// seedLastPodOfIdentifier records podKey as the only pod using
+// podIdentifier's programs, as after that pod's CNI ADD. The program FDs are
+// test-owned so the DeleteBPFProbes teardown can close them.
+func seedLastPodOfIdentifier(t *testing.T, client *bpfClient, podIdentifier, podKey string, ingressMapID, egressMapID int) {
+	t.Helper()
+	ingressProgFD, egressProgFD := disposableFD(t), disposableFD(t)
+	client.policyEndpointeBPFContext.Store(podIdentifier, raceTestBPFContext(ingressProgFD, ingressMapID, egressProgFD, egressMapID))
+	client.ingressPodToProgMap.Store(podKey, ingressProgFD)
+	client.ingressProgToPodsMap.Store(ingressProgFD, map[string]struct{}{podKey: {}})
+	client.egressPodToProgMap.Store(podKey, egressProgFD)
+	client.egressProgToPodsMap.Store(egressProgFD, map[string]struct{}{podKey: {}})
+}
+
+func raceTestBPFContext(ingressProgFD, ingressMapID, egressProgFD, egressMapID int) BPFContext {
+	return BPFContext{
+		ingressPgmInfo: goelf.BpfData{
+			Program: goebpfprogs.BpfProgram{ProgFD: ingressProgFD},
+			Maps:    map[string]goebpfmaps.BpfMap{utils.TC_INGRESS_MAP: {MapID: uint32(ingressMapID)}},
+		},
+		egressPgmInfo: goelf.BpfData{
+			Program: goebpfprogs.BpfProgram{ProgFD: egressProgFD},
+			Maps:    map[string]goebpfmaps.BpfMap{utils.TC_EGRESS_MAP: {MapID: uint32(egressMapID)}},
+		},
+	}
+}
+
+func cachedMapID(t *testing.T, cache *sync.Map, podIdentifier string) uint32 {
+	t.Helper()
+	value, ok := cache.Load(podIdentifier)
+	if !assert.True(t, ok, "no shadow map cached for %s", podIdentifier) {
+		return 0
+	}
+	return value.(*InMemoryBpfMap).GetUnderlyingMap().MapID
+}
+
+// Issue #676: a PolicyEndpoint reconcile updating the maps of the last pod of a
+// podIdentifier races that pod's CNI DEL. The update must not leave a shadow map
+// for the deleted (unpinned) map behind, or every later rule write for the
+// identifier lands in a map no attached program reads.
+func TestBpfClient_UpdateEbpfMaps_RacingDeleteDoesNotCacheOrphanMap(t *testing.T) {
+	client, seed := newRaceTestBpfClient(t)
+	podIdentifier := utils.GetPodIdentifier("ds-old", "ns")
+	oldPod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	oldPodKey := utils.GetPodNamespacedName(oldPod.Name, oldPod.Namespace)
+
+	// State after the old pod's CNI ADD: one program pair, used by one pod.
+	seedLastPodOfIdentifier(t, client, podIdentifier, oldPodKey, 100, 101)
+
+	deleteDone := make(chan struct{})
+	var once sync.Once
+	origNewInMemoryBpfMap := newInMemoryBpfMap
+	defer func() { newInMemoryBpfMap = origNewInMemoryBpfMap }()
+	newInMemoryBpfMap = func(bpfMap *goebpfmaps.BpfMap) (*InMemoryBpfMap, error) {
+		// The first shadow-map build happens mid-update, after the context was
+		// read. Deliver the CNI DEL here: it must wait for the update to finish
+		// rather than tear the identifier down underneath it.
+		once.Do(func() {
+			go func() {
+				_ = client.DeleteBPFProbes(oldPod, podIdentifier)
+				close(deleteDone)
+			}()
+			select {
+			case <-deleteDone:
+				t.Error("CNI DEL completed while UpdateEbpfMaps was mid-update")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+		return seededShadowMap(seed)(bpfMap)
+	}
+
+	assert.NoError(t, client.UpdateEbpfMaps(podIdentifier, nil, nil))
+	<-deleteDone
+	assert.False(t, client.HasBPFContext(podIdentifier))
+
+	// The replacement pod's CNI ADD loads a fresh program pair for the identifier.
+	client.policyEndpointeBPFContext.Store(podIdentifier, raceTestBPFContext(7, 200, 9, 201))
+
+	assert.NoError(t, client.UpdateEbpfMaps(podIdentifier, nil, nil))
+	assert.Equal(t, uint32(200), cachedMapID(t, client.ingressInMemoryMap, podIdentifier))
+	assert.Equal(t, uint32(201), cachedMapID(t, client.egressInMemoryMap, podIdentifier))
+}
+
+// Issue #676: an attach for a pod whose CNI DEL is in progress must observe the
+// DEL once it gets the lock, instead of loading a new program set for the
+// identifier on behalf of a pod that no longer exists.
+func TestBpfClient_AttacheBPFProbes_WaitsForInProgressDelete(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	pod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+
+	client.podIdentifierLocks.Lock(podIdentifier) // the CNI DEL holds the lock
+	attachDone := make(chan error)
+	go func() {
+		_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, false)
+		attachDone <- err
+	}()
+	assert.Eventually(t, func() bool { return lockWaiters(client, podIdentifier) == 2 }, time.Second, time.Millisecond)
+	client.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
+	client.podIdentifierLocks.Unlock(podIdentifier)
+
+	assert.NoError(t, receiveWithin(t, attachDone))
+	assert.False(t, client.HasBPFContext(podIdentifier))
+}
+
+func TestBpfClient_DeleteBPFProbes_ReleasesPodIdentifierLock(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	pod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	seedLastPodOfIdentifier(t, client, podIdentifier, podKey, 100, 101)
+
+	assert.NoError(t, client.DeleteBPFProbes(pod, podIdentifier))
+	assert.False(t, client.HasBPFContext(podIdentifier))
+	assert.Zero(t, client.podIdentifierLocks.len())
+}
+
+// The first-pod decision is made under the lock, after a CNI DEL of the
+// identifier's last pod has finished, so an attach that loads a fresh program
+// set reports it and the CNI ADD programs the new maps.
+func TestBpfClient_AttacheBPFProbes_ReportsFreshLoadAfterLastPodDeleted(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	podIdentifier := utils.GetPodIdentifier("ds-new", "ns")
+	newPod := types.NamespacedName{Name: "ds-new", Namespace: "ns"}
+	oldPod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	oldPodKey := utils.GetPodNamespacedName(oldPod.Name, oldPod.Namespace)
+	seedLastPodOfIdentifier(t, client, podIdentifier, oldPodKey, 100, 101)
+	assert.True(t, client.HasBPFContext(podIdentifier), "precondition: old pod's programs exist")
+	assert.NoError(t, client.DeleteBPFProbes(oldPod, podIdentifier))
+
+	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
+	egressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
+	loaded := func(pinPath string, progFD int) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{pinPath: {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded(ingressPinPath, 7), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded(egressPinPath, 9), nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	first, err := client.AttacheBPFProbes(newPod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+	assert.NoError(t, err)
+	assert.True(t, first, "a fresh program load must be reported so the caller programs the new maps")
+
+	// A second pod of the identifier reuses the programs.
+	otherPod := types.NamespacedName{Name: "ds-other", Namespace: "ns"}
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	first, err = client.AttacheBPFProbes(otherPod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+	assert.NoError(t, err)
+	assert.False(t, first)
+}
+
+// The pod-state writers go through the context's map FDs, which a concurrent
+// CNI DEL closes; they must wait for the identifier lock too.
+func TestBpfClient_PodStateWritersWaitForPodIdentifierLock(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	podIdentifier := utils.GetPodIdentifier("ds-old", "ns")
+	writers := map[string]func() error{
+		"UpdatePodStateEbpfMaps": func() error {
+			return client.UpdatePodStateEbpfMaps(podIdentifier, POD_STATE_MAP_KEY, DEFAULT_ALLOW, true, true)
+		},
+		"CreatePodStateEbpfEntryIfNotExists": func() error {
+			return client.CreatePodStateEbpfEntryIfNotExists(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, DEFAULT_ALLOW)
+		},
+		"UpdateClusterPolicyEbpfMaps": func() error {
+			return client.UpdateClusterPolicyEbpfMaps(podIdentifier, nil, nil)
+		},
+		"UpdateEbpfMaps": func() error {
+			return client.UpdateEbpfMaps(podIdentifier, nil, nil)
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			client.podIdentifierLocks.Lock(podIdentifier) // a CNI DEL in progress
+			done := make(chan error)
+			go func() { done <- write() }()
+			ranUnderLock := false
+			select {
+			case <-done:
+				ranUnderLock = true
+			case <-time.After(50 * time.Millisecond):
+			}
+			client.podIdentifierLocks.Unlock(podIdentifier) // DEL finished: no context left
+			if ranUnderLock {
+				t.Fatal("writer ran while the identifier lock was held")
+			}
+			assert.ErrorContains(t, <-done, "no bpf context registered")
+		})
+	}
+}
+
+// ReAttachEbpfProbes runs at startup and calls the locked pod-state writer for
+// each identifier it reattaches, so it must not hold an identifier lock itself.
+func TestBpfClient_ReAttachEbpfProbes_ReleasesPodIdentifierLocks(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	client.ingressBinary, client.egressBinary = "ingress.bpf.o", "egress.bpf.o"
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	podIdentifier := utils.GetPodIdentifier("ds-a", "ns")
+	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
+	egressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
+	client.interfaceNametoIngressPinPath = map[string]string{"eni1": ingressPinPath}
+	client.interfaceNametoEgressPinPath = map[string]string{"eni1": egressPinPath}
+
+	notAMap := disposableFD(t)
+	defer syscall.Close(notAMap)
+	loaded := func(pinPath string, progFD int, podStateMap string) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{pinPath: {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{podStateMap: {MapFD: uint32(notAMap)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockSDKClient.EXPECT().LoadBpfFile(client.ingressBinary, podIdentifier).Return(loaded(ingressPinPath, 7, utils.TC_INGRESS_POD_STATE_MAP), nil, nil)
+	mockSDKClient.EXPECT().LoadBpfFile(client.egressBinary, podIdentifier).Return(loaded(egressPinPath, 9, utils.TC_EGRESS_POD_STATE_MAP), nil, nil)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach("eni1", 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressAttach("eni1", 9, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+
+	done := make(chan error)
+	go func() { done <- client.ReAttachEbpfProbes() }()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("ReAttachEbpfProbes did not return")
+	}
+	value, ok := client.policyEndpointeBPFContext.Load(podIdentifier)
+	require.True(t, ok)
+	assert.Equal(t, 7, value.(BPFContext).ingressPgmInfo.Program.ProgFD)
+	assert.Equal(t, 9, value.(BPFContext).egressPgmInfo.Program.ProgFD)
+	assert.Zero(t, client.podIdentifierLocks.len())
+}
+
+func TestShadowMapFor_RejectsUnexpectedCacheValue(t *testing.T) {
+	cache := new(sync.Map)
+	cache.Store("ds@ns", "not a shadow map")
+	_, err := shadowMapFor(cache, "ds@ns", goebpfmaps.BpfMap{MapID: 200})
+	assert.ErrorContains(t, err, "unexpected type string")
+}
+
+// A CNI ADD for a pod recreated under the same name (a StatefulSet pod, say)
+// must not be skipped by the previous pod's deleted-pod marker, even when that
+// marker is written by a CNI DEL that holds the identifier lock while the ADD
+// waits for it.
+func TestBpfClient_AttacheBPFProbes_ConfirmedLiveAttachSurvivesConcurrentDelete(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	pod := types.NamespacedName{Name: "web-0", Namespace: "ns"}
+	podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", 7), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	client.podIdentifierLocks.Lock(podIdentifier) // the previous web-0's CNI DEL
+	type result struct {
+		first bool
+		err   error
+	}
+	attachDone := make(chan result)
+	go func() {
+		first, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+		attachDone <- result{first, err}
+	}()
+	assert.Eventually(t, func() bool { return lockWaiters(client, podIdentifier) == 2 }, time.Second, time.Millisecond)
+	client.deletedPods.Store(podKey, time.Now()) // DEL publishes its marker last
+	client.podIdentifierLocks.Unlock(podIdentifier)
+
+	got := receiveWithin(t, attachDone)
+	assert.NoError(t, got.err)
+	assert.True(t, got.first, "the replacement pod's maps must be programmed")
+	_, attached := client.ingressPodToProgMap.Load(podKey)
+	assert.True(t, attached, "the replacement pod must be attached")
+	_, stillMarked := client.deletedPods.Load(podKey)
+	assert.False(t, stillMarked)
+}
+
+// Only the attach that loads an identifier's programs reports its first pod. A
+// sibling pod and a repeated ADD reuse the programs and their shared maps.
+func TestBpfClient_AttacheBPFProbes_OnlyTheLoadingAttachIsFirstPod(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	podIdentifier := utils.GetPodIdentifier("app-b", "ns")
+	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", 7), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	attach := func(name string) bool {
+		t.Helper()
+		first, err := client.AttacheBPFProbes(types.NamespacedName{Name: name, Namespace: "ns"}, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+		require.NoError(t, err)
+		return first
+	}
+	assert.True(t, attach("app-b-1"), "the attach that loads the programs")
+	assert.False(t, attach("app-b-2"), "a sibling reuses the loaded programs")
+	assert.False(t, attach("app-b-2"), "a repeated ADD for an attached pod")
+}
+
+// The first-pod decision is made under the lock: a CNI ADD that is waiting on
+// the lock while the CNI DEL of the identifier's last pod tears it down must
+// find no programs, load fresh ones and report the first pod.
+func TestBpfClient_AttacheBPFProbes_FirstPodDecidedAfterConcurrentDelete(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	podIdentifier := utils.GetPodIdentifier("ds-new", "ns")
+	newPod := types.NamespacedName{Name: "ds-new", Namespace: "ns"}
+	oldPod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	seedLastPodOfIdentifier(t, client, podIdentifier, utils.GetPodNamespacedName(oldPod.Name, oldPod.Namespace), 100, 101)
+
+	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", 7), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	client.podIdentifierLocks.Lock(podIdentifier) // the old pod's CNI DEL
+	type result struct {
+		first bool
+		err   error
+	}
+	attachDone := make(chan result)
+	go func() {
+		first, err := client.AttacheBPFProbes(newPod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+		attachDone <- result{first, err}
+	}()
+	assert.Eventually(t, func() bool { return lockWaiters(client, podIdentifier) == 2 }, time.Second, time.Millisecond)
+	client.deletePodFromIngressProgPodCaches(oldPod.Name, oldPod.Namespace)
+	client.deletePodFromEgressProgPodCaches(oldPod.Name, oldPod.Namespace)
+	assert.NoError(t, client.deleteBPFProbes(podIdentifier))
+	client.podIdentifierLocks.Unlock(podIdentifier)
+
+	got := receiveWithin(t, attachDone)
+	assert.NoError(t, got.err)
+	assert.True(t, got.first, "the new pod's freshly loaded maps must be programmed by its CNI ADD")
+}
+
+// Concurrent CNI ADDs for two pods of a new identifier: exactly one loads the
+// programs and reports the first pod; the other reuses them.
+func TestBpfClient_AttacheBPFProbes_ConcurrentSiblingsLoadProgramsOnce(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	podIdentifier := utils.GetPodIdentifier("app-b", "ns")
+	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
+			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
+			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
+		}}
+	}
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", 7), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+	origGetHostVethName := utils.GetHostVethName
+	defer func() { utils.GetHostVethName = origGetHostVethName }()
+	utils.GetHostVethName = func(string, string, int, []string) (string, error) { return "mockedveth0", nil }
+
+	client.podIdentifierLocks.Lock(podIdentifier) // hold both ADDs until they are queued
+	firsts := make(chan bool, 2)
+	for _, name := range []string{"app-b-1", "app-b-2"} {
+		go func() {
+			first, err := client.AttacheBPFProbes(types.NamespacedName{Name: name, Namespace: "ns"}, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+			assert.NoError(t, err)
+			firsts <- first
+		}()
+	}
+	assert.Eventually(t, func() bool { return lockWaiters(client, podIdentifier) == 3 }, time.Second, time.Millisecond)
+	client.podIdentifierLocks.Unlock(podIdentifier)
+
+	a, b := receiveWithin(t, firsts), receiveWithin(t, firsts)
+	assert.True(t, a != b, "exactly one ADD must report the first pod, got %v and %v", a, b)
+}
+
+// A reconciler attach for a pod already marked deleted must return without
+// waiting for the identifier lock: after an agent restart PolicyEndpoints still
+// list just-deleted pods, and waiting behind the replacement pod's CNI ADD for
+// each of them delays the reconcile of every other identifier.
+func TestBpfClient_AttacheBPFProbes_DeletedPodSkipsWithoutWaitingForLock(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	pod := types.NamespacedName{Name: "ds-old", Namespace: "ns"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	client.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
+
+	client.podIdentifierLocks.Lock(podIdentifier) // the replacement pod's CNI ADD
+	defer client.podIdentifierLocks.Unlock(podIdentifier)
+	done := make(chan bool)
+	go func() {
+		first, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, false)
+		done <- err == nil && !first
+	}()
+	select {
+	case ok := <-done:
+		assert.True(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("reconciler attach of a deleted pod waited for the identifier lock")
+	}
 }
