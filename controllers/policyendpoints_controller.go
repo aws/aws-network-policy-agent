@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -53,7 +55,39 @@ const (
 	POLICIES_APPLIED = 0
 	DEFAULT_ALLOW    = 1
 	DEFAULT_DENY     = 2
+
+	// Requeue ladder for a reconcile whose eBPF programming did not fully
+	// succeed: doubling from base to cap, jittered. See ErrProgrammingIncomplete
+	// for why this is an explicit RequeueAfter and not a returned error.
+	programmingRequeueBase   = 500 * time.Millisecond
+	programmingRequeueCap    = 2 * time.Minute
+	programmingRequeueJitter = 0.2
+
+	// Upper bound on a trigger-time age still worth reporting as programming
+	// latency. Past this the value describes an outage, not programming work.
+	//
+	// This MUST stay above the histogram's top bucket. Both programming-latency
+	// histograms declare LinearBuckets(120, 30, 7), i.e. 120..300s, so a cap at
+	// or below 120s would make those seven buckets unreachable and blank the
+	// metric during exactly the slow recoveries it exists to measure.
+	programmingLatencyMaxAge = 300 * time.Second
 )
+
+// ErrProgrammingIncomplete marks a reconcile whose eBPF programming did not
+// fully succeed. Reconcile converts it into a bounded RequeueAfter rather than
+// returning it.
+//
+// controller-runtime calls Queue.Forget on the RequeueAfter branch but NOT on
+// the error branch, so returning a raw error lets the default bare per-item
+// exponential limiter (5ms base, 1000s cap; UsePriorityQueue defaults true, so
+// there is no global token bucket) accumulate failures and escalate a
+// persistently failing PolicyEndpoint to a 1000s inter-retry gap. That is
+// LONGER than the ~781s outage in aws/aws-network-policy-agent#686 that this
+// change exists to fix. An agent-owned ladder stays bounded by
+// programmingRequeueCap, and a genuine watch event still preempts the delay
+// because a plain Add promotes an item out of the priority queue's waiting tree
+// straight into ready.
+var ErrProgrammingIncomplete = errors.New("eBPF programming incomplete")
 
 var (
 	policySetupLatency = prometheus.NewSummaryVec(
@@ -86,6 +120,16 @@ var (
 				prometheus.LinearBuckets(120, 30, 7)...), // 120, 150, 180, ..., 300
 		},
 	)
+	// Choosing RequeueAfter over a returned error means controller-runtime's own
+	// controller_runtime_reconcile_errors_total stays at zero, so this counter is
+	// the only signal that the data plane is behind the desired state.
+	policyProgrammingFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "awsnodeagent_policy_programming_failures_total",
+			Help: "Reconciles whose eBPF programming did not fully succeed and were requeued",
+		},
+		[]string{"controller"},
+	)
 	prometheusRegistered = false
 )
 
@@ -98,6 +142,7 @@ func prometheusRegister() {
 		metrics.Registry.MustRegister(policySetupLatency)
 		metrics.Registry.MustRegister(policyTearDownLatency)
 		metrics.Registry.MustRegister(policyProgrammingLatency)
+		metrics.Registry.MustRegister(policyProgrammingFailures)
 		prometheusRegistered = true
 	}
 }
@@ -130,6 +175,10 @@ type PolicyEndpointsReconciler struct {
 	// last-change-trigger-time annotation value consumed, so each trigger
 	// time is observed at most once
 	lastObservedTriggerTimes sync.Map
+	// programmingAttempts maps a PE's types.NamespacedName to its consecutive
+	// failed-programming count, which drives the RequeueAfter ladder. Cleared on
+	// success and on cleanup.
+	programmingAttempts sync.Map
 	// Maps pod Identifier to list of PolicyEndpoint resources
 	podIdentifierToPolicyEndpointMap sync.Map
 	// Mutex for operations on PodIdentifierToPolicyEndpointMap
@@ -148,11 +197,42 @@ type PolicyEndpointsReconciler struct {
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log().Infof("Received a new reconcile request %v", req)
-	if err := r.reconcile(ctx, req); err != nil {
-		log().Errorf("Reconcile error: %v", err)
-		return ctrl.Result{}, err
+	err := r.reconcile(ctx, req)
+	if err == nil {
+		r.programmingAttempts.Delete(req.NamespacedName)
+		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{}, nil
+	if errors.Is(err, ErrProgrammingIncomplete) {
+		after := nextRequeueDelay(&r.programmingAttempts, req.NamespacedName)
+		log().Errorf("eBPF programming incomplete for %v, requeueing in %v: %v", req.NamespacedName, after, err)
+		policyProgrammingFailures.WithLabelValues("policyendpoint").Inc()
+		// Returning a nil error here is deliberate: this branch makes
+		// controller-runtime call Queue.Forget, so its own exponential limiter
+		// cannot escalate the delay past programmingRequeueCap. See
+		// ErrProgrammingIncomplete.
+		return ctrl.Result{RequeueAfter: after}, nil
+	}
+	log().Errorf("Reconcile error: %v", err)
+	return ctrl.Result{}, err
+}
+
+// nextRequeueDelay returns the jittered backoff for the next programming retry
+// of key, incrementing its consecutive-failure count in attempts.
+func nextRequeueDelay(attempts *sync.Map, key any) time.Duration {
+	n := 0
+	if prev, ok := attempts.Load(key); ok {
+		n, _ = prev.(int)
+	}
+	attempts.Store(key, n+1)
+
+	delay := programmingRequeueBase
+	for i := 0; i < n && delay < programmingRequeueCap; i++ {
+		delay *= 2
+	}
+	if delay > programmingRequeueCap {
+		delay = programmingRequeueCap
+	}
+	return wait.Jitter(delay, programmingRequeueJitter)
 }
 
 func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
@@ -266,6 +346,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	}
 
 	programmingSucceeded := true
+	var programmingErrs []error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
@@ -292,6 +373,9 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		if err != nil {
 			log().Errorf("Error configuring eBPF Probes %v", err)
 			programmingSucceeded = false
+			// Collect rather than return, so one failing podIdentifier does not
+			// stop the others from being programmed.
+			programmingErrs = append(programmingErrs, fmt.Errorf("podIdentifier %s: %w", podIdentifier, err))
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
@@ -300,13 +384,25 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed)
 	r.observePolicyProgrammingLatency(policyEndpoint, programmingSucceeded)
 
+	if len(programmingErrs) > 0 {
+		// This used to return nil, so controller-runtime recorded
+		// result="success", called Queue.Forget, and nothing on the node ever
+		// retried the write. The only remaining retry was the arrival of the next
+		// NPC PolicyEndpoint mutation - hence ~781s with no next reconcile in
+		// aws/aws-network-policy-agent#686, and "only a pod lifecycle change
+		// unstuck it".
+		return fmt.Errorf("%w for policy endpoint %s/%s: %w", ErrProgrammingIncomplete,
+			policyEndpoint.Namespace, policyEndpoint.Name, errors.Join(programmingErrs...))
+	}
 	return nil
 }
 
 // observePolicyProgrammingLatency emits the E2E latency histogram from the
-// last-change-trigger-time annotation. Each annotation value is consumed at
-// most once per PE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// last-change-trigger-time annotation. Each annotation value is observed at most
+// once per PE: it is consumed on success, so resyncs and relists never re-observe
+// it. A programming FAILURE deliberately does not consume it, so that the retry
+// which eventually succeeds can still report a real latency; inflation from a
+// much later resync is bounded by programmingLatencyMaxAge instead.
 func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, programmingSucceeded bool) {
 	if pe.Annotations == nil {
 		return
@@ -327,11 +423,22 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	if prev, ok := r.lastObservedTriggerTimes.Load(peKey); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
+	if !programmingSucceeded {
+		// Deliberately NOT consumed here. Programming failures are now requeued,
+		// so the retry that succeeds must still be able to observe this trigger
+		// time; consuming it on failure would drop every retried - i.e. every
+		// slow - programming from the histogram, which is exactly the tail we
+		// care about. The staleness guard below stops that from inflating.
+		log().Debugf("Skipping E2E policy programming latency for PE %s/%s: programming failed", pe.Namespace, pe.Name)
+		return
+	}
+	// Consume before the remaining suppression check: a suppressed observation
 	// must never be re-emitted (inflated) by a later resync of the same annotation.
 	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
-	if !programmingSucceeded {
-		log().Debugf("Skipping E2E policy programming latency for PE %s/%s: programming failed", pe.Namespace, pe.Name)
+	if time.Since(triggerTime) > programmingLatencyMaxAge {
+		// Recovered after a long outage. Observing this would report the outage
+		// duration as programming latency and swamp the SLO histogram.
+		log().Debugf("Skipping stale E2E policy programming latency for PE %s/%s", pe.Namespace, pe.Name)
 		return
 	}
 	latency := time.Since(triggerTime).Seconds()

@@ -16,3 +16,5 @@ test/build/
 
 results.log
 eks-cluster.yaml
+# Compiled ginkgo integration-test binaries (~45MB each, regenerate with `ginkgo build`)
+*.test
