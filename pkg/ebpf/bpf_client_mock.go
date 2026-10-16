@@ -25,6 +25,11 @@ func NewMockBpfClient() *bpfClient {
 }
 
 type MockBpfClient struct {
+	// AttacheBPFProbes reports this as "first pod of its identifier"
+	AttachIsFirstPod bool
+	// podConfirmedLive passed to the most recent AttacheBPFProbes call
+	LastAttachPodConfirmedLive bool
+
 	CallLog []string
 
 	// Injected errors for failure-path tests. Zero values preserve the
@@ -104,13 +109,18 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 	(*dst)[podIdentifier] = rules
 }
 
-func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
+	m.LastAttachPodConfirmedLive = podConfirmedLive
+	// A CNI ADD proves the pod exists and clears its deleted-pod marker, as production does.
+	if podConfirmedLive {
+		delete(m.DeletedPods, pod)
+	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
 	if !m.DeletedPods[pod] && m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.ForgetIdentifier(podIdentifier)
 	}
-	return nil
+	return m.AttachIsFirstPod, nil
 }
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
@@ -182,11 +192,6 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	return nil
 }
 
-func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
-	m.CallLog = append(m.CallLog, "IsFirstPodInPodIdentifier")
-	return false
-}
-
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
 	m.CallLog = append(m.CallLog, "ReAttachEbpfProbes")
 	return nil
@@ -211,10 +216,6 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 		m.recordPodState(podIdentifier, key, state)
 	}
 	return nil
-}
-
-func (m *MockBpfClient) ClearDeletedPod(podNamespacedName string) {
-	m.CallLog = append(m.CallLog, "ClearDeletedPod")
 }
 
 func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {

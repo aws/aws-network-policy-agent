@@ -20,9 +20,18 @@ import (
 	"testing"
 
 	"github.com/aws/amazon-vpc-cni-k8s/rpc"
+	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	networking "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestRunRPCHandler_NoExistingSocket(t *testing.T) {
@@ -50,7 +59,7 @@ func TestRunRPCHandler_StaleSocketCleanup(t *testing.T) {
 	assert.NotNil(t, errCh)
 }
 
-func TestEnforceNpToPod_ClearDeletedPodBeforeAttach(t *testing.T) {
+func TestEnforceNpToPod_AttachesAsConfirmedLive(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
 	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
@@ -69,9 +78,10 @@ func TestEnforceNpToPod_ClearDeletedPodBeforeAttach(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
 
-	// ClearDeletedPod must appear before AttacheBPFProbes
-	assert.Equal(t, "ClearDeletedPod", mockBpfClient.CallLog[1])
-	assert.Equal(t, "AttacheBPFProbes", mockBpfClient.CallLog[2])
+	// A CNI ADD proves the pod exists, so its attach must clear any stale
+	// deleted-pod marker under the identifier lock instead of being skipped.
+	assert.Equal(t, "AttacheBPFProbes", mockBpfClient.CallLog[0])
+	assert.True(t, mockBpfClient.LastAttachPodConfirmedLive)
 }
 
 func TestEnforceNpToPod_NilClusterPolicyReconciler_ReturnsError(t *testing.T) {
@@ -173,7 +183,7 @@ func TestEnforceNpToPod_NoPolicies_UpdatesBothPodStateMaps(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
 
-	// With no policies and IsFirstPodInPodIdentifier returning false,
+	// With no policies and AttacheBPFProbes reporting no new program,
 	// the "no active policies" branch fires and calls UpdatePodStateEbpfMaps twice:
 	// once for POD_STATE_MAP_KEY and once for CLUSTER_POLICY_POD_STATE_MAP_KEY
 	updateCount := 0
@@ -212,4 +222,79 @@ func TestEnforceNpToPod_FailsClosedOnPodStateError(t *testing.T) {
 
 	assert.ErrorIs(t, err, injected)
 	assert.Nil(t, resp, "rpc must not return a success reply when the pod-state write fails")
+}
+
+// reconcilerWithCachedPolicy returns a PolicyEndpoints reconciler whose local
+// cache knows an egress policy for the "nginx" podIdentifier in "default",
+// populated the same way production does it: by reconciling a PolicyEndpoint
+// that selects a pod of that identifier on this node.
+func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient) *controllers.PolicyEndpointsReconciler {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	assert.NoError(t, policyk8sawsv1.AddToScheme(scheme))
+	pe := &policyk8sawsv1.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "np-x-abcde", Namespace: "default"},
+		Spec: policyk8sawsv1.PolicyEndpointSpec{
+			PolicyRef:    policyk8sawsv1.PolicyReference{Name: "np-x", Namespace: "default"},
+			PodIsolation: []networking.PolicyType{networking.PolicyTypeEgress},
+			PodSelectorEndpoints: []policyk8sawsv1.PodEndpoint{
+				{Name: "nginx-old123", Namespace: "default", PodIP: "10.0.0.5", HostIP: "10.0.0.1"},
+			},
+			Egress: []policyk8sawsv1.EndpointInfo{{CIDR: "10.1.0.0/16"}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pe).Build()
+	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false)
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}})
+	require.NoError(t, err)
+	assert.True(t, reconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: policy cached")
+	return reconciler
+}
+
+// Issue #676: when AttacheBPFProbes reports that it loaded a fresh program set
+// for the identifier, the CNI ADD must program the new maps and mark the pod
+// POLICIES_APPLIED. Skipping it leaves the fresh pod-state maps empty and the
+// programs drop every packet.
+func TestEnforceNpToPod_CachedPolicies_ProgramsMapsOnlyWhenAttachLoadedPrograms(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		attachIsFirst bool
+		wantProgram   bool
+	}{
+		{name: "fresh program set", attachIsFirst: true, wantProgram: true},
+		{name: "shares existing programs", attachIsFirst: false, wantProgram: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mockBpfClient := &ebpf.MockBpfClient{}
+			reconciler := reconcilerWithCachedPolicy(t, mockBpfClient)
+			mockBpfClient.Reset()
+			mockBpfClient.AttachIsFirstPod = tt.attachIsFirst
+			s := &server{
+				policyReconciler:        reconciler,
+				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient),
+			}
+
+			resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+				K8S_POD_NAME:        "nginx-new456",
+				K8S_POD_NAMESPACE:   "default",
+				NETWORK_POLICY_MODE: "standard",
+				InterfaceCount:      1,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.True(t, resp.Success)
+
+			if !tt.wantProgram {
+				assert.NotContains(t, mockBpfClient.CallLog, "UpdateEbpfMaps")
+				assert.Empty(t, mockBpfClient.PodStateByIdentifier)
+				return
+			}
+			assert.Contains(t, mockBpfClient.CallLog, "UpdateEbpfMaps")
+			assert.Equal(t, []fwrp.EbpfFirewallRules{{IPCidr: "10.1.0.0/16"}}, mockBpfClient.LastEgressRules)
+			assert.Equal(t, map[ebpf.PodStateKey]int{
+				{PodIdentifier: "nginx@default", MapKey: ebpf.POD_STATE_MAP_KEY}:                ebpf.POLICIES_APPLIED,
+				{PodIdentifier: "nginx@default", MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}: ebpf.DEFAULT_ALLOW,
+			}, mockBpfClient.PodStateByIdentifier)
+		})
+	}
 }
