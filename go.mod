@@ -5,7 +5,7 @@ go 1.26.9
 require (
 	github.com/aws/amazon-network-policy-controller-k8s v1.1.10
 	github.com/aws/amazon-vpc-cni-k8s v1.22.4
-	github.com/aws/aws-ebpf-sdk-go v1.0.17
+	github.com/aws/aws-ebpf-sdk-go v1.0.17-0.20261013221913-dba6f1d88c5a
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.31

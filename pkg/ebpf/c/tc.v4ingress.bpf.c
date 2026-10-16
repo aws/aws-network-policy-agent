@@ -2,6 +2,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "ct_deny.h"
 
 #define BPF_F_NO_PREALLOC 1
 #define ETH_HLEN 14
@@ -330,6 +331,10 @@ int handle_ingress(struct __sk_buff *skb)
 	struct conntrack_value *reverse_flow_val;
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
+#ifdef NPA_CT_SHORTEN_ON_DENY
+	// Set only in the ct-deny build; see ct_deny.h for why it's a build variant.
+	__u8 tcp_syn_only = 0;
+#endif
 	__u8 dest_ip[4];
 
 	__builtin_memset(&flow_key, 0, sizeof(flow_key));
@@ -362,6 +367,9 @@ int handle_ingress(struct __sk_buff *skb)
 				}
 				l4_src_port = (((((unsigned short)(l4_tcp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->source) & 0xFF00) >> 8));
 				l4_dst_port = (((((unsigned short)(l4_tcp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->dest) & 0xFF00) >> 8));
+#ifdef NPA_CT_SHORTEN_ON_DENY
+				tcp_syn_only = l4_tcp_hdr->syn && !l4_tcp_hdr->ack;
+#endif
 				break;
 			case IPPROTO_UDP:
 				if (data + sizeof(*ip) + sizeof(*l4_udp_hdr) > data_end) {
@@ -469,7 +477,14 @@ int handle_ingress(struct __sk_buff *skb)
 		}
 
 		// If we reach here, it means it's a new flow or a non-matching response
-		return evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+		int verdict = evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+#ifdef NPA_CT_SHORTEN_ON_DENY
+		// A denied SYN leaves a kernel conntrack entry that is never answered.
+		if (verdict == BPF_DROP && tcp_syn_only) {
+			shorten_denied_ct_v4(skb, ip->saddr, ip->daddr, bpf_htons(l4_src_port), bpf_htons(l4_dst_port));
+		}
+#endif
+		return verdict;
 	}
 	return BPF_OK;
 }

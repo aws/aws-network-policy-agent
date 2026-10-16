@@ -1207,3 +1207,149 @@ func TestCleanupDeletedPodsIfNeeded(t *testing.T) {
 	})
 	assert.Equal(t, 400, remaining)
 }
+
+func TestSelectIngressBinary(t *testing.T) {
+	saved := checkKfuncs
+	defer func() { checkKfuncs = saved }()
+
+	checkKfuncs = func([]string) error { return nil }
+	assert.Equal(t, TC_INGRESS_CT_DENY_BINARY, selectIngressBinary(false))
+	assert.Equal(t, TC_V6_INGRESS_CT_DENY_BINARY, selectIngressBinary(true))
+
+	checkKfuncs = func([]string) error { return errors.New(`kfunc "bpf_skb_ct_lookup" not found in kernel BTF`) }
+	assert.Equal(t, TC_INGRESS_BINARY, selectIngressBinary(false))
+	assert.Equal(t, TC_V6_INGRESS_BINARY, selectIngressBinary(true))
+}
+
+func TestLoadIngressBPFProgram_CtDenyFallback(t *testing.T) {
+	pinPath := utils.GetBPFPinPathFromPodIdentifier("test-abcd", "ingress")
+	loaded := map[string]goelf.BpfData{
+		pinPath: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 7},
+			Maps:    map[string]goebpfmaps.BpfMap{utils.TC_INGRESS_MAP: {MapFD: 100}},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		ctDenyErr    error
+		fallbackErr  error
+		wantErr      bool
+		wantBinaries []string
+		wantCurrent  string
+	}{
+		{
+			name:         "ct-deny binary loads",
+			wantBinaries: []string{TC_INGRESS_CT_DENY_BINARY},
+			wantCurrent:  TC_INGRESS_CT_DENY_BINARY,
+		},
+		{
+			name:         "ct-deny binary rejected, fallback loads and sticks",
+			ctDenyErr:    errors.New("failed to Load the prog: permission denied"),
+			wantBinaries: []string{TC_INGRESS_CT_DENY_BINARY, TC_INGRESS_BINARY},
+			wantCurrent:  TC_INGRESS_BINARY,
+		},
+		{
+			name:         "both fail, keep trying ct-deny next time",
+			ctDenyErr:    errors.New("failed to Load the prog: permission denied"),
+			fallbackErr:  errors.New("failed to Load the prog: out of memory"),
+			wantErr:      true,
+			wantBinaries: []string{TC_INGRESS_CT_DENY_BINARY, TC_INGRESS_BINARY},
+			wantCurrent:  TC_INGRESS_CT_DENY_BINARY,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			var gotBinaries []string
+			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), "test-abcd").DoAndReturn(
+				func(path, _ string) (map[string]goelf.BpfData, map[string]goebpfmaps.BpfMap, error) {
+					gotBinaries = append(gotBinaries, path)
+					if path == TC_INGRESS_CT_DENY_BINARY && tt.ctDenyErr != nil {
+						return nil, nil, tt.ctDenyErr
+					}
+					if path == TC_INGRESS_BINARY && tt.fallbackErr != nil {
+						return nil, nil, tt.fallbackErr
+					}
+					return loaded, nil, nil
+				}).AnyTimes()
+
+			testBpfClient := &bpfClient{
+				bpfSDKClient:          mockBpfClient,
+				ingressBinary:         TC_INGRESS_CT_DENY_BINARY,
+				ingressFallbackBinary: TC_INGRESS_BINARY,
+			}
+			_, progFD, err := testBpfClient.loadIngressBPFProgram("test-abcd")
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, 7, progFD)
+			}
+			assert.Equal(t, tt.wantBinaries, gotBinaries)
+			assert.Equal(t, tt.wantCurrent, testBpfClient.ingressBinary)
+		})
+	}
+}
+
+// A failed load of the regular binary is not retried.
+func TestLoadIngressBPFProgram_NoFallbackForRegularBinary(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().LoadBpfFile(TC_INGRESS_BINARY, "test-abcd").Return(nil, nil, errors.New("boom")).Times(1)
+
+	testBpfClient := &bpfClient{
+		bpfSDKClient:          mockBpfClient,
+		ingressBinary:         TC_INGRESS_BINARY,
+		ingressFallbackBinary: TC_INGRESS_BINARY,
+	}
+	_, _, err := testBpfClient.loadIngressBPFProgram("test-abcd")
+	assert.Error(t, err)
+}
+
+// Switching between the regular and ct-deny ingress binaries must force an
+// ingress reload, and the unused variant's host copy must be removed so an
+// agent that only knows the regular binary (a rollback) reloads too.
+func TestIngressBinaryVariantSwitch(t *testing.T) {
+	tests := []struct {
+		name       string
+		enableIPv6 bool
+		selected   string
+		installed  []string
+		wantSwitch bool
+		wantLeft   []string
+	}{
+		{name: "regular to ct-deny", selected: TC_INGRESS_CT_DENY_BINARY, installed: []string{TC_INGRESS_BINARY},
+			wantSwitch: true, wantLeft: []string{}},
+		{name: "ct-deny to regular", selected: TC_INGRESS_BINARY, installed: []string{TC_INGRESS_CT_DENY_BINARY},
+			wantSwitch: true, wantLeft: []string{}},
+		{name: "regular, unchanged", selected: TC_INGRESS_BINARY, installed: []string{TC_INGRESS_BINARY},
+			wantSwitch: false, wantLeft: []string{TC_INGRESS_BINARY}},
+		{name: "ct-deny, unchanged", selected: TC_INGRESS_CT_DENY_BINARY, installed: []string{TC_INGRESS_CT_DENY_BINARY},
+			wantSwitch: false, wantLeft: []string{TC_INGRESS_CT_DENY_BINARY}},
+		{name: "v6 regular to ct-deny", enableIPv6: true, selected: TC_V6_INGRESS_CT_DENY_BINARY,
+			installed: []string{TC_V6_INGRESS_BINARY, TC_INGRESS_BINARY}, wantSwitch: true, wantLeft: []string{TC_INGRESS_BINARY}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir() + "/"
+			for _, f := range tt.installed {
+				assert.NoError(t, os.WriteFile(dir+f, []byte(f), 0644))
+			}
+			assert.Equal(t, tt.wantSwitch, otherIngressBinaryInstalled(tt.enableIPv6, tt.selected, dir))
+			removeOtherIngressBinary(tt.enableIPv6, tt.selected, dir)
+			entries, err := os.ReadDir(dir)
+			assert.NoError(t, err)
+			left := []string{}
+			for _, e := range entries {
+				left = append(left, e.Name())
+			}
+			assert.ElementsMatch(t, tt.wantLeft, left)
+		})
+	}
+}
