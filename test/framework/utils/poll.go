@@ -10,4 +10,7 @@ const (
 	ProbeTimeout       = 30 * time.Second // probe once enforcement is expected to be active
 	StabilityWindow    = 10 * time.Second // window over which a converged verdict must hold
 	ProbeInterval      = 3 * time.Second
+
+	// Bounds a single resource delete that polls for the resource to disappear.
+	CleanupTimeout = 60 * time.Second
 )
