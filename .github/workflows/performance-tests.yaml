@@ -56,5 +56,6 @@ jobs:
           INSTANCE_TYPE: c5.xlarge
           IP_FAMILY: ${{ matrix.ip-family }}
           AWS_EKS_NODEAGENT_IMAGE: ${{ needs.build-image.outputs.AWS_EKS_NODEAGENT_IMAGE }}
+          TEST_IMAGE_REGISTRY: ${{ secrets.TEST_IMAGE_REGISTRY }}
         run: |
           ./scripts/run-tests.sh
