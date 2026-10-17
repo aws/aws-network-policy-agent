@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -174,6 +175,10 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 // making the identifier injective on (podName-prefix, podNamespace). "@" also
 // keeps pin filenames parseable by aws-ebpf-sdk-go, which splits on the first
 // "_" to find the suffix boundary; using "_" here would shadow that split.
+//
+// Callers only have the pod name and namespace (CNI/RPC, PolicyEndpoint,
+// ipam.json), so truncated CronJob runs are distinguished with the
+// unix-minutes name heuristic below rather than ownerReferences or Job labels.
 func GetPodIdentifier(podName, podNamespace string) string {
 	if strings.Contains(podName, ".") {
 		log().Debug("Replacing '.' character with '_' for pod pin path.")
@@ -182,9 +187,101 @@ func GetPodIdentifier(podName, podNamespace string) string {
 	podIdentifierPrefix := podName
 	if strings.Contains(podName, "-") {
 		tmpName := strings.Split(podName, "-")
-		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
+		lastToken := tmpName[len(tmpName)-1]
+		// CronJob pods are <cronjob>-<unix-minutes>-<5-char-suffix>. When the
+		// CronJob name is longer than 48 characters the API server truncates
+		// GenerateName's prefix to 58 chars, so the '-' before the suffix is
+		// lost and timestamp+suffix fuse into one token. Dropping that token
+		// made every run share one identifier (issue #671). Keep the fused
+		// token only for that case.
+		if !isTruncatedCronJobFusedToken(podName, lastToken) {
+			podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
+		}
 	}
 	return podIdentifierPrefix + "@" + podNamespace
+}
+
+// dns1123MaxLabelLength is the Kubernetes DNS-1123 label limit. GenerateName
+// truncates the prefix so the final pod name is exactly this long.
+const dns1123MaxLabelLength = 63
+
+// k8sGenerateNameSuffixLen is the random suffix length used by
+// k8s.io/apiserver/pkg/storage/names.SimpleNameGenerator.
+const k8sGenerateNameSuffixLen = 5
+
+// cronJobUnixMinutesMaxLen is the current width of unix-minutes (unix/60) in
+// a CronJob Job name. It stays 8 digits until year 2160.
+const cronJobUnixMinutesMaxLen = 8
+
+// k8sGenerateNameAlphabet is the character set SimpleNameGenerator uses
+// (k8s.io/apimachinery/pkg/util/rand). Vowels and 0/1/3 are omitted.
+const k8sGenerateNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
+
+// cronJobUnixMinutesMin is unix/60 at 2015-01-01 UTC. CronJob Job names did
+// not exist before batch/v1 CronJobs, so earlier prefixes are leftover
+// pod-template-hash digits, not scheduled-time minutes.
+const cronJobUnixMinutesMin int64 = 1420070400 / 60
+
+// cronJobUnixMinutesFutureMargin is how far ahead of now a fused minutes
+// prefix may extend (clock skew and a Job that has not started yet).
+const cronJobUnixMinutesFutureMargin int64 = 14 * 24 * 60
+
+// unixMinutesNow is unix timestamp / 60. Overridable in tests.
+var unixMinutesNow = func() int64 { return time.Now().Unix() / 60 }
+
+func isTruncatedCronJobFusedToken(podName, lastToken string) bool {
+	if len(podName) != dns1123MaxLabelLength {
+		return false
+	}
+	// Non-truncated CronJob/Job/Deployment/ReplicaSet last tokens are the
+	// 5-char GenerateName suffix (or a short StatefulSet ordinal). Those
+	// identifiers must stay exactly as they are today.
+	if len(lastToken) <= k8sGenerateNameSuffixLen {
+		return false
+	}
+	if len(lastToken) > cronJobUnixMinutesMaxLen+k8sGenerateNameSuffixLen {
+		return false
+	}
+	minutes := lastToken[:len(lastToken)-k8sGenerateNameSuffixLen]
+	suffix := lastToken[len(lastToken)-k8sGenerateNameSuffixLen:]
+	for i := 0; i < len(minutes); i++ {
+		if minutes[i] < '0' || minutes[i] > '9' {
+			return false
+		}
+	}
+	for i := 0; i < len(suffix); i++ {
+		if !strings.ContainsRune(k8sGenerateNameAlphabet, rune(suffix[i])) {
+			return false
+		}
+	}
+	// Long Deployments truncate the same way. Leftover pod-template-hash
+	// digits (e.g. "748" from 748dc8d996) match the structural pattern.
+	// Require the digit run to be a prefix of some unix-minutes value in
+	// [2015-01-01, now+14d]. Residual false positives: a leftover hash
+	// prefix whose implied 8-digit minute range overlaps that window.
+	// With the GenerateName alphabet (27 chars, 7 digits) that is about
+	// 1/27 of 56-char Deployments (k=1 leftover char, must be '2' today)
+	// and 6/729 ≈ 0.8% at k=2; k>=3 is <<1% (e.g. "748" is rejected).
+	return isPlausibleCronJobUnixMinutesPrefix(minutes, unixMinutesNow())
+}
+
+func isPlausibleCronJobUnixMinutesPrefix(digits string, nowMinutes int64) bool {
+	k := len(digits)
+	if k == 0 || k > cronJobUnixMinutesMaxLen {
+		return false
+	}
+	value, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return false
+	}
+	scale := int64(1)
+	for i := 0; i < cronJobUnixMinutesMaxLen-k; i++ {
+		scale *= 10
+	}
+	start := value * scale
+	end := start + scale - 1
+	maxMinutes := nowMinutes + cronJobUnixMinutesFutureMargin
+	return start <= maxMinutes && end >= cronJobUnixMinutesMin
 }
 
 // LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm
