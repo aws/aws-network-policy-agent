@@ -411,13 +411,119 @@ func TestGetPodIdentifier(t *testing.T) {
 			},
 			want: "hello-udp-748dc8d996@default",
 		},
+		// Issue #671: 52-char CronJob name, pod truncated to 63 chars so the
+		// unix-minutes token and GenerateName suffix fuse. Keep the fused
+		// token so overlapping runs do not share one identifier.
+		{
+			name: "truncated CronJob pod keeps fused timestamp+suffix (52-char CronJob)",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notification-sender-29808n7p4d",
+				podNamespace: "team-a",
+			},
+			want: "example-app-backend-worker-queue-notification-sender-29808n7p4d@team-a",
+		},
+		{
+			name: "truncated CronJob second run is distinct (52-char CronJob)",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notification-sender-29809xkxxh",
+				podNamespace: "team-a",
+			},
+			want: "example-app-backend-worker-queue-notification-sender-29809xkxxh@team-a",
+		},
+		// Upgrade-safety: every non-truncated shape must stay bit-identical
+		// to today's identifier so existing pin files are not renamed.
+		{
+			name: "non-truncated CronJob keeps Job timestamp (48-char CronJob)",
+			args: args{
+				podName:      "example-app-backend-worker-queue-cache-evictions-29808480-xkxxh",
+				podNamespace: "team-a",
+			},
+			want: "example-app-backend-worker-queue-cache-evictions-29808480@team-a",
+		},
+		{
+			name: "Deployment/ReplicaSet pod identifier unchanged",
+			args: args{
+				podName:      "hello-udp-748dc8d996-fb8b2",
+				podNamespace: "default",
+			},
+			want: "hello-udp-748dc8d996@default",
+		},
+		{
+			name: "StatefulSet pod identifier unchanged",
+			args: args{
+				podName:      "web-0",
+				podNamespace: "default",
+			},
+			want: "web@default",
+		},
+		{
+			name: "regular Job pod identifier unchanged",
+			args: args{
+				podName:      "manual-batch-job-xkxxh",
+				podNamespace: "default",
+			},
+			want: "manual-batch-job@default",
+		},
+		{
+			name: "63-char Deployment pod still drops the 5-char suffix",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notificatio-x-748dc8d996-fb8b2",
+				podNamespace: "team-a",
+			},
+			want: "example-app-backend-worker-queue-notificatio-x-748dc8d996@team-a",
+		},
+		{
+			name: "63-char StatefulSet ordinal is still dropped",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notification-sts-longnamexx-12",
+				podNamespace: "team-a",
+			},
+			want: "example-app-backend-worker-queue-notification-sts-longnamexx@team-a",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			assert.LessOrEqual(t, len(tt.args.podName), 63, "pod names are DNS-1123 labels")
 			got := GetPodIdentifier(tt.args.podName, tt.args.podNamespace)
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// Truncated CronJob runs share one identifier on main (issue #671) because
+// GetPodIdentifier drops the fused timestamp+suffix token. After the fix
+// each run must be unique, while the 48-char (non-truncated) CronJob must
+// keep the Job timestamp and stay unique the same way it does today.
+func TestGetPodIdentifier_TruncatedCronJobRunsAreUnique(t *testing.T) {
+	ns := "team-a"
+	truncatedRuns := []string{
+		"example-app-backend-worker-queue-notification-sender-29808n7p4d",
+		"example-app-backend-worker-queue-notification-sender-29809xkxxh",
+	}
+	assert.Equal(t, 52, len("example-app-backend-worker-queue-notification-sender"))
+	for _, name := range truncatedRuns {
+		assert.Equal(t, 63, len(name), name)
+	}
+
+	id1 := GetPodIdentifier(truncatedRuns[0], ns)
+	id2 := GetPodIdentifier(truncatedRuns[1], ns)
+	assert.NotEqual(t, id1, id2, "overlapping truncated CronJob runs must not share a podIdentifier")
+	assert.Equal(t, truncatedRuns[0]+"@"+ns, id1)
+	assert.Equal(t, truncatedRuns[1]+"@"+ns, id2)
+
+	nonTruncatedRuns := []string{
+		"example-app-backend-worker-queue-cache-evictions-29808480-xkxxh",
+		"example-app-backend-worker-queue-cache-evictions-29809028-n7p4d",
+	}
+	assert.Equal(t, 48, len("example-app-backend-worker-queue-cache-evictions"))
+	for _, name := range nonTruncatedRuns {
+		assert.Equal(t, 63, len(name), name)
+	}
+	nt1 := GetPodIdentifier(nonTruncatedRuns[0], ns)
+	nt2 := GetPodIdentifier(nonTruncatedRuns[1], ns)
+	assert.NotEqual(t, nt1, nt2)
+	assert.Equal(t, "example-app-backend-worker-queue-cache-evictions-29808480@team-a", nt1)
+	assert.Equal(t, "example-app-backend-worker-queue-cache-evictions-29809028@team-a", nt2)
 }
 
 // Distinct (podName, podNamespace) pairs that aliased to the same podIdentifier

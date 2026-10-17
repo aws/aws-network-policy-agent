@@ -182,9 +182,62 @@ func GetPodIdentifier(podName, podNamespace string) string {
 	podIdentifierPrefix := podName
 	if strings.Contains(podName, "-") {
 		tmpName := strings.Split(podName, "-")
-		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
+		lastToken := tmpName[len(tmpName)-1]
+		// CronJob pods are <cronjob>-<unix-minutes>-<5-char-suffix>. When the
+		// CronJob name is longer than 48 characters the API server truncates
+		// GenerateName's prefix to 58 chars, so the '-' before the suffix is
+		// lost and timestamp+suffix fuse into one token. Dropping that token
+		// made every run share one identifier (issue #671). Keep the fused
+		// token; every other name still drops the last '-' token as before.
+		if !isTruncatedCronJobFusedToken(podName, lastToken) {
+			podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
+		}
 	}
 	return podIdentifierPrefix + "@" + podNamespace
+}
+
+// dns1123MaxLabelLength is the Kubernetes DNS-1123 label limit. GenerateName
+// truncates the prefix so the final pod name is exactly this long.
+const dns1123MaxLabelLength = 63
+
+// k8sGenerateNameSuffixLen is the random suffix length used by
+// k8s.io/apiserver/pkg/storage/names.SimpleNameGenerator.
+const k8sGenerateNameSuffixLen = 5
+
+// cronJobUnixMinutesMaxLen is the current width of unix-minutes (unix/60) in
+// a CronJob Job name. It stays 8 digits until year 2286.
+const cronJobUnixMinutesMaxLen = 8
+
+// k8sGenerateNameAlphabet is the character set SimpleNameGenerator uses
+// (k8s.io/apimachinery/pkg/util/rand). Vowels and 0/1/3 are omitted.
+const k8sGenerateNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
+
+func isTruncatedCronJobFusedToken(podName, lastToken string) bool {
+	if len(podName) != dns1123MaxLabelLength {
+		return false
+	}
+	// Non-truncated CronJob/Job/Deployment/ReplicaSet last tokens are the
+	// 5-char GenerateName suffix (or a short StatefulSet ordinal). Those
+	// identifiers must stay exactly as they are today.
+	if len(lastToken) <= k8sGenerateNameSuffixLen {
+		return false
+	}
+	if len(lastToken) > cronJobUnixMinutesMaxLen+k8sGenerateNameSuffixLen {
+		return false
+	}
+	minutes := lastToken[:len(lastToken)-k8sGenerateNameSuffixLen]
+	suffix := lastToken[len(lastToken)-k8sGenerateNameSuffixLen:]
+	for i := 0; i < len(minutes); i++ {
+		if minutes[i] < '0' || minutes[i] > '9' {
+			return false
+		}
+	}
+	for i := 0; i < len(suffix); i++ {
+		if !strings.ContainsRune(k8sGenerateNameAlphabet, rune(suffix[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm
