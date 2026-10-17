@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -16,6 +17,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var (
@@ -170,11 +172,62 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + "_" + podNamespace
 }
 
+// Kubernetes Job labels that identify a Job-owned pod. The batch.kubernetes.io
+// names are current; the unprefixed names are the legacy equivalents.
+const (
+	LabelJobName            = "job-name"
+	LabelControllerUID      = "controller-uid"
+	LabelBatchJobName       = "batch.kubernetes.io/job-name"
+	LabelBatchControllerUID = "batch.kubernetes.io/controller-uid"
+	jobOwnerKind            = "Job"
+)
+
+// IsJobOwnedPod reports whether the pod is owned by a Job, using controller
+// ownerReferences (kind Job) and/or the standard Job labels. Returns false
+// when both inputs are empty.
+//
+// None of the current GetPodIdentifier call sites have this metadata:
+//   - CNI/RPC EnforceNpToPod and DeletePodNp only receive K8S_POD_NAME and
+//     K8S_POD_NAMESPACE (amazon-vpc-cni-k8s rpc.EnforceNpRequest / DeleteNpRequest).
+//   - PolicyEndpoint / ClusterPolicyEndpoint PodEndpoint carries Name,
+//     Namespace, PodIP, HostIP — no owners or labels.
+//   - npatypes.Pod is NamespacedName + PodIP.
+//   - Legacy pin migration reads only k8sPodName / k8sPodNamespace from ipam.json.
+//
+// Identifiers must match across those paths, so GetPodIdentifier stays
+// name-only and uses the unix-minutes fallback below. Call
+// GetPodIdentifierWithJobOwned only when every path for that pod can pass
+// the same ownership bit; otherwise attach and reconcile will disagree.
+func IsJobOwnedPod(owners []metav1.OwnerReference, labels map[string]string) bool {
+	for _, owner := range owners {
+		if owner.Kind == jobOwnerKind && (owner.Controller == nil || *owner.Controller) {
+			return true
+		}
+	}
+	if labels == nil {
+		return false
+	}
+	return labels[LabelBatchJobName] != "" || labels[LabelJobName] != "" ||
+		labels[LabelBatchControllerUID] != "" || labels[LabelControllerUID] != ""
+}
+
 // Separator is "@" because it is illegal in DNS-1123 pod names and namespaces,
 // making the identifier injective on (podName-prefix, podNamespace). "@" also
 // keeps pin filenames parseable by aws-ebpf-sdk-go, which splits on the first
 // "_" to find the suffix boundary; using "_" here would shadow that split.
 func GetPodIdentifier(podName, podNamespace string) string {
+	return getPodIdentifier(podName, podNamespace, nil)
+}
+
+// GetPodIdentifierWithJobOwned is the metadata-aware variant. jobOwned false
+// never keeps a fused token (Deployments). jobOwned true or nil applies the
+// truncated-CronJob name heuristic. See IsJobOwnedPod for why callers today
+// must use GetPodIdentifier (nil).
+func GetPodIdentifierWithJobOwned(podName, podNamespace string, jobOwned *bool) string {
+	return getPodIdentifier(podName, podNamespace, jobOwned)
+}
+
+func getPodIdentifier(podName, podNamespace string, jobOwned *bool) string {
 	if strings.Contains(podName, ".") {
 		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
@@ -188,8 +241,8 @@ func GetPodIdentifier(podName, podNamespace string) string {
 		// GenerateName's prefix to 58 chars, so the '-' before the suffix is
 		// lost and timestamp+suffix fuse into one token. Dropping that token
 		// made every run share one identifier (issue #671). Keep the fused
-		// token; every other name still drops the last '-' token as before.
-		if !isTruncatedCronJobFusedToken(podName, lastToken) {
+		// token only for that case.
+		if !keepTruncatedCronJobToken(podName, lastToken, jobOwned) {
 			podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
 		}
 	}
@@ -211,6 +264,25 @@ const cronJobUnixMinutesMaxLen = 8
 // k8sGenerateNameAlphabet is the character set SimpleNameGenerator uses
 // (k8s.io/apimachinery/pkg/util/rand). Vowels and 0/1/3 are omitted.
 const k8sGenerateNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
+
+// cronJobUnixMinutesMin is unix/60 at 2015-01-01 UTC. CronJob Job names did
+// not exist before batch/v1 CronJobs, so earlier prefixes are leftover
+// pod-template-hash digits, not scheduled-time minutes.
+const cronJobUnixMinutesMin int64 = 1420070400 / 60
+
+// cronJobUnixMinutesFutureMargin is how far ahead of now a fused minutes
+// prefix may extend (clock skew and a Job that has not started yet).
+const cronJobUnixMinutesFutureMargin int64 = 14 * 24 * 60
+
+// unixMinutesNow is unix timestamp / 60. Overridable in tests.
+var unixMinutesNow = func() int64 { return time.Now().Unix() / 60 }
+
+func keepTruncatedCronJobToken(podName, lastToken string, jobOwned *bool) bool {
+	if jobOwned != nil && !*jobOwned {
+		return false
+	}
+	return isTruncatedCronJobFusedToken(podName, lastToken)
+}
 
 func isTruncatedCronJobFusedToken(podName, lastToken string) bool {
 	if len(podName) != dns1123MaxLabelLength {
@@ -237,7 +309,34 @@ func isTruncatedCronJobFusedToken(podName, lastToken string) bool {
 			return false
 		}
 	}
-	return true
+	// Long Deployments truncate the same way. Leftover pod-template-hash
+	// digits (e.g. "748" from 748dc8d996) match the structural pattern.
+	// Require the digit run to be a prefix of some unix-minutes value in
+	// [2015-01-01, now+14d]. Residual false positives: a leftover hash
+	// prefix whose implied 8-digit minute range overlaps that window.
+	// With the GenerateName alphabet (27 chars, 7 digits) that is about
+	// 1/27 of 56-char Deployments (k=1 leftover char, must be '2' today)
+	// and 6/729 ≈ 0.8% at k=2; k>=3 is <<1% (e.g. "748" is rejected).
+	return isPlausibleCronJobUnixMinutesPrefix(minutes, unixMinutesNow())
+}
+
+func isPlausibleCronJobUnixMinutesPrefix(digits string, nowMinutes int64) bool {
+	k := len(digits)
+	if k == 0 || k > cronJobUnixMinutesMaxLen {
+		return false
+	}
+	value, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return false
+	}
+	scale := int64(1)
+	for i := 0; i < cronJobUnixMinutesMaxLen-k; i++ {
+		scale *= 10
+	}
+	start := value * scale
+	end := start + scale - 1
+	maxMinutes := nowMinutes + cronJobUnixMinutesFutureMargin
+	return start <= maxMinutes && end >= cronJobUnixMinutesMin
 }
 
 // LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm

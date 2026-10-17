@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestComputeTrieKey(t *testing.T) {
@@ -480,6 +481,26 @@ func TestGetPodIdentifier(t *testing.T) {
 			},
 			want: "example-app-backend-worker-queue-notification-sts-longnamexx@team-a",
 		},
+		// 54-char Deployment: GenerateName prefix is truncated to 58 chars so
+		// the last token is leftover pod-template-hash digits + 5-char suffix
+		// (748fb8b2). That is not a plausible unix-minutes prefix, so the
+		// identifier must stay the shared Deployment id used on main.
+		{
+			name: "54-char Deployment replica A keeps shared identifier",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notification-sendr-xy-748fb8b2",
+				podNamespace: "ns",
+			},
+			want: "example-app-backend-worker-queue-notification-sendr-xy@ns",
+		},
+		{
+			name: "54-char Deployment replica B keeps shared identifier",
+			args: args{
+				podName:      "example-app-backend-worker-queue-notification-sendr-xy-748xkxxh",
+				podNamespace: "ns",
+			},
+			want: "example-app-backend-worker-queue-notification-sendr-xy@ns",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -524,6 +545,70 @@ func TestGetPodIdentifier_TruncatedCronJobRunsAreUnique(t *testing.T) {
 	assert.NotEqual(t, nt1, nt2)
 	assert.Equal(t, "example-app-backend-worker-queue-cache-evictions-29808480@team-a", nt1)
 	assert.Equal(t, "example-app-backend-worker-queue-cache-evictions-29809028@team-a", nt2)
+}
+
+// A 54-char Deployment with a pod-template-hash that starts with digits is
+// truncated the same way as a long CronJob. Both replicas must keep the
+// single shared identifier main produces (…-sendr-xy@ns). Treating the
+// leftover hash as a CronJob timestamp would rename pins on upgrade.
+func TestGetPodIdentifier_LongDeploymentReplicasShareIdentifier(t *testing.T) {
+	const (
+		deploy = "example-app-backend-worker-queue-notification-sendr-xy"
+		ns     = "ns"
+	)
+	assert.Equal(t, 54, len(deploy))
+	replicas := []string{
+		"example-app-backend-worker-queue-notification-sendr-xy-748fb8b2",
+		"example-app-backend-worker-queue-notification-sendr-xy-748xkxxh",
+	}
+	for _, name := range replicas {
+		assert.Equal(t, 63, len(name), name)
+	}
+	id1 := GetPodIdentifier(replicas[0], ns)
+	id2 := GetPodIdentifier(replicas[1], ns)
+	want := deploy + "@" + ns
+	assert.Equal(t, want, id1)
+	assert.Equal(t, want, id2)
+	assert.Equal(t, id1, id2, "Deployment replicas must share one podIdentifier")
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func TestIsJobOwnedPod(t *testing.T) {
+	ctrl := true
+	jobOwner := metav1.OwnerReference{Kind: "Job", Controller: &ctrl}
+	rsOwner := metav1.OwnerReference{Kind: "ReplicaSet", Controller: &ctrl}
+
+	assert.True(t, IsJobOwnedPod([]metav1.OwnerReference{jobOwner}, nil))
+	assert.False(t, IsJobOwnedPod([]metav1.OwnerReference{rsOwner}, nil))
+	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelBatchJobName: "myjob"}))
+	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelJobName: "myjob"}))
+	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelBatchControllerUID: "uid"}))
+	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelControllerUID: "uid"}))
+	assert.False(t, IsJobOwnedPod(nil, map[string]string{"pod-template-hash": "748dc8d996"}))
+	assert.False(t, IsJobOwnedPod(nil, nil))
+}
+
+func TestGetPodIdentifierWithJobOwned(t *testing.T) {
+	cron := "example-app-backend-worker-queue-notification-sender-29808n7p4d"
+	deployA := "example-app-backend-worker-queue-notification-sendr-xy-748fb8b2"
+	assert.Equal(t, cron+"@team-a", GetPodIdentifierWithJobOwned(cron, "team-a", boolPtr(true)))
+	assert.Equal(t, "example-app-backend-worker-queue-notification-sender@team-a",
+		GetPodIdentifierWithJobOwned(cron, "team-a", boolPtr(false)))
+	assert.Equal(t, "example-app-backend-worker-queue-notification-sendr-xy@ns",
+		GetPodIdentifierWithJobOwned(deployA, "ns", boolPtr(false)))
+	assert.Equal(t, GetPodIdentifier(cron, "team-a"), GetPodIdentifierWithJobOwned(cron, "team-a", nil))
+}
+
+func TestIsPlausibleCronJobUnixMinutesPrefix(t *testing.T) {
+	// Oct 2026 ≈ 29869920 unix-minutes. Issue #671 leftover "29808" is in range;
+	// leftover Deployment hash "748" is not.
+	const now = int64(29869920)
+	assert.True(t, isPlausibleCronJobUnixMinutesPrefix("29808", now))
+	assert.True(t, isPlausibleCronJobUnixMinutesPrefix("29808480", now))
+	assert.False(t, isPlausibleCronJobUnixMinutesPrefix("748", now))
+	assert.False(t, isPlausibleCronJobUnixMinutesPrefix("11111", now))
+	assert.False(t, isPlausibleCronJobUnixMinutesPrefix("", now))
 }
 
 // Distinct (podName, podNamespace) pairs that aliased to the same podIdentifier
