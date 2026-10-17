@@ -17,7 +17,6 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var (
@@ -172,62 +171,15 @@ func GetPodNamespacedName(podName, podNamespace string) string {
 	return podName + "_" + podNamespace
 }
 
-// Kubernetes Job labels that identify a Job-owned pod. The batch.kubernetes.io
-// names are current; the unprefixed names are the legacy equivalents.
-const (
-	LabelJobName            = "job-name"
-	LabelControllerUID      = "controller-uid"
-	LabelBatchJobName       = "batch.kubernetes.io/job-name"
-	LabelBatchControllerUID = "batch.kubernetes.io/controller-uid"
-	jobOwnerKind            = "Job"
-)
-
-// IsJobOwnedPod reports whether the pod is owned by a Job, using controller
-// ownerReferences (kind Job) and/or the standard Job labels. Returns false
-// when both inputs are empty.
-//
-// None of the current GetPodIdentifier call sites have this metadata:
-//   - CNI/RPC EnforceNpToPod and DeletePodNp only receive K8S_POD_NAME and
-//     K8S_POD_NAMESPACE (amazon-vpc-cni-k8s rpc.EnforceNpRequest / DeleteNpRequest).
-//   - PolicyEndpoint / ClusterPolicyEndpoint PodEndpoint carries Name,
-//     Namespace, PodIP, HostIP — no owners or labels.
-//   - npatypes.Pod is NamespacedName + PodIP.
-//   - Legacy pin migration reads only k8sPodName / k8sPodNamespace from ipam.json.
-//
-// Identifiers must match across those paths, so GetPodIdentifier stays
-// name-only and uses the unix-minutes fallback below. Call
-// GetPodIdentifierWithJobOwned only when every path for that pod can pass
-// the same ownership bit; otherwise attach and reconcile will disagree.
-func IsJobOwnedPod(owners []metav1.OwnerReference, labels map[string]string) bool {
-	for _, owner := range owners {
-		if owner.Kind == jobOwnerKind && (owner.Controller == nil || *owner.Controller) {
-			return true
-		}
-	}
-	if labels == nil {
-		return false
-	}
-	return labels[LabelBatchJobName] != "" || labels[LabelJobName] != "" ||
-		labels[LabelBatchControllerUID] != "" || labels[LabelControllerUID] != ""
-}
-
 // Separator is "@" because it is illegal in DNS-1123 pod names and namespaces,
 // making the identifier injective on (podName-prefix, podNamespace). "@" also
 // keeps pin filenames parseable by aws-ebpf-sdk-go, which splits on the first
 // "_" to find the suffix boundary; using "_" here would shadow that split.
+//
+// Callers only have the pod name and namespace (CNI/RPC, PolicyEndpoint,
+// ipam.json), so truncated CronJob runs are distinguished with the
+// unix-minutes name heuristic below rather than ownerReferences or Job labels.
 func GetPodIdentifier(podName, podNamespace string) string {
-	return getPodIdentifier(podName, podNamespace, nil)
-}
-
-// GetPodIdentifierWithJobOwned is the metadata-aware variant. jobOwned false
-// never keeps a fused token (Deployments). jobOwned true or nil applies the
-// truncated-CronJob name heuristic. See IsJobOwnedPod for why callers today
-// must use GetPodIdentifier (nil).
-func GetPodIdentifierWithJobOwned(podName, podNamespace string, jobOwned *bool) string {
-	return getPodIdentifier(podName, podNamespace, jobOwned)
-}
-
-func getPodIdentifier(podName, podNamespace string, jobOwned *bool) string {
 	if strings.Contains(podName, ".") {
 		log().Debug("Replacing '.' character with '_' for pod pin path.")
 		podName = strings.Replace(podName, ".", "_", -1)
@@ -242,7 +194,7 @@ func getPodIdentifier(podName, podNamespace string, jobOwned *bool) string {
 		// lost and timestamp+suffix fuse into one token. Dropping that token
 		// made every run share one identifier (issue #671). Keep the fused
 		// token only for that case.
-		if !keepTruncatedCronJobToken(podName, lastToken, jobOwned) {
+		if !isTruncatedCronJobFusedToken(podName, lastToken) {
 			podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
 		}
 	}
@@ -276,13 +228,6 @@ const cronJobUnixMinutesFutureMargin int64 = 14 * 24 * 60
 
 // unixMinutesNow is unix timestamp / 60. Overridable in tests.
 var unixMinutesNow = func() int64 { return time.Now().Unix() / 60 }
-
-func keepTruncatedCronJobToken(podName, lastToken string, jobOwned *bool) bool {
-	if jobOwned != nil && !*jobOwned {
-		return false
-	}
-	return isTruncatedCronJobFusedToken(podName, lastToken)
-}
 
 func isTruncatedCronJobFusedToken(podName, lastToken string) bool {
 	if len(podName) != dns1123MaxLabelLength {

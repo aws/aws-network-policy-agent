@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestComputeTrieKey(t *testing.T) {
@@ -570,34 +569,6 @@ func TestGetPodIdentifier_LongDeploymentReplicasShareIdentifier(t *testing.T) {
 	assert.Equal(t, want, id1)
 	assert.Equal(t, want, id2)
 	assert.Equal(t, id1, id2, "Deployment replicas must share one podIdentifier")
-}
-
-func boolPtr(v bool) *bool { return &v }
-
-func TestIsJobOwnedPod(t *testing.T) {
-	ctrl := true
-	jobOwner := metav1.OwnerReference{Kind: "Job", Controller: &ctrl}
-	rsOwner := metav1.OwnerReference{Kind: "ReplicaSet", Controller: &ctrl}
-
-	assert.True(t, IsJobOwnedPod([]metav1.OwnerReference{jobOwner}, nil))
-	assert.False(t, IsJobOwnedPod([]metav1.OwnerReference{rsOwner}, nil))
-	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelBatchJobName: "myjob"}))
-	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelJobName: "myjob"}))
-	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelBatchControllerUID: "uid"}))
-	assert.True(t, IsJobOwnedPod(nil, map[string]string{LabelControllerUID: "uid"}))
-	assert.False(t, IsJobOwnedPod(nil, map[string]string{"pod-template-hash": "748dc8d996"}))
-	assert.False(t, IsJobOwnedPod(nil, nil))
-}
-
-func TestGetPodIdentifierWithJobOwned(t *testing.T) {
-	cron := "example-app-backend-worker-queue-notification-sender-29808n7p4d"
-	deployA := "example-app-backend-worker-queue-notification-sendr-xy-748fb8b2"
-	assert.Equal(t, cron+"@team-a", GetPodIdentifierWithJobOwned(cron, "team-a", boolPtr(true)))
-	assert.Equal(t, "example-app-backend-worker-queue-notification-sender@team-a",
-		GetPodIdentifierWithJobOwned(cron, "team-a", boolPtr(false)))
-	assert.Equal(t, "example-app-backend-worker-queue-notification-sendr-xy@ns",
-		GetPodIdentifierWithJobOwned(deployA, "ns", boolPtr(false)))
-	assert.Equal(t, GetPodIdentifier(cron, "team-a"), GetPodIdentifierWithJobOwned(cron, "team-a", nil))
 }
 
 func TestIsPlausibleCronJobUnixMinutesPrefix(t *testing.T) {
