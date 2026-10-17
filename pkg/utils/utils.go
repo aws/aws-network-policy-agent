@@ -210,7 +210,7 @@ const dns1123MaxLabelLength = 63
 const k8sGenerateNameSuffixLen = 5
 
 // cronJobUnixMinutesMaxLen is the current width of unix-minutes (unix/60) in
-// a CronJob Job name. It stays 8 digits until year 2286.
+// a CronJob Job name. It stays 8 digits until year 2160.
 const cronJobUnixMinutesMaxLen = 8
 
 // k8sGenerateNameAlphabet is the character set SimpleNameGenerator uses
