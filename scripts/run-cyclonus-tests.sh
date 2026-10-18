@@ -6,13 +6,19 @@
 # KUBECONFIG: Set the variable to the cluster kubeconfig file path
 # REGION: defaults to us-west-2
 # IP_FAMILY: defaults to IPv4
-# ENABLE_STRICT_MODE: Optional, defaults to false. Runs the strict-mode suite (mutates aws-node to strict enforcement, so it runs last)
-# RUN_EBPF_TESTS: Optional, defaults to false. Runs the eBPF conntrack security suite (auto-skips on IPv6)
-# RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to false. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
+# ENABLE_STRICT_MODE: Optional, defaults to true. Runs the strict-mode suite (mutates aws-node to strict enforcement, so it runs last)
+# RUN_EBPF_TESTS: Optional, defaults to true. Runs the eBPF conntrack security suite (auto-skips on IPv6)
+# RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to true. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
+# RUN_RESTART_TESTS: Optional, defaults to false. Runs the agent restart suite (needs AL2023 or newer nodes since it runs aws-eks-na-cli on the host)
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
 # DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
-# NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional
+#   Replaces the control-plane network policy controller with one running on the dataplane,
+#   which is the only way to configure it. Needed to exercise policies split across several
+#   PolicyEndpoint / ClusterPolicyEndpoint objects.
+# NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional, defaults to 2 when the above is true.
+#   The controller packs at most this many pods, ingress rules or egress rules into one
+#   endpoint object. Its own default is 200, so at test scale nothing ever slices.
 # AWS_EKS_NODEAGENT: Optional
 # AWS_CNI_IMAGE: Optional
 # AWS_CNI_IMAGE_INIT: Optional
@@ -32,14 +38,19 @@ source "${DIR}/lib/tests.sh"
 : "${REGION:="us-west-2"}"
 : "${SKIP_ADDON_INSTALLATION:="false"}"
 : "${SKIP_MAKE_TEST_BINARIES:="false"}"
-: "${ENABLE_STRICT_MODE:="false"}"
-: "${RUN_EBPF_TESTS:="false"}"
-: "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="false"}"
+: "${ENABLE_STRICT_MODE:="true"}"
+: "${RUN_EBPF_TESTS:="true"}"
+: "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="true"}"
+: "${RUN_RESTART_TESTS:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
 : "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE:=""}"
+
+if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" && -z $NP_CONTROLLER_ENDPOINT_CHUNK_SIZE ]]; then
+    NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=2
+fi
 : "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
@@ -88,7 +99,9 @@ else
 fi
 
 if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" ]]; then
+    echo "Replacing the control-plane controller with a dataplane one, endpoint chunk size $NP_CONTROLLER_ENDPOINT_CHUNK_SIZE"
     make deploy-network-policy-controller-on-dataplane NP_CONTROLLER_IMAGE=$PROD_IMAGE_REGISTRY NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE
+    verify_endpoint_chunk_size "$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE"
 fi
 
 run_cyclonus_tests
@@ -111,6 +124,10 @@ fi
 
 if [[ $RUN_CLUSTER_NETWORK_POLICY_TESTS == "true" ]]; then
     run_ginkgo_suite clusternetworkpolicy.test 30m
+fi
+
+if [[ $RUN_RESTART_TESTS == "true" ]]; then
+    run_ginkgo_suite restart.test 15m
 fi
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then

@@ -110,7 +110,7 @@ type pod_state struct {
 }
 
 func msSince(start time.Time) float64 {
-	return float64(time.Since(start) / time.Millisecond)
+	return float64(time.Since(start)) / float64(time.Millisecond)
 }
 
 func prometheusRegister() {
@@ -1042,7 +1042,6 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
 
-	start := time.Now()
 	var ingressErr, egressErr error
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if !ok {
@@ -1080,6 +1079,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 			if !typeOk {
 				ingressErr = fmt.Errorf("ingress in-mem map: unexpected type %T", inMemVal)
 			} else {
+				start := time.Now()
 				writeErr := l.updateEbpfMap(ingressFirewallRules, inMemMap)
 				duration := msSince(start)
 				sdkAPILatency.WithLabelValues("updateEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
@@ -1117,6 +1117,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 			if !typeOk {
 				egressErr = fmt.Errorf("egress in-mem map: unexpected type %T", inMemVal)
 			} else {
+				start := time.Now()
 				writeErr := l.updateEbpfMap(egressFirewallRules, inMemMap)
 				duration := msSince(start)
 				sdkAPILatency.WithLabelValues("updateEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
@@ -1142,7 +1143,6 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
 
 	var ingressProgFD, egressProgFD int
-	start := time.Now()
 	var ingressErr, egressErr error
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if !ok {
@@ -1179,6 +1179,7 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 			if !typeOk {
 				ingressErr = fmt.Errorf("cluster policy ingress in-mem map: unexpected type %T", inMemVal)
 			} else {
+				start := time.Now()
 				writeErr := l.updateClusterPolicyEbpfMap(ingressFirewallRules, inMemMap)
 				duration := msSince(start)
 				sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
@@ -1216,6 +1217,7 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 			if !typeOk {
 				egressErr = fmt.Errorf("cluster policy egress in-mem map: unexpected type %T", inMemVal)
 			} else {
+				start := time.Now()
 				writeErr := l.updateClusterPolicyEbpfMap(egressFirewallRules, inMemMap)
 				duration := msSince(start)
 				sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
@@ -1396,8 +1398,6 @@ func (l *bpfClient) isProgFdShared(targetPodName string, targetPodNamespace stri
 }
 
 func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
-	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1405,8 +1405,9 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 	}
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
+	start := time.Now()
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()
@@ -1416,8 +1417,6 @@ func (l *bpfClient) updateEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemM
 }
 
 func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewallRules, inMemMap *InMemoryBpfMap) error {
-	start := time.Now()
-	duration := msSince(start)
 	mapEntries, err := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules)
 	if err != nil {
 		log().Errorf("Trie entry creation/validation failed %v", err)
@@ -1425,8 +1424,9 @@ func (l *bpfClient) updateClusterPolicyEbpfMap(firewallRules []fwrp.EbpfFirewall
 	}
 
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
+	start := time.Now()
 	err = inMemMap.BulkRefresh(mapEntries)
-	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(duration)
+	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
 		sdkAPIErr.WithLabelValues("BulkRefreshMapEntries").Inc()

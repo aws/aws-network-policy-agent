@@ -182,13 +182,11 @@ func captureBPFState(nodeName string) utils.BPFState {
 }
 
 func execConnect(ns, pod, ip string, port int) string {
-	script := fmt.Sprintf(`import socket;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.settimeout(3)
+	script := fmt.Sprintf(`import socket
 try:
- s.connect(('%s',%d));print('CONNECTED')
-except:
- print('BLOCKED')
-finally:
- s.close()`, ip, port)
+ socket.create_connection(('%s',%d),timeout=3).close();print('CONNECTED')
+except OSError:
+ print('BLOCKED')`, ip, port)
 	out, err := fw.PodManager.ExecInPod(ns, pod, []string{"python3", "-c", script})
 	Expect(err).ToNot(HaveOccurred(), "execConnect exec failed")
 	if strings.Contains(out, "CONNECTED") {
