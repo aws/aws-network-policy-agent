@@ -40,6 +40,13 @@ var (
 	TC_CLUSTER_POLICY_EGRESS_MAP    = "cp_egress_map"
 	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
+	GLOBAL_CONNTRACK_MAP            = "aws_conntrack_map"
+	GLOBAL_POLICY_EVENTS_MAP        = "policy_events"
+
+	// GLOBAL_PIN_PREFIX is the pin-filename prefix used for node-wide programs
+	// and maps, e.g. "global_aws_conntrack_map". Per-pod pins instead carry a
+	// "<podName>@<namespace>" identifier.
+	GLOBAL_PIN_PREFIX = "global"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
@@ -59,6 +66,14 @@ var NamespacedBPFMaps = []string{
 	TC_CLUSTER_POLICY_EGRESS_MAP,
 	TC_INGRESS_POD_STATE_MAP,
 	TC_EGRESS_POD_STATE_MAP,
+}
+
+// GlobalBPFMaps lists BPF map names that are pinned once per node rather than
+// per pod-identifier, under the GLOBAL_PIN_PREFIX prefix.
+// Any new node scoped eBPF maps added in ebpf C programs needs to be added in this list for recovery
+var GlobalBPFMaps = []string{
+	GLOBAL_CONNTRACK_MAP,
+	GLOBAL_POLICY_EVENTS_MAP,
 }
 
 func log() logger.Logger {
@@ -204,18 +219,6 @@ func LegacyGetPodIdentifier(podName, podNamespace string) string {
 	return podIdentifierPrefix + "-" + podNamespace
 }
 
-func GetPodIdentifierFromBPFPinPath(pinPath string) (string, string) {
-	pinPathName := strings.Split(pinPath, "/")
-	parts := strings.Split(pinPathName[7], "_")
-
-	// Format: podIdentifier_handle_direction
-	// parts[len(parts)-2] = "handle", parts[len(parts)-1] = direction
-	podIdentifier := strings.Join(parts[:len(parts)-2], "_")
-	direction := parts[len(parts)-1]
-
-	return podIdentifier, direction
-}
-
 func GetBPFPinPathFromPodIdentifier(podIdentifier string, direction string) string {
 	progName := TC_INGRESS_PROG
 	if direction == "egress" {
@@ -257,19 +260,23 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
-var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
-	var interfaceName string
-	var errors error
-
+// BuildHostVethName computes the host veth name the VPC CNI assigns to a pod
+// interface: "<prefix><first-11-hex-of-sha1(podNamespace.podName)>". It does not check that the interface exists on
+// the host
+func BuildHostVethName(podName, podNamespace, prefix string, interfaceIndex int) string {
 	if interfaceIndex > 0 {
 		podName = fmt.Sprintf("%s.%s", podName, strconv.Itoa(interfaceIndex))
 	}
-
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
+	return fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
+}
+
+var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
+	var errors error
 
 	for _, prefix := range interfacePrefixes {
-		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
+		interfaceName := BuildHostVethName(podName, podNamespace, prefix, interfaceIndex)
 		if _, err := getHostLinkByName(interfaceName); err == nil {
 			return interfaceName, nil
 		} else {
@@ -277,7 +284,7 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 		}
 	}
 
-	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
+	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v error %v", interfacePrefixes, errors)
 	return "", errors
 }
 
