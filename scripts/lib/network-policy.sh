@@ -1,4 +1,66 @@
 
+function wait_for_aws_node_settled() {
+    local overall_timeout=${AWS_NODE_SETTLE_TIMEOUT:-300}
+    local settle_window=${AWS_NODE_SETTLE_WINDOW:-30}
+
+    echo "Waiting up to ${overall_timeout}s for aws-node to settle (all containers Ready with restartCount==0 for ${settle_window}s)..."
+
+    local start
+    start=$(date +%s)
+    local stable_since=0
+
+    while true; do
+        local now
+        now=$(date +%s)
+        local elapsed=$((now - start))
+        if [ "$elapsed" -ge "$overall_timeout" ]; then
+            echo "aws-node did not settle within ${overall_timeout}s"
+            kubectl get pods -n kube-system -l k8s-app=aws-node -owide || true
+            kubectl describe pods -n kube-system -l k8s-app=aws-node || true
+            kubectl get events -n kube-system --sort-by=.lastTimestamp | tail -50 || true
+            return 1
+        fi
+
+        local pods_json
+        pods_json=$(kubectl get pods -n kube-system -l k8s-app=aws-node -o json 2>/dev/null || echo '{"items":[]}')
+
+        local desired
+        desired=$(kubectl get ds/aws-node -n kube-system -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)
+        # Count only pods that are not terminating (no deletionTimestamp).
+        local live_count
+        live_count=$(echo "$pods_json" | jq '[.items[] | select(.metadata.deletionTimestamp == null)] | length')
+
+        if [ -z "$desired" ] || [ "$desired" = "0" ] || [ "$live_count" != "$desired" ]; then
+            stable_since=0
+            sleep 5
+            continue
+        fi
+
+        # Every container in every non-terminating aws-node pod must be Ready with restartCount==0.
+        local not_ready
+        not_ready=$(echo "$pods_json" | jq '[.items[] | select(.metadata.deletionTimestamp == null) | .status.containerStatuses[]? | select(.ready != true or .restartCount != 0)] | length')
+        if [ "$not_ready" != "0" ]; then
+            stable_since=0
+            sleep 5
+            continue
+        fi
+
+        if [ "$stable_since" = "0" ]; then
+            stable_since=$now
+            echo "aws-node pods ready and quiet at $(date -Is); requiring ${settle_window}s of stability"
+        fi
+
+        if [ $((now - stable_since)) -ge "$settle_window" ]; then
+            break
+        fi
+
+        sleep 5
+    done
+
+    echo "aws-node settled: ${desired} pods Ready with restartCount==0 for ${settle_window}s"
+    return 0
+}
+
 function load_addon_details() {
 
   ADDON_NAME="vpc-cni"
