@@ -52,12 +52,22 @@ func remotePod(name, ip string) podRef { return podRef{name: name, ip: ip, node:
 // ruleRef is one ingress or egress entry. Action applies to cluster policies only;
 // namespaced NetworkPolicy rules are allow-only.
 type ruleRef struct {
-	cidr   string
-	action string
+	cidr       string
+	action     string
+	domainName string
 }
 
 func allow(cidr string) ruleRef { return ruleRef{cidr: cidr, action: "Accept"} }
 func deny(cidr string) ruleRef  { return ruleRef{cidr: cidr, action: "Deny"} }
+
+// domainEgress is an egress entry that names a DomainName with no CIDR, as NPC emits for an
+// FQDN peer. The eBPF dataplane here is CIDR-based, so the controller skips these.
+func domainEgress(domain string) ruleRef {
+	return ruleRef{domainName: domain, action: "Allow"}
+}
+
+// emptyEgress is a malformed egress entry with neither CIDR nor DomainName set.
+func emptyEgress() ruleRef { return ruleRef{action: "Allow"} }
 
 // sliceSpec declares one PolicyEndpoint or ClusterPolicyEndpoint.
 type sliceSpec struct {
@@ -199,8 +209,9 @@ func (fx *cpeFixture) setSlices(specs ...sliceSpec) {
 		egress := make([]policyk8sawsv1.ClusterEndpointInfo, 0, len(s.egress))
 		for _, r := range s.egress {
 			egress = append(egress, policyk8sawsv1.ClusterEndpointInfo{
-				CIDR:   policyk8sawsv1.NetworkAddress(r.cidr),
-				Action: policyk8sawsv1.ClusterNetworkPolicyRuleAction(r.action),
+				CIDR:       policyk8sawsv1.NetworkAddress(r.cidr),
+				DomainName: policyk8sawsv1.DomainName(r.domainName),
+				Action:     policyk8sawsv1.ClusterNetworkPolicyRuleAction(r.action),
 			})
 		}
 		fx.store[s.name] = policyk8sawsv1.ClusterPolicyEndpoint{

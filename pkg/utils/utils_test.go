@@ -665,7 +665,7 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 				policyName:      "testPolicy",
 				policyNamespace: "testPolicyNamespace",
 			},
-			want: "testPolicytestPolicyNamespace",
+			want: "testPolicy/testPolicyNamespace",
 		},
 	}
 	for _, tt := range tests {
@@ -674,6 +674,15 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGetPolicyEndpointIdentifier_DistinguishesFormerlyCollidingPairs(t *testing.T) {
+	first := GetPolicyEndpointIdentifier("policy-a", "bc")
+	second := GetPolicyEndpointIdentifier("policy-ab", "c")
+
+	assert.Equal(t, "policy-a/bc", first)
+	assert.Equal(t, "policy-ab/c", second)
+	assert.NotEqual(t, first, second)
 }
 
 func TestIsNonHostCIDR(t *testing.T) {
