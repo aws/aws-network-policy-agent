@@ -1326,7 +1326,7 @@ func (l *bpfClient) IsBPFContextRegistered(podIdentifier string) bool {
 
 // isFirstPodInPodIdentifierLocked reports whether podIdentifier is missing an ingress
 // or egress program on this node. Callers must hold the podIdentifier lock.
-func (l *bpfClient) isFirstPodInPodIdentifierLocked(podIdentifier string) bool {>>>>>>> 1daadc1 (Fixes memory leak in the PodIdentifierToPolicyEndpoint map)
+func (l *bpfClient) isFirstPodInPodIdentifierLocked(podIdentifier string) bool {
 	firstPodInPodIdentifier := false
 	if value, ok := l.policyEndpointeBPFContext.Load(podIdentifier); !ok {
 		log().Info("No map instance found")

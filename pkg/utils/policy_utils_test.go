@@ -19,31 +19,31 @@ func TestGetNetworkPolicyIdentifier(t *testing.T) {
 func TestDeriveStalePodIdentifiers(t *testing.T) {
 	tests := []struct {
 		name string
-		// stored is the previous snapshot in networkPolicyToPodIdentifierMap, keyed by policy identifier
+		// stored is the previous snapshot in networkPolicyToPodIdentifierMap, keyed by policy identifier.
 		stored               map[string][]string
 		policyIdentifier     string
-		targetPodIdentifiers []string
+		targetPodIdentifiers map[string]bool
 		want                 []string
 	}{
 		{
 			name:                 "no previous snapshot for this NP",
 			stored:               map[string][]string{},
 			policyIdentifier:     "np/ns",
-			targetPodIdentifiers: []string{"rs1@ns"},
+			targetPodIdentifiers: map[string]bool{"rs1@ns": true},
 			want:                 nil,
 		},
 		{
 			name:                 "all previously selected identifiers still selected",
 			stored:               map[string][]string{"np/ns": {"rs1@ns", "rs2@ns"}},
 			policyIdentifier:     "np/ns",
-			targetPodIdentifiers: []string{"rs1@ns", "rs2@ns"},
+			targetPodIdentifiers: map[string]bool{"rs1@ns": true, "rs2@ns": true},
 			want:                 nil,
 		},
 		{
 			name:                 "identifier no longer selected is stale",
 			stored:               map[string][]string{"np/ns": {"rs1@ns", "churned@ns"}},
 			policyIdentifier:     "np/ns",
-			targetPodIdentifiers: []string{"rs1@ns"},
+			targetPodIdentifiers: map[string]bool{"rs1@ns": true},
 			want:                 []string{"churned@ns"},
 		},
 		{
