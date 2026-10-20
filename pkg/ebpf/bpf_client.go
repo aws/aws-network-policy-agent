@@ -918,7 +918,9 @@ func (l *bpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier stri
 			log().Errorf("BPF programs and Maps delete failed for podIdentifier: %s, error: %v", podIdentifier, err)
 			return err
 		}
-		l.podIdentifierLock.Delete(podIdentifier)
+		// The lock entry is deliberately left in place: removing it here while we
+		// still hold it lets the next LoadOrStore mint a second mutex for this
+		// identifier, so two operations on it would run concurrently (issue #674).
 	}
 	return nil
 }
