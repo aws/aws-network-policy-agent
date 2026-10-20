@@ -39,13 +39,14 @@ type MockBpfClient struct {
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
 
-	// BPFContextRegistered controls the IsBPFContextRegistered return value.
-	// Defaults to false; set true to simulate a pod whose probes are still attached.
-	BPFContextRegistered bool
-
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
+
+	// Captured args from the most recent UpdatePodStateEbpfMaps call, so tests can assert
+	// which baseline (DEFAULT_ALLOW vs DEFAULT_DENY) was programmed.
+	LastPodStateKey int
+	LastPodState    int
 
 	// Captured args from the most recent UpdateClusterPolicyEbpfMaps call, so tests can
 	// assert that the rules were actually cleared and not just that the call happened.
@@ -112,6 +113,7 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 		*dst = map[string][]fwrp.EbpfFirewallRules{}
 	}
 	(*dst)[podIdentifier] = rules
+
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
@@ -199,6 +201,7 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	}
 	m.recordPodState(podIdentifier, key, state)
 	return nil
+
 }
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
@@ -241,6 +244,13 @@ func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int)
 	k := PodStateKey{PodIdentifier: podIdentifier, MapKey: key}
 	m.PodStateByIdentifier[k] = state
 	m.podStateSeeded[k] = true
+	// LastPodState tracks the pod-state map write (POD_STATE_MAP_KEY) that carries the
+	// policy verdict. The cluster-policy seed (CLUSTER_POLICY_POD_STATE_MAP_KEY) is always
+	// DEFAULT_ALLOW and must not clobber the verdict the caller asserts on.
+	if key == POD_STATE_MAP_KEY {
+		m.LastPodStateKey = key
+		m.LastPodState = state
+	}
 }
 
 // contextErr fails a map write for an identifier whose probes are detached, as the real

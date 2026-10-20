@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -714,6 +716,223 @@ func TestClusterPolicySlices_RestartReconstruction(t *testing.T) {
 		"a restarted agent must rebuild the same rules from the same slices")
 }
 
+// clusterNetworkPolicyToPodIdentifierMap (Map3) tracks every identifier the CNP selects on
+// ANY node, keyed by the parent CNP name. It is the diff source for stale-identifier pruning:
+// an identifier it recorded last reconcile but no longer selects is scrubbed from
+// podIdentifierToClusterPolicyEndpointMap (Map1). These tests pin that cluster-wide tracking,
+// the remote-only prune path, key consistency under GenerateName truncation, and the
+// full-parent teardown.
+func TestClusterPolicySlices_ClusterWideTracking(t *testing.T) {
+	localID := identifierOf("local-aaa")
+	remoteID := identifierOf("remote-aaa")
+
+	// (1) Map3 records identifiers selected only on another node, not just node-local ones.
+	t.Run("the NP's tracked identifier set includes remote-only identifiers", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("local-aaa", "10.1.1.1"),
+				remotePod("remote-aaa", "10.1.2.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+
+		tracked, ok := fx.parentIdentifiers("cnp-1")
+		require.True(t, ok, "the parent's identifier set must be recorded")
+		// Both the local and the remote-only identifier must be tracked: Map3 is cluster-wide,
+		// so a remote replica the local node never programs is still diffed for staleness.
+		assert.ElementsMatch(t, []string{localID, remoteID}, tracked,
+			"Map3 must track every identifier the CNP selects on any node")
+	})
+
+	// (2) A remote-only identifier that stops being selected is pruned from Map1, and since it
+	// was never local there is nothing on this node to clear (stale path fires, cleanup does not).
+	t.Run("a remote-only identifier once deselected is pruned from the PI to CPE map", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("local-aaa", "10.1.1.1"),
+				remotePod("remote-aaa", "10.1.2.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+		require.NotEmpty(t, fx.identifierSlices(remoteID), "remote-only id starts tracked in Map1")
+		fx.reset()
+
+		// Drop the remote pod; only the local identifier remains selected.
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods:    []podRef{localPod("local-aaa", "10.1.1.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		// Stale-pruned from Map1...
+		assert.Empty(t, fx.identifierSlices(remoteID),
+			"a no-longer-selected remote identifier must be pruned from the PI->CPE map")
+		// ...and never written on this node: it had no local pod, so no eBPF rules to clear.
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, remoteID,
+			"a remote-only identifier has no local eBPF state to touch")
+		// The surviving local identifier keeps its rules.
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(localID))
+	})
+
+	// (1b) The stale prune is parent-wide: DeleteParentNPFromPodIdentifierMap removes only the
+	// reconciled parent's CPEs from a stale identifier's Map1 entry. An identifier the SAME
+	// identifier is still selected by under a DIFFERENT parent must keep that parent's entry,
+	// and stay tracked in the other parent's Map3. Over-pruning here would silently drop the
+	// other policy's enforcement of the identifier.
+	t.Run("a stale identifier under one parent keeps its entry from a different parent", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		// remoteID is selected (remote-only, so the stale prune — not local cleanup — is the
+		// actor) by two independent parents, cnp-1 and cnp-2.
+		fx.setSlices(
+			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+				pods:    []podRef{remotePod("remote-aaa", "10.1.2.1")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: "cnp-2-aaaaa", parent: "cnp-2",
+				pods:    []podRef{remotePod("remote-aaa", "10.1.2.1")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+		require.ElementsMatch(t, []string{"cnp-1-aaaaa", "cnp-2-aaaaa"}, fx.identifierSlices(remoteID),
+			"both parents' CPEs track the shared identifier to start")
+
+		// remoteID is dropped from cnp-1 only (cnp-1 now selects a different identifier), while
+		// cnp-2 still selects it. Reconciling cnp-1 flags remoteID stale UNDER cnp-1.
+		fx.setSlices(
+			sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+				pods:    []podRef{remotePod("other-aaa", "10.1.2.2")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: "cnp-2-aaaaa", parent: "cnp-2",
+				pods:    []podRef{remotePod("remote-aaa", "10.1.2.1")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		// Only cnp-1's CPE is scrubbed from Map1[remoteID]; cnp-2's entry survives.
+		assert.Equal(t, []string{"cnp-2-aaaaa"}, fx.identifierSlices(remoteID),
+			"the parent-wide prune must remove only the reconciled parent, not a different one")
+		// And cnp-2 still tracks the identifier cluster-wide.
+		cnp2, ok := fx.parentIdentifiers("cnp-2")
+		require.True(t, ok, "cnp-2 must still track its identifiers")
+		assert.Contains(t, cnp2, remoteID, "cnp-2 still selects the identifier, so it stays tracked")
+	})
+
+	// (4) Map3's read (stale diff), prune, and write keys are all GetParentNPNameFromPEName(
+	// resourceName) — a function of the CPE (slice) NAME, never of the full PolicyRef.Name.
+	// GenerateName caps a generated name at 63 chars, so for a long CNP the "<cnp>-<suffix>"
+	// slice name is truncated and GetParentNPNameFromPEName(sliceName) no longer reconstructs
+	// PolicyRef.Name. Keying the read by PolicyRef.Name (as an earlier version did) would read a
+	// key the writer never wrote and the stale identifier would leak. Both sides deriving from
+	// the slice name keep them in agreement.
+	t.Run("a long CNP name whose CPE base is truncated still prunes stale identifiers", func(t *testing.T) {
+		// Parent (PolicyRef.Name) is the full, long name.
+		parent := "cnp-" + strings.Repeat("x", 56) // 60 chars
+		// The slice name is the GenerateName result: parent truncated to fit "<=63 - suffix",
+		// then the random suffix. Here the base is deliberately SHORTER than parent, so
+		// GetParentNPNameFromPEName(sliceName) != parent — exactly the truncation case.
+		sliceName := parent[:50] + "-aaaaa"
+		writerKey := utils.GetParentNPNameFromPEName(sliceName) // what commit writes Map3 under
+		require.NotEqual(t, parent, writerKey,
+			"test must model truncation: the slice base must differ from PolicyRef.Name")
+
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: sliceName, parent: parent,
+			pods: []podRef{localPod("local-aaa", "10.1.1.1"),
+				remotePod("remote-aaa", "10.1.2.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+		require.NotEmpty(t, fx.identifierSlices(remoteID), "remote id starts tracked")
+
+		// Map3 is keyed by the truncated writer key, NOT by the full PolicyRef.Name.
+		_, ok := fx.parentIdentifiers(writerKey)
+		require.True(t, ok, "Map3 must be keyed by GetParentNPNameFromPEName(sliceName)")
+		_, okFull := fx.parentIdentifiers(parent)
+		require.False(t, okFull, "Map3 must NOT be keyed by the full PolicyRef.Name")
+		fx.reset()
+
+		// Deselect the remote id; pruning only works if the read key matches the write key.
+		fx.setSlices(sliceSpec{name: sliceName, parent: parent,
+			pods:    []podRef{localPod("local-aaa", "10.1.1.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.NoError(t, fx.reconcile(sliceName))
+
+		assert.Empty(t, fx.identifierSlices(remoteID),
+			"stale pruning must work even when the CNP name is truncated into the CPE name")
+	})
+
+	// (5) When the parent stops selecting anything anywhere, its Map3 entry is removed entirely
+	// (the len(clusterWidePodIdentifiers)==0 -> Delete branch), not left as a stale set.
+	t.Run("a parent selecting nothing has its tracked identifier set removed", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("local-aaa", "10.1.1.1"),
+				remotePod("remote-aaa", "10.1.2.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+		_, ok := fx.parentIdentifiers("cnp-1")
+		require.True(t, ok, "the parent is tracked while it selects pods")
+		fx.reset()
+
+		// The slice remains but selects no pods at all.
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+
+		_, ok = fx.parentIdentifiers("cnp-1")
+		assert.False(t, ok, "a parent selecting nothing must have its Map3 entry deleted, not left behind")
+	})
+}
+
+// Egress rule derivation skips entries the CIDR-based eBPF dataplane cannot program:
+// a domain-name-only peer (NPC emits these for FQDN rules, which cluster policy does not
+// enforce here) and a malformed entry with neither CIDR nor DomainName. CIDR egress rules
+// in the same slice are still programmed.
+func TestClusterPolicySlices_EgressRuleDerivation(t *testing.T) {
+	nginx := identifierOf("nginx-aaa")
+
+	t.Run("a domain-name-only egress rule is skipped, not programmed", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("nginx-aaa", "10.1.1.1")},
+			egress: []ruleRef{
+				deny("10.0.0.0/8"),          // CIDR rule: programmed
+				domainEgress("example.com"), // domain-only: skipped (CIDR empty)
+			}})
+		fx.reconcileAll()
+
+		// Only the CIDR egress rule survives; the domain-name rule is dropped.
+		assert.Equal(t, []string{"Deny 10.0.0.0/8"}, fx.clusterPolicyEgressRules(nginx),
+			"a domain-name-only egress rule must not be programmed by the CIDR dataplane")
+	})
+
+	t.Run("an egress entry with neither CIDR nor DomainName is skipped", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("nginx-aaa", "10.1.1.1")},
+			egress: []ruleRef{
+				emptyEgress(),      // both empty: skipped
+				deny("10.0.0.0/8"), // CIDR rule: programmed
+			}})
+		fx.reconcileAll()
+
+		assert.Equal(t, []string{"Deny 10.0.0.0/8"}, fx.clusterPolicyEgressRules(nginx),
+			"a malformed egress entry must be skipped without dropping valid siblings")
+	})
+
+	t.Run("a slice of only skippable egress rules programs no egress", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+			pods: []podRef{localPod("nginx-aaa", "10.1.1.1")},
+			egress: []ruleRef{
+				domainEgress("example.com"),
+				emptyEgress(),
+			},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		fx.reconcileAll()
+
+		assert.Empty(t, fx.clusterPolicyEgressRules(nginx),
+			"no CIDR egress rules means no egress is programmed")
+		// The ingress rule is unaffected by the skipped egress entries.
+		assert.Equal(t, []string{"Deny 192.168.90.1/32"}, fx.clusterPolicyRules(nginx))
+	})
+}
+
 // A pod identifier whose eBPF writes fail every time must cost only that identifier. Every
 // other pod the CPE selects keeps receiving policy, and the failure keeps being retried.
 func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
@@ -815,19 +1034,25 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		fx.reconcileAll()
 
-		// Only the local pod is deselected; the remote one keeps stuck's identifier listed in
-		// the CPE, so every reconcile re-adds the CPE to its entry and only the stale
-		// identifiers the failed pass committed get it scrubbed again.
+		// Local stuck-aaa is deleted (selection is per-workload: a CPE cannot drop the local
+		// replica while keeping the remote one, so the local pod must have been deleted). On the
+		// first pass its probes are still attached, so cleanup attempts the write and fails.
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 			pods:    []podRef{remotePod("stuck-bbb", "10.1.2.1"), localPod("resident-aaa", "10.1.1.2")},
 			ingress: []ruleRef{deny("192.168.90.1/32")}})
 		require.ErrorIs(t, fx.reconcile("cnp-1-aaaaa"), writeFailed)
 
+		// Before the retry, the deleted pod's teardown completes: it was the last local pod of
+		// stuck on this node, so its eBPF context is gone. The remote peer still keeps stuck
+		// listed cluster-wide, but this node has nothing to enforce. The retry must therefore be
+		// a clean no-op — no error, and no cluster-policy write for stuck.
+		fx.detachContext(stuck)
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 		fx.reset()
 		require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
-		fx.assertClusterPolicyRulesCleared(stuck)
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, stuck,
+			"a detached identifier has no context on this node, so cleanup must not write it")
 	})
 
 	t.Run("only the cleanups that failed are retried", func(t *testing.T) {
@@ -1055,15 +1280,23 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		)
 		fx.reconcileAll()
 		// stuck's local pod is no longer selected; the sibling still lists its remote peer.
+		// Selection is per-workload, so the local replica leaving means its pod was deleted from
+		// this node. On the first (delete-flow) pass its probes are still attached, so cleanup
+		// attempts the write and fails.
 		fx.deleteSlice("cnp-1-aaaaa")
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
 		require.ErrorIs(t, fx.reconcileDeleted("cnp-1-aaaaa"), writeFailed)
 
+		// Before the sibling's retry, the deleted pod's teardown completes: it was the last local
+		// pod of stuck on this node, so the eBPF context is gone. The sibling reconcile must then
+		// be a clean no-op for stuck — no error, and no cluster-policy write — since this node has
+		// no local pod of stuck to enforce (the remote peer is the remote node's responsibility).
+		fx.detachContext(stuck)
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 		fx.reset()
 		require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
-		fx.assertClusterPolicyRulesCleared(stuck)
-		assert.Empty(t, fx.identifierSlices(stuck))
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, stuck,
+			"a detached identifier has no context on this node, so cleanup must not write it")
 	})
 
 	t.Run("a deleted slice whose sibling's pod fails to recompute is retried", func(t *testing.T) {
