@@ -20,7 +20,7 @@ type InMemoryBpfMap struct {
 	mutex sync.RWMutex
 }
 
-// newInMemoryBpfMap is the constructor shadowMapFor uses. It is a variable so
+// newInMemoryBpfMap is the constructor shadowMapForLocked uses. It is a variable so
 // tests can build shadow maps without a kernel.
 var newInMemoryBpfMap = NewInMemoryBpfMap
 

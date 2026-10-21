@@ -728,7 +728,7 @@ func sizeOfSyncMap(m *sync.Map) int {
 	return count
 }
 
-func TestIsFirstPodInPodIdentifier(t *testing.T) {
+func TestIsFirstPodInPodIdentifierLocked(t *testing.T) {
 	sampleIngressPgmInfo := goelf.BpfData{
 		Program: goebpfprogs.BpfProgram{
 			ProgID: 2,
@@ -779,7 +779,7 @@ func TestIsFirstPodInPodIdentifier(t *testing.T) {
 				}
 				testBpfClient.policyEndpointeBPFContext.Store(tt.podIdentifier, sampleBPFContext)
 			}
-			gotIsMapUpdateRequired := testBpfClient.isFirstPodInPodIdentifier(tt.podIdentifier)
+			gotIsMapUpdateRequired := testBpfClient.isFirstPodInPodIdentifierLocked(tt.podIdentifier)
 			assert.Equal(t, tt.want, gotIsMapUpdateRequired)
 		})
 	}
@@ -1546,10 +1546,10 @@ func TestBpfClient_ReAttachEbpfProbes_ReleasesPodIdentifierLocks(t *testing.T) {
 	assert.Zero(t, client.podIdentifierLocks.len())
 }
 
-func TestShadowMapFor_RejectsUnexpectedCacheValue(t *testing.T) {
+func TestShadowMapForLocked_RejectsUnexpectedCacheValue(t *testing.T) {
 	cache := new(sync.Map)
 	cache.Store("ds@ns", "not a shadow map")
-	_, err := shadowMapFor(cache, "ds@ns", goebpfmaps.BpfMap{MapID: 200})
+	_, err := shadowMapForLocked(cache, "ds@ns", goebpfmaps.BpfMap{MapID: 200})
 	assert.ErrorContains(t, err, "unexpected type string")
 }
 
