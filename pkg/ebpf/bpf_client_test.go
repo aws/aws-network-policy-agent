@@ -1165,6 +1165,80 @@ func TestAttacheBPFProbes_ProceedsAfterClearDeletedPod(t *testing.T) {
 	assert.True(t, attached)
 }
 
+func TestHostVethPrefixes(t *testing.T) {
+	tests := []struct {
+		name             string
+		configuredPrefix string
+		want             []string
+	}{
+		{
+			name:             "unset uses defaults",
+			configuredPrefix: "",
+			want:             []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX},
+		},
+		{
+			name:             "default prefix is not duplicated",
+			configuredPrefix: POD_VETH_PREFIX,
+			want:             []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX},
+		},
+		{
+			name:             "custom prefix is searched first",
+			configuredPrefix: "veth",
+			want:             []string{"veth", POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hostVethPrefixes(tt.configuredPrefix))
+		})
+	}
+}
+
+func TestAttacheBPFProbes_UsesConfiguredVethPrefixes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCIngressAttach("veth0123456789a", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressAttach("veth0123456789a", gomock.Any(), gomock.Any()).Times(1)
+
+	mockBpfSDK := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfSDK.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
+
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+
+	testBpfClient := &bpfClient{
+		hostMask:                  "/32",
+		policyEndpointeBPFContext: new(sync.Map),
+		bpfSDKClient:              mockBpfSDK,
+		bpfTCClient:               mockTCClient,
+		ingressPodToProgMap:       new(sync.Map),
+		egressPodToProgMap:        new(sync.Map),
+		ingressProgToPodsMap:      new(sync.Map),
+		egressProgToPodsMap:       new(sync.Map),
+		podIdentifierLock:         new(sync.Map),
+		deletedPods:               new(sync.Map),
+		hostVethPrefixes:          hostVethPrefixes("veth"),
+	}
+	testBpfClient.policyEndpointeBPFContext.Store(podIdentifier, BPFContext{
+		ingressPgmInfo: goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgID: 2, ProgFD: 3}},
+		egressPgmInfo:  goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgID: 4, ProgFD: 5}},
+	})
+
+	origGetHostVethName := utils.GetHostVethName
+	t.Cleanup(func() { utils.GetHostVethName = origGetHostVethName })
+	var gotPrefixes []string
+	utils.GetHostVethName = func(_, _ string, _ int, interfacePrefixes []string) (string, error) {
+		gotPrefixes = interfacePrefixes
+		return "veth0123456789a", nil
+	}
+
+	err := testBpfClient.AttacheBPFProbes(pod, podIdentifier, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"veth", POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}, gotPrefixes)
+}
+
 func TestDeleteBPFProbes_AddsPodToDeletedMap(t *testing.T) {
 	testBpfClient := &bpfClient{
 		ingressPodToProgMap:  new(sync.Map),
