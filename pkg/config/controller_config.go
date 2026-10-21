@@ -9,25 +9,26 @@ import (
 )
 
 const (
-	flagLogLevel                       = "log-level"
-	flagLogFile                        = "log-file"
-	flagLogFileMaxSize                 = "log-file-max-size"
-	flagLogFileMaxBackups              = "log-file-max-backups"
-	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
-	defaultLogLevel                    = "debug"
-	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
-	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
-	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
-	defaultMaxConcurrentReconciles     = 3
-	defaultConntrackCacheCleanupPeriod = 300
-	defaultConntrackCacheTableSize     = 512 * 1024
-	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
-	flagEnableCloudWatchLogs           = "enable-cloudwatch-logs"
-	flagEnableIPv6                     = "enable-ipv6"
-	flagEnableNetworkPolicy            = "enable-network-policy"
-	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
-	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
-	flagEnableProfiling                = "enable-profiling"
+	flagLogLevel                        = "log-level"
+	flagLogFile                         = "log-file"
+	flagLogFileMaxSize                  = "log-file-max-size"
+	flagLogFileMaxBackups               = "log-file-max-backups"
+	flagMaxConcurrentReconciles         = "max-concurrent-reconciles"
+	defaultLogLevel                     = "debug"
+	defaultLogFile                      = "/var/log/aws-routed-eni/network-policy-agent.log"
+	defaultLogFileMaxSize               = logger.DEFAULT_LOG_FILE_MAX_SIZE
+	defaultLogFileMaxBackups            = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
+	defaultMaxConcurrentReconciles      = 3
+	defaultConntrackCacheCleanupPeriod  = 300
+	defaultConntrackCacheTableSize      = 512 * 1024
+	flagEnablePolicyEventLogs           = "enable-policy-event-logs"
+	flagEnableCloudWatchLogs            = "enable-cloudwatch-logs"
+	flagEnableIPv6                      = "enable-ipv6"
+	flagEnableNetworkPolicy             = "enable-network-policy"
+	flagConntrackCacheCleanupPeriod     = "conntrack-cache-cleanup-period"
+	flagConntrackCacheTableSize         = "conntrack-cache-table-size"
+	flagEnableProfiling                 = "enable-profiling"
+	flagEnableNamespaceDefaultIsolation = "enable-namespace-default-isolation"
 )
 
 // ControllerConfig contains the controller configuration
@@ -50,6 +51,9 @@ type ControllerConfig struct {
 	EnableIPv6 bool
 	// Enable Network Policy
 	EnableNetworkPolicy bool
+	// In standard mode, start a new pod isolated in the directions that a
+	// NetworkPolicy with an empty podSelector in its namespace isolates.
+	EnableNamespaceDefaultIsolation bool
 	// ConntrackCacheCleanupPeriod specifies the cleanup period
 	ConntrackCacheCleanupPeriod int
 	// ConntrackTableSize specifies the conntrack table size for the agent
@@ -76,6 +80,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
 	fs.BoolVar(&cfg.EnableNetworkPolicy, flagEnableNetworkPolicy, false, "If enabled, Network Policy agent will initialize BPF maps and start reconciler")
 	fs.BoolVar(&cfg.EnableProfiling, flagEnableProfiling, false, "If enabled, Network Policy agent will enable profiling")
+	fs.BoolVar(&cfg.EnableNamespaceDefaultIsolation, flagEnableNamespaceDefaultIsolation, false, "If enabled (standard mode), a new pod starts isolated in the directions that a NetworkPolicy with an empty podSelector in its namespace isolates, until its policies are programmed")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+

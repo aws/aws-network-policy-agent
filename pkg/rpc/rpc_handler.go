@@ -44,6 +44,9 @@ const (
 type server struct {
 	policyReconciler        *controllers.PolicyEndpointsReconciler
 	clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler
+	// In standard mode, start pods isolated in the directions a namespace-wide
+	// (empty podSelector) policy isolates, instead of default allow.
+	namespaceDefaultIsolation bool
 	rpc.UnimplementedNPBackendServer
 }
 
@@ -158,8 +161,26 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		if !(policiesAvailableInLocalCache || clusterPolicyAvailableInLocalCache) {
 
 			log().Debugf("No active policies present for podIdentifier: %s", podIdentifier)
-			log().Infof("Updating pod_state map to default allow/default deny for podIdentifier: %s for network policy state, value: %d", podIdentifier, podState)
-			err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.POD_STATE_MAP_KEY, podState, true, true)
+			ingressState, egressState := podState, podState
+			if s.namespaceDefaultIsolation && !utils.IsStrictMode(in.NETWORK_POLICY_MODE) {
+				// The namespace's empty-podSelector policies select this pod
+				// too, so it is known to be isolated in those directions before
+				// its PolicyEndpoints are reconciled. Deny those directions now;
+				// the reconciler applies the real rules when they arrive, as in
+				// strict mode.
+				isolateIngress, isolateEgress := s.policyReconciler.NamespaceDefaultIsolation(in.K8S_POD_NAMESPACE)
+				if isolateIngress {
+					ingressState = ebpf.DEFAULT_DENY
+				}
+				if isolateEgress {
+					egressState = ebpf.DEFAULT_DENY
+				}
+			}
+			log().Infof("Updating pod_state map to default allow/default deny for podIdentifier: %s for network policy state, ingress: %d, egress: %d", podIdentifier, ingressState, egressState)
+			err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.POD_STATE_MAP_KEY, ingressState, true, false)
+			if err == nil {
+				err = s.policyReconciler.GeteBPFClient().UpdatePodStateEbpfMaps(podIdentifier, ebpf.POD_STATE_MAP_KEY, egressState, false, true)
+			}
 			if err != nil {
 				log().Errorf("Pod state map update failed for podIdentifier: %s, while updating network policy state, error: %v", podIdentifier, err)
 				return nil, err
@@ -212,7 +233,7 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 }
 
 // RunRPCHandler handles request from gRPC
-func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler, npaSocketPath string) (<-chan error, error) {
+func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler, npaSocketPath string, namespaceDefaultIsolation bool) (<-chan error, error) {
 	log().Infof("Serving RPC Handler on Unix socket: %s", npaSocketPath)
 
 	if _, err := os.Stat(npaSocketPath); err == nil {
@@ -229,7 +250,7 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clus
 		return nil, errors.Wrap(err, "network policy agent: failed to listen on unix socket")
 	}
 	grpcServer := grpc.NewServer()
-	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler, clusterPolicyReconciler: clusterPolicyReconciler})
+	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler, clusterPolicyReconciler: clusterPolicyReconciler, namespaceDefaultIsolation: namespaceDefaultIsolation})
 	healthServer := health.NewServer()
 	// No need to ever change this to HealthCheckResponse_NOT_SERVING since it's a local service only
 	healthServer.SetServingStatus(grpcHealthServiceName, healthpb.HealthCheckResponse_SERVING)
