@@ -2,6 +2,9 @@ package ebpf
 
 import (
 	"bytes"
+	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -14,6 +17,9 @@ import (
 type InMemoryBpfMap struct {
 	// Underlying BPF map
 	bpfMap *maps.BpfMap
+	// Kernel mutations, swappable in tests
+	updateEntry func(key, value []byte) error
+	deleteEntry func(key []byte) error
 	// In-memory representation of the map contents
 	contents map[string][]byte
 	// Mutex for thread safety
@@ -24,7 +30,20 @@ type InMemoryBpfMap struct {
 // and optionally loads the initial state from the kernel
 func NewInMemoryBpfMap(bpfMap *maps.BpfMap) (*InMemoryBpfMap, error) {
 	m := &InMemoryBpfMap{
-		bpfMap:   bpfMap,
+		bpfMap: bpfMap,
+		// Keep the backing slices alive across the call: a uintptr is not a
+		// reference as far as the collector is concerned.
+		updateEntry: func(key, value []byte) error {
+			err := bpfMap.UpdateMapEntry(uintptr(unsafe.Pointer(&key[0])), uintptr(unsafe.Pointer(&value[0])))
+			runtime.KeepAlive(key)
+			runtime.KeepAlive(value)
+			return err
+		},
+		deleteEntry: func(key []byte) error {
+			err := bpfMap.DeleteMapEntry(uintptr(unsafe.Pointer(&key[0])))
+			runtime.KeepAlive(key)
+			return err
+		},
 		contents: make(map[string][]byte),
 	}
 
@@ -105,15 +124,22 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		}
 	}
 
+	var failedKeys []string
+	var firstErr error
+
 	// Apply updates to kernel
 	for k, v := range toAdd {
 		keyByte := []byte(k)
-		keyPtr := uintptr(unsafe.Pointer(&keyByte[0]))
-		valuePtr := uintptr(unsafe.Pointer(&v[0]))
 
-		if err := m.bpfMap.UpdateMapEntry(keyPtr, valuePtr); err != nil {
-			log().Errorf("Failed to update kernel map during bulk refresh for key %s: %v", k, err)
-			return err
+		if err := m.updateEntry(keyByte, v); err != nil {
+			// Carry on rather than return. Aborting here would leave the kernel
+			// holding a random subset of the new entries and skip the stale-entry
+			// sweep below, so a policy the user revoked would stay in force.
+			failedKeys = append(failedKeys, fmt.Sprintf("%x", keyByte))
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 
 		// Update in-memory after successful kernel update
@@ -123,9 +149,8 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	// Apply deletes to kernel
 	for _, k := range toDelete {
 		keyByte := []byte(k)
-		keyPtr := uintptr(unsafe.Pointer(&keyByte[0]))
 
-		if err := m.bpfMap.DeleteMapEntry(keyPtr); err != nil {
+		if err := m.deleteEntry(keyByte); err != nil {
 			log().Errorf("Failed to delete from kernel map for key %s: %v", k, err)
 			// Continue with other deletions
 		} else {
@@ -134,8 +159,28 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		}
 	}
 
-	log().Infof("Bulk refresh: added/updated %d entries, deleted %d entries", len(toAdd), len(toDelete))
+	log().Infof("Bulk refresh: added/updated %d of %d entries, deleted %d entries",
+		len(toAdd)-len(failedKeys), len(toAdd), len(toDelete))
+
+	if firstErr != nil {
+		// Log the full key list once here, and return a short error: this error is
+		// logged again at every layer on the way up to the reconciler.
+		log().Errorf("Failed to update kernel map %d during bulk refresh for keys %v: %v",
+			m.bpfMap.MapID, failedKeys, firstErr)
+		return fmt.Errorf("%d of %d map updates failed (%s): %w",
+			len(failedKeys), len(toAdd), summarizeKeys(failedKeys), firstErr)
+	}
 	return nil
+}
+
+// summarizeKeys renders at most a few keys, so a systemic failure cannot put
+// one line per entry into the returned error.
+func summarizeKeys(keys []string) string {
+	const max = 3
+	if len(keys) <= max {
+		return strings.Join(keys, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(keys[:max], ", "), len(keys)-max)
 }
 
 // GetUnderlyingMap returns the underlying BpfMap

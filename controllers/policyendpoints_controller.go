@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -265,14 +266,16 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		return err
 	}
 
-	programmingSucceeded := true
+	programmed := 0
+	var programmingErrs []error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace, policyEndpoint.Name, false)
 		if err != nil {
 			log().Errorf("Error Parsing policy Endpoint resource %s: %v", policyEndpoint.Name, err)
-			return err
+			// Join, so failures already collected in this pass are not dropped.
+			return errors.Join(append(programmingErrs, err)...)
 		}
 
 		if len(ingressRules) == 0 && !isIngressIsolated {
@@ -289,24 +292,31 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 
 		// Setup/configure eBPF probes/maps for local pods
 		err = r.configureeBPFProbes(ctx, podIdentifier, targetPods, ingressRules, egressRules)
-		if err != nil {
+		switch {
+		case err == nil:
+			programmed++
+		case errors.Is(err, ebpf.ErrProbeAttachSkipped):
+			// Retrying cannot resolve this, so do not report it as a failure.
+			log().Warnf("Skipped eBPF programming for podIdentifier %s: %v", podIdentifier, err)
+		default:
 			log().Errorf("Error configuring eBPF Probes %v", err)
-			programmingSucceeded = false
+			// Collect rather than return, so one failing podIdentifier does not
+			// stop the others from being programmed.
+			programmingErrs = append(programmingErrs, fmt.Errorf("podIdentifier %s: %w", podIdentifier, err))
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
 	}
 
 	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed)
-	r.observePolicyProgrammingLatency(policyEndpoint, programmingSucceeded)
+	r.observePolicyProgrammingLatency(policyEndpoint, programmed > 0 && len(programmingErrs) == 0)
 
-	return nil
+	return errors.Join(programmingErrs...)
 }
 
 // observePolicyProgrammingLatency emits the E2E latency histogram from the
 // last-change-trigger-time annotation. Each annotation value is consumed at
-// most once per PE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// most once per PE, so stale rewrites/resyncs/relists never re-observe it.
 func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, programmingSucceeded bool) {
 	if pe.Annotations == nil {
 		return
@@ -327,13 +337,15 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	if prev, ok := r.lastObservedTriggerTimes.Load(peKey); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
-	// must never be re-emitted (inflated) by a later resync of the same annotation.
-	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
 	if !programmingSucceeded {
+		// Leave the trigger time unconsumed: the reconcile is retried, and the
+		// retry that succeeds must still be able to observe this latency.
 		log().Debugf("Skipping E2E policy programming latency for PE %s/%s: programming failed", pe.Namespace, pe.Name)
 		return
 	}
+	// Consume before the suppression check below: a suppressed observation must
+	// never be re-emitted (inflated) by a later resync of the same annotation.
+	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
 	latency := time.Since(triggerTime).Seconds()
 	if latency < 0 {
 		// Clock skew between NPC (control plane) and this node
