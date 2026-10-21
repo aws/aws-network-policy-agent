@@ -37,6 +37,9 @@ func (k *keyedMutex) Unlock(key string) {
 	k.mu.Lock()
 	m, ok := k.locks[key]
 	if !ok {
+		// Invariant check: an Unlock without a matching Lock is a programming error,
+		// as it is for sync.Mutex. Only an unknown key is caught here; a double Unlock
+		// while another goroutine waits consumes that waiter's ref and fails in m.Unlock.
 		k.mu.Unlock()
 		panic("keyedMutex: unlock of unknown key " + key)
 	}
