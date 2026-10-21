@@ -116,10 +116,10 @@ func main() {
 			nodeIP = lo.Must1(imds.GetMetaData("ipv6"))
 		}
 
-		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
+		npMode, isMultiNICEnabled, vethPrefix := lo.Must3(getNetworkPolicyConfigsFromIpamd(ctx, log))
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, vethPrefix, ctrlConfig.LogLevel))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
@@ -207,14 +207,14 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 	return controllerConfig, nil
 }
 
-func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (string, bool, error) {
+func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (string, bool, string, error) {
 	log.Infof("Trying to establish GRPC connection to ipamd at %s", LOCAL_IPAMD_ADDRESS)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
 	if err != nil {
 		log.Errorf("Failed to connect to ipamd at %s: %v", LOCAL_IPAMD_ADDRESS, err)
-		return "", false, err
+		return "", false, "", err
 	}
 	defer grpcConn.Close()
 
@@ -222,13 +222,13 @@ func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (s
 	resp, err := ipamd.GetNetworkPolicyConfigs(ctx, &emptypb.Empty{})
 	if err != nil {
 		log.Errorf("Failed to get network policy configs %v", err)
-		return "", false, err
+		return "", false, "", err
 	}
-	log.Infof("Connected to ipamd at %s. NetworkPolicyMode: %s MultiNICEnabled: %v", LOCAL_IPAMD_ADDRESS, resp.NetworkPolicyMode, resp.MultiNICEnabled)
+	log.Infof("Connected to ipamd at %s. NetworkPolicyMode: %s MultiNICEnabled: %v VethPrefix: %s", LOCAL_IPAMD_ADDRESS, resp.NetworkPolicyMode, resp.MultiNICEnabled, resp.VethPrefix)
 	if !utils.IsValidNetworkPolicyEnforcingMode(resp.NetworkPolicyMode) {
 		err = errors.New("Invalid Network Policy Mode")
 		log.Errorf("Invalid Network Policy Mode from ipamd %s error: %v", resp.NetworkPolicyMode, err)
-		return "", false, err
+		return "", false, "", err
 	}
-	return resp.NetworkPolicyMode, resp.MultiNICEnabled, nil
+	return resp.NetworkPolicyMode, resp.MultiNICEnabled, resp.VethPrefix, nil
 }

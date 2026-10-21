@@ -113,6 +113,15 @@ func msSince(start time.Time) float64 {
 	return float64(time.Since(start)) / float64(time.Millisecond)
 }
 
+// Pods created before a veth prefix change keep their old names, so the default prefix stays in the list.
+func hostVethPrefixes(configuredPrefix string) []string {
+	defaults := []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}
+	if configuredPrefix == "" || configuredPrefix == POD_VETH_PREFIX {
+		return defaults
+	}
+	return append([]string{configuredPrefix}, defaults...)
+}
+
 func prometheusRegister() {
 	if !prometheusRegistered {
 		metrics.Registry.MustRegister(sdkAPILatency)
@@ -147,7 +156,7 @@ type BPFContext struct {
 }
 
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, vethPrefix, logLevel string) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -181,7 +190,8 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	var err error
 
 	ebpfClient.bpfSDKClient = goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
-	ebpfClient.bpfTCClient = tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+	ebpfClient.hostVethPrefixes = hostVethPrefixes(vethPrefix)
+	ebpfClient.bpfTCClient = tc.New(ebpfClient.hostVethPrefixes)
 
 	ebpfClient.fwRuleProcessor = fwrp.NewFirewallRuleProcessor(nodeIP, hostMask, enableIPv6)
 
@@ -353,6 +363,8 @@ type bpfClient struct {
 	networkPolicyMode string
 	// multi nic enabled flag
 	isMultiNICEnabled bool
+	// host veth name prefixes used by VPC CNI
+	hostVethPrefixes []string
 	// maps pod namespaced name to interface count
 	// This is loaded once at startup and will not be up to date on new pod info
 	podNameToInterfaceCount *sync.Map
@@ -765,7 +777,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	for index := 0; index < numInterfaces; index++ {
 		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth name from the Name and Namespace of the Pod.
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-		hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+		hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, index, l.hostVethPrefixes)
 		if err != nil {
 			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
 			return false, err
