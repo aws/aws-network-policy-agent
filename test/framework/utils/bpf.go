@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,79 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// Pod-state map keys (the __u32 key of ingress_pod_state_map / egress_pod_state_map)
+// and the pod_state.state byte values, mirrored from pkg/ebpf/c/tc.*.bpf.c. Used by
+// tests to assert a pod's policy tier is actually programmed into the datapath, not
+// just created in the Kubernetes API.
+const (
+	NetworkPolicyPodStateKey       = 0
+	ClusterPolicyPodStateKey       = 1
+	PodStatePoliciesApplied  uint8 = 0
+	PodStateDefaultAllow     uint8 = 1
+	PodStateDefaultDeny      uint8 = 2
+)
+
+// bpftoolMapEntry is one key/value pair from `bpftool map dump id <N> -j`. bpftool
+// renders each as an array of hex byte strings (e.g. "0x01"), little-endian.
+type bpftoolMapEntry struct {
+	Key   []string `json:"key"`
+	Value []string `json:"value"`
+}
+
+// ParsePodStateFromBpftoolDump reads the output of `bpftool map dump id <N> -j` for a
+// pod_state map and returns the state byte stored under the given __u32 key. The map's
+// key is a 4-byte little-endian __u32 and its value is a single-byte pod_state.state.
+// Returns an error if the key is absent so callers can retry while the agent programs it.
+func ParsePodStateFromBpftoolDump(jsonOutput string, key uint32) (uint8, error) {
+	var entries []bpftoolMapEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOutput)), &entries); err != nil {
+		return 0, fmt.Errorf("parse bpftool map dump json: %w (raw: %q)", err, jsonOutput)
+	}
+	for _, e := range entries {
+		k, err := leBytesToUint32(e.Key)
+		if err != nil {
+			return 0, fmt.Errorf("decode map key %v: %w", e.Key, err)
+		}
+		if k != key {
+			continue
+		}
+		if len(e.Value) < 1 {
+			return 0, fmt.Errorf("pod_state entry for key %d has empty value", key)
+		}
+		b, err := parseHexByte(e.Value[0])
+		if err != nil {
+			return 0, fmt.Errorf("decode state byte %q: %w", e.Value[0], err)
+		}
+		return b, nil
+	}
+	return 0, fmt.Errorf("no pod_state entry for key %d (map not yet programmed)", key)
+}
+
+// leBytesToUint32 decodes up to 4 little-endian hex byte strings ("0x01") into a uint32.
+func leBytesToUint32(bytes []string) (uint32, error) {
+	var v uint32
+	for i, s := range bytes {
+		if i >= 4 {
+			break
+		}
+		b, err := parseHexByte(s)
+		if err != nil {
+			return 0, err
+		}
+		v |= uint32(b) << (8 * uint(i))
+	}
+	return v, nil
+}
+
+func parseHexByte(s string) (uint8, error) {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "0x")
+	n, err := strconv.ParseUint(s, 16, 8)
+	if err != nil {
+		return 0, err
+	}
+	return uint8(n), nil
+}
 
 // BuildBPFCheckPod creates a privileged pod that can inspect BPF state on a node
 // via chroot into the host filesystem.

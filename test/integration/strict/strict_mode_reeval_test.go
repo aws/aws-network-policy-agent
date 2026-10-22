@@ -2,9 +2,11 @@ package strict
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
+	pkgutils "github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
@@ -234,7 +236,8 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 					Container(clientContainer).
 					Build()
 
-				_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 2*time.Minute)
+				var err error
+				clientPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 2*time.Minute)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -284,6 +287,14 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 					return fw.PodManager.TCPProbe(namespace, clientName, serverPodIP, serverPort)
 				}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
 					"client should reach the server once the NetworkPolicy is programmed")
+			})
+
+			By("verifying the decoy ClusterNetworkPolicy is programmed into the datapath", func() {
+				// Without this, the stream could start while the decoy CNP's pod-state
+				// is still DEFAULT_ALLOW; the flow would then be cached in a non-CNP
+				// state and the test would pass even on a datapath that never fixed the
+				// CNP-involved collision this scenario targets.
+				waitForClusterPolicyProgrammed(clientPod)
 			})
 
 			By("starting a persistent HTTP connection and verifying it receives responses", func() {
@@ -558,7 +569,8 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 					Container(clientContainer).
 					Build()
 
-				_, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 2*time.Minute)
+				var err error
+				clientPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 2*time.Minute)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -608,6 +620,14 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 					return fw.PodManager.TCPProbe(namespace, clientName, serverPodIP, serverPort)
 				}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
 					"client should reach the server once the policies are programmed")
+			})
+
+			By("verifying the ClusterNetworkPolicy is programmed into the datapath", func() {
+				// The successful probe above is satisfied by the NetworkPolicy tier
+				// alone, so it does not prove the CNP's pod-state is POLICIES_APPLIED.
+				// Gate on the actual datapath state so both tiers are confirmed applied
+				// before the stream starts and both are removed at once.
+				waitForClusterPolicyProgrammed(clientPod)
 			})
 
 			By("starting a persistent HTTP connection and verifying it receives responses", func() {
@@ -704,6 +724,56 @@ func persistentHTTPResponseCount(podName string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(output)
+}
+
+// waitForClusterPolicyProgrammed blocks until the client pod's cluster-policy tier is
+// actually programmed into the datapath as POLICIES_APPLIED, not merely created in the
+// Kubernetes API. CreateClusterNetworkPolicy only performs the API write, and a probe on
+// the server port can be satisfied by the NetworkPolicy tier alone -- so without this
+// gate a scenario could start traffic while the CNP's pod-state entry is still
+// DEFAULT_ALLOW, making the subsequent NetworkPolicy removal re-evaluate through a
+// non-CNP byte and pass even on a datapath that never fixed the CNP collision.
+//
+// It reads egress_pod_state_map key 1 (CLUSTER_NETWORK_POLICY_KEY) for the client pod by
+// resolving the pod -> node -> map ID (via `aws-eks-na-cli ebpf loaded-ebpfdata`) ->
+// value (via `bpftool map dump id`). Egress because the client's outbound traffic is what
+// these scenarios govern.
+func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
+	nodeName := clientPod.Spec.NodeName
+	Expect(nodeName).ToNot(BeEmpty(), "client pod must be scheduled before reading its datapath state")
+	podIdentifier := pkgutils.GetPodIdentifier(clientPod.Name, clientPod.Namespace)
+	mapKey := podIdentifier + "/egress_pod_state_map"
+
+	Eventually(func() (uint8, error) {
+		checkPod := utils.BuildBPFCheckPod(namespace, nodeName)
+		checkPod, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, 1*time.Minute)
+		if err != nil {
+			return 0, err
+		}
+		defer fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
+
+		loaded, err := fw.PodManager.ExecInPod(namespace, checkPod.Name,
+			[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
+		if err != nil {
+			return 0, err
+		}
+		state, err := utils.ParseLoadedEBPFData(loaded)
+		if err != nil {
+			return 0, err
+		}
+		mapID, ok := state.MapIDs[mapKey]
+		if !ok {
+			return 0, fmt.Errorf("no map ID for %q yet (pod program not loaded)", mapKey)
+		}
+
+		dump, err := fw.PodManager.ExecInPod(namespace, checkPod.Name,
+			[]string{"chroot", "/host", "bpftool", "map", "dump", "id", strconv.Itoa(mapID), "-j"})
+		if err != nil {
+			return 0, err
+		}
+		return utils.ParsePodStateFromBpftoolDump(dump, utils.ClusterPolicyPodStateKey)
+	}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal(utils.PodStatePoliciesApplied),
+		"client pod's cluster-policy tier must be programmed as POLICIES_APPLIED before traffic starts")
 }
 
 // Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value
