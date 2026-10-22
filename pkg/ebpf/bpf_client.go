@@ -61,6 +61,12 @@ var (
 	deletedPodsMinAge                                = 5 * time.Minute
 )
 
+// ErrProbeAttachSkipped marks a probe attach that could not be performed yet
+// and will not succeed on retry without new input. Reconcilers log it and move
+// on; CNI ADD must keep failing on it, since there a skip means the pod comes
+// up with no policy.
+var ErrProbeAttachSkipped = errors.New("skipping probe attach")
+
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -708,7 +714,7 @@ func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentif
 	}
 
 	// No interface count available and multi-NIC enabled - skip attachment
-	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
+	return 0, fmt.Errorf("%w: multiNIC enabled and interface count is unknown", ErrProbeAttachSkipped)
 }
 
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {

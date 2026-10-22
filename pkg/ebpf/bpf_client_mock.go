@@ -33,6 +33,7 @@ type MockBpfClient struct {
 	UpdateClusterPolicyEbpfMapsErr        error
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
+	AttacheBPFProbesErr                   error
 
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
@@ -54,10 +55,11 @@ type MockBpfClient struct {
 	// Empty means "standard".
 	NetworkPolicyMode string
 
-	// Per-identifier failures for UpdateClusterPolicyEbpfMaps, so a test can make one pod
-	// identifier's map writes fail every time while every other identifier succeeds. The
-	// call is logged in CallLog but its rules are not recorded.
+	// Per-identifier failures for the map writes, so a test can make one pod identifier's
+	// map writes fail every time while every other identifier succeeds. The call is
+	// logged in CallLog but its rules are not recorded.
 	UpdateClusterPolicyEbpfMapsErrFor map[string]error
+	UpdateEbpfMapsErrFor              map[string]error
 
 	// Per-identifier call records. The Last* fields above retain only the most recent
 	// call, which cannot distinguish outcomes when one reconcile programs several
@@ -106,6 +108,9 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
+	if m.AttacheBPFProbesErr != nil {
+		return m.AttacheBPFProbesErr
+	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
 	if !m.DeletedPods[pod] && m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.ForgetIdentifier(podIdentifier)
@@ -144,6 +149,9 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 	}
 	if m.UpdateEbpfMapsErr != nil {
 		return m.UpdateEbpfMapsErr
+	}
+	if err := m.UpdateEbpfMapsErrFor[podIdentifier]; err != nil {
+		return err
 	}
 	m.LastIngressRules = ingressFirewallRules
 	m.LastEgressRules = egressFirewallRules
