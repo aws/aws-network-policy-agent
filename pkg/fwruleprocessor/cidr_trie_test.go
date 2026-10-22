@@ -2,8 +2,10 @@ package fwruleprocessor
 
 import (
 	"fmt"
+	"maps"
 	"math/rand"
 	"net"
+	"net/netip"
 	"sort"
 	"testing"
 
@@ -15,8 +17,17 @@ import (
 func insertAll(t *testing.T, trie *cidrTrie, cidrs ...string) {
 	t.Helper()
 	for _, c := range cidrs {
-		trie.insert(c)
+		trie.insert(netip.MustParsePrefix(c))
 	}
+}
+
+func containingCIDRs(trie *cidrTrie, address string) []string {
+	ip, _ := netip.ParseAddr(address)
+	var result []string
+	for _, prefix := range trie.findContainingKeys(ip) {
+		result = append(result, prefix.String())
+	}
+	return result
 }
 
 // --- Core correctness ---
@@ -40,7 +51,7 @@ func TestCIDRTrie_IPv4_Containment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			trie := newCIDRTrie()
 			insertAll(t, trie, tt.inserts...)
-			assert.Equal(t, tt.want, trie.findContainingKeys(net.ParseIP(tt.lookup)))
+			assert.Equal(t, tt.want, containingCIDRs(trie, tt.lookup))
 		})
 	}
 }
@@ -63,7 +74,7 @@ func TestCIDRTrie_IPv6_Containment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			trie := newCIDRTrie()
 			insertAll(t, trie, tt.inserts...)
-			assert.Equal(t, tt.want, trie.findContainingKeys(net.ParseIP(tt.lookup)))
+			assert.Equal(t, tt.want, containingCIDRs(trie, tt.lookup))
 		})
 	}
 }
@@ -72,24 +83,24 @@ func TestCIDRTrie_FamilyIsolation(t *testing.T) {
 	// v6 lookup on v4-only trie must not match
 	v4Only := newCIDRTrie()
 	insertAll(t, v4Only, "10.0.0.0/8")
-	assert.Empty(t, v4Only.findContainingKeys(net.ParseIP("2001:db8::1")),
+	assert.Empty(t, containingCIDRs(v4Only, "2001:db8::1"),
 		"v6 lookup must not match a v4 key")
 
 	// v4 lookup on v6-only trie must not match
 	v6Only := newCIDRTrie()
 	insertAll(t, v6Only, "2001:db8::/32")
-	assert.Empty(t, v6Only.findContainingKeys(net.ParseIP("10.1.2.3")),
+	assert.Empty(t, containingCIDRs(v6Only, "10.1.2.3"),
 		"v4 lookup must not match a v6 key")
 
 	// v4 IP (32.1.13.184) whose leading bits resemble 2001:db8:: must not cross-match
-	assert.Empty(t, v6Only.findContainingKeys(net.ParseIP("32.1.13.184")),
+	assert.Empty(t, containingCIDRs(v6Only, "32.1.13.184"),
 		"v4 IP sharing leading bits with v6 CIDR must not cross-match")
 
 	// Mixed trie: each family finds only its own
 	mixed := newCIDRTrie()
 	insertAll(t, mixed, "10.0.0.0/8", "2001:db8::/32")
-	assert.Equal(t, []string{"10.0.0.0/8"}, mixed.findContainingKeys(net.ParseIP("10.1.2.3")))
-	assert.Equal(t, []string{"2001:db8::/32"}, mixed.findContainingKeys(net.ParseIP("2001:db8::1")))
+	assert.Equal(t, []string{"10.0.0.0/8"}, containingCIDRs(mixed, "10.1.2.3"))
+	assert.Equal(t, []string{"2001:db8::/32"}, containingCIDRs(mixed, "2001:db8::1"))
 }
 
 // --- Nil / invalid input safety ---
@@ -97,17 +108,15 @@ func TestCIDRTrie_FamilyIsolation(t *testing.T) {
 func TestCIDRTrie_NilAndInvalidInputs(t *testing.T) {
 	trie := newCIDRTrie()
 	// Invalid inserts: must not panic, must not pollute
-	trie.insert("")
-	trie.insert("not-a-cidr")
-	trie.insert("also/invalid")
+	trie.insert(netip.Prefix{})
 	insertAll(t, trie, "10.0.0.0/8")
 
 	// Only valid CIDR should be findable
-	assert.Equal(t, []string{"10.0.0.0/8"}, trie.findContainingKeys(net.ParseIP("10.1.2.3")))
+	assert.Equal(t, []string{"10.0.0.0/8"}, containingCIDRs(trie, "10.1.2.3"))
 
 	// Nil and garbage IP queries: must not panic, must return empty
-	assert.Empty(t, trie.findContainingKeys(nil))
-	assert.Empty(t, trie.findContainingKeys(net.ParseIP("not-an-ip")))
+	assert.Empty(t, trie.findContainingKeys(netip.Addr{}))
+	assert.Empty(t, containingCIDRs(trie, "not-an-ip"))
 }
 
 // --- Canonicalization ---
@@ -116,20 +125,20 @@ func TestCIDRTrie_Canonicalization(t *testing.T) {
 	trie := newCIDRTrie()
 
 	// Non-canonical v4 (host bits set) -> stored as canonical
-	trie.insert("10.0.0.1/8") // masks to 10.0.0.0/8
-	assert.Equal(t, []string{"10.0.0.0/8"}, trie.findContainingKeys(net.ParseIP("10.99.99.99")))
+	trie.insert(netip.MustParsePrefix("10.0.0.1/8")) // masks to 10.0.0.0/8
+	assert.Equal(t, []string{"10.0.0.0/8"}, containingCIDRs(trie, "10.99.99.99"))
 
 	// v4-mapped IPv6 -> stored as v4 canonical
 	trie2 := newCIDRTrie()
-	trie2.insert("::ffff:10.0.0.0/104") // -> 10.0.0.0/8
-	trie2.insert("::ffff:0:0/96")       // -> 0.0.0.0/0
-	assert.Equal(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, trie2.findContainingKeys(net.ParseIP("10.1.2.3")))
-	assert.NotContains(t, trie2.findContainingKeys(net.ParseIP("11.0.0.1")), "10.0.0.0/8")
+	trie2.insert(netip.MustParsePrefix("::ffff:10.0.0.0/104")) // -> 10.0.0.0/8
+	trie2.insert(netip.MustParsePrefix("::ffff:0:0/96"))       // -> 0.0.0.0/0
+	assert.Equal(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, containingCIDRs(trie2, "10.1.2.3"))
+	assert.NotContains(t, containingCIDRs(trie2, "11.0.0.1"), "10.0.0.0/8")
 
 	// Duplicate insert -> idempotent (single result, not doubled)
 	trie3 := newCIDRTrie()
 	insertAll(t, trie3, "10.0.0.0/8", "10.0.0.0/8", "10.0.0.0/8")
-	assert.Equal(t, []string{"10.0.0.0/8"}, trie3.findContainingKeys(net.ParseIP("10.1.2.3")))
+	assert.Equal(t, []string{"10.0.0.0/8"}, containingCIDRs(trie3, "10.1.2.3"))
 }
 
 // --- Oracle test: trie vs linear scan equivalence ---
@@ -158,9 +167,9 @@ func portSet(ports []v1alpha1.Port) []string {
 	return keys
 }
 
-func buildTrie(ruleMap map[string]EbpfFirewallRules) *cidrTrie {
+func buildTrie(ruleMap map[netip.Prefix]parsedFirewallRule) *cidrTrie {
 	trie := newCIDRTrie()
-	for cidr := range ruleMap {
+	for cidr := range maps.Keys(ruleMap) {
 		trie.insert(cidr)
 	}
 	return trie
@@ -195,7 +204,16 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
 func assertEquivalent(t *testing.T, ruleMap map[string]EbpfFirewallRules, target string) {
 	t.Helper()
 	linear := checkAndDeriveL4InfoFromAnyMatchingCIDRs(target, ruleMap)
-	trie := checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(target, buildTrie(ruleMap), ruleMap)
+	parsed := make(map[netip.Prefix]parsedFirewallRule, len(ruleMap))
+	for cidr, rule := range ruleMap {
+		prefix := canonicalPrefix(netip.MustParsePrefix(cidr))
+		entry := parsedFirewallRule{EbpfFirewallRules: rule, prefix: prefix}
+		for _, except := range rule.Except {
+			entry.except = append(entry.except, canonicalPrefix(netip.MustParsePrefix(string(except))))
+		}
+		parsed[prefix] = entry
+	}
+	trie := checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(canonicalPrefix(netip.MustParsePrefix(target)), buildTrie(parsed), parsed)
 	assert.Equal(t, portSet(linear), portSet(trie),
 		"trie result must equal linear result for target %s", target)
 }
