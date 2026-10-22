@@ -767,11 +767,11 @@ func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
 		}
 
 		dump, err := fw.PodManager.ExecInPod(namespace, checkPod.Name,
-			[]string{"chroot", "/host", "bpftool", "map", "dump", "id", strconv.Itoa(mapID), "-j"})
+			[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "dump-maps", strconv.Itoa(mapID)})
 		if err != nil {
 			return 0, err
 		}
-		return utils.ParsePodStateFromBpftoolDump(dump, utils.ClusterPolicyPodStateKey)
+		return utils.ParsePodStateFromMapDump(dump, utils.ClusterPolicyPodStateKey)
 	}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal(utils.PodStatePoliciesApplied),
 		"client pod's cluster-policy tier must be programmed as POLICIES_APPLIED before traffic starts")
 }
