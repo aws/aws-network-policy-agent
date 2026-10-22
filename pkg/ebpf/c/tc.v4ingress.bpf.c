@@ -29,10 +29,10 @@
 #define CT_VAL_DEFAULT_ALLOW 0
 #define CT_VAL_DEFAULT_ALLOW_DEFAULT_ALLOW 2
 #define CT_VAL_DEFAULT_ALLOW_DEFAULT_DENY 3
-#define CT_VAL_DEFAULT_ALLOW_POLICIES_APPLIED 4
-#define CT_VAL_POLICIES_APPLIED_DEFAULT_ALLOW 5
+#define CT_VAL_DEFAULT_ALLOW_POLICIES_APPLIED 8
+#define CT_VAL_POLICIES_APPLIED_DEFAULT_ALLOW 9
 #define CT_VAL_POLICIES_APPLIED_DEFAULT_DENY 6
-#define CT_VAL_POLICIES_APPLIED_POLICIES_APPLIED 7
+#define CT_VAL_POLICIES_APPLIED_POLICIES_APPLIED 10
 
 #define GET_CT_VAL(a, b) \
     ((a) == DEFAULT_ALLOW && (b) == DEFAULT_ALLOW ? CT_VAL_DEFAULT_ALLOW_DEFAULT_ALLOW : \
@@ -423,7 +423,7 @@ int handle_ingress(struct __sk_buff *skb)
 			return BPF_DROP;
 		}
 
-		__u8 ct_pod_state_val = GET_CT_VAL(pst->state, clusterpolicy_pst->state);
+		__u8 ct_pod_state_val = GET_CT_VAL(clusterpolicy_pst->state, pst->state);
 
 		//Check if it's an existing flow
 		flow_val = bpf_map_lookup_elem(&aws_conntrack_map, &flow_key);

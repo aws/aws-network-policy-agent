@@ -10,6 +10,60 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Pod-state map keys (the __u32 key of ingress_pod_state_map / egress_pod_state_map)
+// and the pod_state.state byte values, mirrored from pkg/ebpf/c/tc.*.bpf.c. Used by
+// tests to assert a pod's policy tier is actually programmed into the datapath, not
+// just created in the Kubernetes API.
+const (
+	NetworkPolicyPodStateKey       = 0
+	ClusterPolicyPodStateKey       = 1
+	PodStatePoliciesApplied  uint8 = 0
+	PodStateDefaultAllow     uint8 = 1
+	PodStateDefaultDeny      uint8 = 2
+)
+
+// ParsePodStateFromMapDump reads the output of
+// `aws-eks-na-cli ebpf dump-maps <mapID>` for a pod_state map (a HASH map keyed by a
+// __u32 with a single-byte pod_state.state value) and returns the state byte stored
+// under the given key. The CLI prints each entry as:
+//
+//	Key :  1
+//	State -  0
+//	*******************************
+//
+// Returns an error if the key is absent so callers can retry while the agent programs it.
+func ParsePodStateFromMapDump(output string, key int) (uint8, error) {
+	lines := strings.Split(output, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "Key :") {
+			continue
+		}
+		kStr := strings.TrimSpace(strings.TrimPrefix(line, "Key :"))
+		k, err := strconv.Atoi(kStr)
+		if err != nil {
+			return 0, fmt.Errorf("parse pod_state key %q: %w", kStr, err)
+		}
+		if k != key {
+			continue
+		}
+		if i+1 >= len(lines) {
+			return 0, fmt.Errorf("pod_state key %d has no following State line", key)
+		}
+		stateLine := strings.TrimSpace(lines[i+1])
+		if !strings.HasPrefix(stateLine, "State -") {
+			return 0, fmt.Errorf("pod_state key %d not followed by State line (got %q)", key, stateLine)
+		}
+		sStr := strings.TrimSpace(strings.TrimPrefix(stateLine, "State -"))
+		s, err := strconv.ParseUint(sStr, 10, 8)
+		if err != nil {
+			return 0, fmt.Errorf("parse pod_state value %q for key %d: %w", sStr, key, err)
+		}
+		return uint8(s), nil
+	}
+	return 0, fmt.Errorf("no pod_state entry for key %d (map not yet programmed)", key)
+}
+
 // BuildBPFCheckPod creates a privileged pod that can inspect BPF state on a node
 // via chroot into the host filesystem.
 func BuildBPFCheckPod(namespace, nodeName string) *v1.Pod {

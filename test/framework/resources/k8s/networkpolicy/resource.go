@@ -37,11 +37,11 @@ func (m *defaultManager) DeleteNetworkPolicy(ctx context.Context, networkpolicy 
 	netpol := &network.NetworkPolicy{}
 	return wait.PollUntilContextCancel(ctx, utils.PollIntervalShort, true, func(context.Context) (done bool, err error) {
 		if err := m.k8sClient.Get(ctx, utils.NamespacedName(networkpolicy), netpol); err != nil {
+			if errors.IsNotFound(err) {
+				return true, nil
+			}
 			return false, err
 		}
-		if errors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
+		return false, nil
 	})
 }
