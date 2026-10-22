@@ -464,8 +464,24 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	}
 	currentPods = lo.Uniq(currentPods)
 
+	// Prune by exact ClusterPolicyEndpoint name rather than by derived parent CNP name.
+	// GetParentNPNameFromPEName is lossy under GenerateName truncation, so a parent-wide
+	// match can drop a different CNP's slices -- and for cluster policies those carry Deny
+	// rules. Exact names can only ever under-delete.
+	//
+	// The live list alone is not sufficient: a stale identifier still holds the slice names
+	// from the reconcile that last selected it, and the CPE being deleted is by definition no
+	// longer in the live list. Prune against the live slices PLUS resourceName, which on the
+	// delete path is the departing CPE's own name (and is already a member of parentCPEList
+	// on the reconcile path, making it a no-op).
+	pruneNames := parentCPEList
+	if !slices.Contains(pruneNames, resourceName) {
+		pruneNames = append(slices.Clone(parentCPEList), resourceName)
+	}
 	for _, podIdentifier := range stalePodIdentifiers {
-		utils.DeleteParentNPFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCNPName)
+		for _, cpeName := range pruneNames {
+			utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, cpeName)
+		}
 	}
 
 	if len(currentPods) > 0 {
