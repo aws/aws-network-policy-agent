@@ -90,6 +90,10 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
 
+		if firewallRule.IPCidr == "" {
+			log().Warn("Skipping emtpy IP CIDR in rule processing")
+			continue
+		}
 		if !strings.Contains(string(firewallRule.IPCidr), "/") {
 			firewallRule.IPCidr += v1alpha1.NetworkAddress(f.hostMask)
 		}
@@ -468,4 +472,22 @@ func isIPv6(cidr string) bool {
 		ip = net.ParseIP(cidr)
 	}
 	return ip != nil && ip.To4() == nil
+}
+
+// SegregateDomainAndIPRules separates egress rules into domain-based and IP-based rules.
+// Domain names are normalized to FQDN format (trailing dot).
+func SegregateDomainAndIPRules(egressRules []EbpfFirewallRules) (domainRules, ipEgressRules []EbpfFirewallRules) {
+	domainRules = []EbpfFirewallRules{}
+	ipEgressRules = []EbpfFirewallRules{}
+	for _, egressRule := range egressRules {
+		if egressRule.DomainName == "" {
+			ipEgressRules = append(ipEgressRules, egressRule)
+		} else {
+			if !strings.HasSuffix(egressRule.DomainName, ".") {
+				egressRule.DomainName = egressRule.DomainName + "."
+			}
+			domainRules = append(domainRules, egressRule)
+		}
+	}
+	return domainRules, ipEgressRules
 }

@@ -19,14 +19,17 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -102,13 +105,15 @@ func prometheusRegister() {
 	}
 }
 
-// NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
-func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
+// NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler.
+// A nil proxyManager (IPv6 clusters) disables DNS policy: domain egress rules are skipped as before.
+func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool, proxyManager proxymanager.ProxyManager) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
 		k8sClient:        k8sClient,
 		nodeIP:           nodeIP,
 		ebpfClient:       ebpfClient,
 		enableIPv6:       enableIPv6,
+		proxyManager:     proxyManager,
 		trackerStartTime: time.Now(),
 	}
 
@@ -139,8 +144,9 @@ type PolicyEndpointsReconciler struct {
 	// Maps a Network Policy to list of selected pod Identifiers
 	networkPolicyToPodIdentifierMap sync.Map
 	//BPF Client instance
-	ebpfClient ebpf.BpfClient
-	enableIPv6 bool
+	ebpfClient   ebpf.BpfClient
+	proxyManager proxymanager.ProxyManager
+	enableIPv6   bool
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
@@ -348,6 +354,18 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
 	var err error
 
+	domainRules, ipEgressRules := fwrp.SegregateDomainAndIPRules(egressRules)
+
+	if r.proxyManager != nil {
+		if len(domainRules) == 0 && filter.HasPolicyEndpointDomains(podIdentifier) {
+			log().Debugf("no domain rules for PodId %s, removing controller domains", podIdentifier)
+			filter.DeletePolicyEndpointDomains(podIdentifier)
+		} else {
+			// log().Debugf("setting domains for PodId %s : %v", podIdentifier, domainRules)
+			filter.SetPolicyEndpointDomains(podIdentifier, domainRules)
+		}
+	}
+
 	//Loop over target pods and setup/configure/update eBPF probes/maps
 	for _, pod := range targetPods {
 		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -358,14 +376,33 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 
 		// podConfirmedLive=false: PolicyEndpoints can still list pods already deleted from this node.
 		_, err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN, false)
+		if errors.Is(err, ebpf.ErrPodDeleted) {
+			continue
+		}
 		if err != nil {
 			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+
+		if r.proxyManager == nil {
+			continue
+		}
+		if len(domainRules) != 0 {
+			err = r.proxyManager.AddDNSRedirectionRulesForPod(pod, podIdentifier)
+			if err != nil {
+				log().Errorf("got err in redirecting pod DNS traffic %v", err)
+				return fmt.Errorf("got err in redirecting pod DNS traffic %w", err)
+			}
+		} else {
+			err = r.proxyManager.RemoveDNSRedirectionRulesForPod(pod.NamespacedName, podIdentifier)
+			if err != nil {
+				log().Errorf("got err in removing DNS redirection rules for pod %s: %v", pod.NamespacedName.String(), err)
+			}
+		}
 	}
 
-	err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED)
+	err = r.updateeBPFMaps(podIdentifier, ingressRules, ipEgressRules, ebpf.POLICIES_APPLIED)
 	if err != nil {
 		log().Errorf("Map updates failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
@@ -413,6 +450,14 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 				log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 				return err
 			}
+
+			// Clean up domain rules and nftables rules since there are no active policies
+			if r.proxyManager != nil && filter.HasPolicyEndpointDomains(podIdentifier) {
+				log().Debugf("cleaning up domain rules for PodId %s - no active policies", podIdentifier)
+				filter.DeletePolicyEndpointDomains(podIdentifier)
+				r.proxyManager.RemoveDNSRedirectionRulesForPod(targetPod.NamespacedName, podIdentifier)
+			}
+
 		} else {
 			// We've additional PolicyEndpoint resources configured against this pod
 			// Update the Maps and move on
@@ -432,11 +477,26 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 				r.addCatchAllEntry(&egressRules)
 			}
 
-			err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED)
+			domainRules, ipEgressRules := fwrp.SegregateDomainAndIPRules(egressRules)
+
+			err = r.updateeBPFMaps(podIdentifier, ingressRules, ipEgressRules, ebpf.POLICIES_APPLIED)
 			if err != nil {
 				log().Errorf("Map update(s) failed for podIdentifier %s: %v", podIdentifier, err)
 				return err
 			}
+
+			// check if no domain rules against this pod from any ANP, then remove the DNS traffic re-direction IPtable rule
+			if r.proxyManager != nil {
+				if len(domainRules) == 0 && filter.HasPolicyEndpointDomains(podIdentifier) {
+					log().Debugf("no domain rules for PodId %s, removing DNS routing, PodIP mapping and domains", podIdentifier)
+					filter.DeletePolicyEndpointDomains(podIdentifier)
+					r.proxyManager.RemoveDNSRedirectionRulesForPod(targetPod.NamespacedName, podIdentifier)
+				} else {
+					// log().Debugf("setting domains for PodId %s : %v", podIdentifier, domainRules)
+					filter.SetPolicyEndpointDomains(podIdentifier, domainRules)
+				}
+			}
+
 		}
 
 	}
@@ -488,7 +548,15 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 					continue
 				}
 				if endPointInfo.CIDR == "" {
-					log().Infof("CIDR is empty, skipping the egress rule %s, NS: %s", currentPE.Name, currentPE.Namespace)
+					if r.proxyManager == nil {
+						log().Infof("CIDR is empty, skipping the egress rule %s, NS: %s", currentPE.Name, currentPE.Namespace)
+						continue
+					}
+					egressRules = append(egressRules, fwrp.EbpfFirewallRules{
+						Priority:   utils.PE_PRIORITY*10 + 1, // Priority = PE_PRIORITY * 10 + ALLOW (1) for domain rules
+						DomainName: string(endPointInfo.DomainName),
+						L4Info:     endPointInfo.Ports,
+					})
 					continue
 				}
 

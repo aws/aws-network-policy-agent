@@ -46,7 +46,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile call for Create PolicyEndpoint with PodEndpoint local to Node", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false, nil)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -92,7 +92,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile for Create and Delete PE", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false, nil)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -502,7 +502,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false, nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -999,7 +999,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false, nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1007,6 +1007,118 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			activePoliciesAvailable := policyEndpointReconciler.ArePoliciesAvailableInLocalCache(tt.podIdentifier)
 			assert.Equal(t, tt.want.activePoliciesAvailable, activePoliciesAvailable)
+		})
+	}
+}
+
+func TestSegregateDomainsAndIPRules(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+
+	tests := []struct {
+		name        string
+		egressRules []fwrp.EbpfFirewallRules
+		wantDomain  []fwrp.EbpfFirewallRules
+		wantIP      []fwrp.EbpfFirewallRules
+	}{
+		{
+			name: "Mixed domain and IP rules",
+			egressRules: []fwrp.EbpfFirewallRules{
+				{
+					IPCidr: "192.168.1.0/24",
+					L4Info: []policyendpoint.Port{
+						{
+							Protocol: &protocolTCP,
+							Port:     &port80,
+						},
+					},
+				},
+				{
+					DomainName: "example.com",
+					L4Info: []policyendpoint.Port{
+						{
+							Protocol: &protocolTCP,
+							Port:     &port80,
+						},
+					},
+				},
+			},
+			wantDomain: []fwrp.EbpfFirewallRules{
+				{
+					DomainName: "example.com.",
+					L4Info: []policyendpoint.Port{
+						{
+							Protocol: &protocolTCP,
+							Port:     &port80,
+						},
+					},
+				},
+			},
+			wantIP: []fwrp.EbpfFirewallRules{
+				{
+					IPCidr: "192.168.1.0/24",
+					L4Info: []policyendpoint.Port{
+						{
+							Protocol: &protocolTCP,
+							Port:     &port80,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Only IP rules",
+			egressRules: []fwrp.EbpfFirewallRules{
+				{
+					IPCidr: "10.0.0.0/8",
+				},
+				{
+					IPCidr: "172.16.0.0/12",
+				},
+			},
+			wantDomain: []fwrp.EbpfFirewallRules{},
+			wantIP: []fwrp.EbpfFirewallRules{
+				{
+					IPCidr: "10.0.0.0/8",
+				},
+				{
+					IPCidr: "172.16.0.0/12",
+				},
+			},
+		},
+		{
+			name: "Only domain rules",
+			egressRules: []fwrp.EbpfFirewallRules{
+				{
+					DomainName: "google.com",
+				},
+				{
+					DomainName: "amazon.com.",
+				},
+			},
+			wantDomain: []fwrp.EbpfFirewallRules{
+				{
+					DomainName: "google.com.",
+				},
+				{
+					DomainName: "amazon.com.",
+				},
+			},
+			wantIP: []fwrp.EbpfFirewallRules{},
+		},
+		{
+			name:        "Empty rules",
+			egressRules: []fwrp.EbpfFirewallRules{},
+			wantDomain:  []fwrp.EbpfFirewallRules{},
+			wantIP:      []fwrp.EbpfFirewallRules{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDomain, gotIP := fwrp.SegregateDomainAndIPRules(tt.egressRules)
+			assert.Equal(t, tt.wantDomain, gotDomain)
+			assert.Equal(t, tt.wantIP, gotIP)
 		})
 	}
 }
@@ -1244,7 +1356,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false, nil)
 		var policyEndpointsList []string
 		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
@@ -1414,7 +1526,7 @@ func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false, nil)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
@@ -1470,7 +1582,7 @@ func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false, nil)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
@@ -1531,7 +1643,7 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false, nil)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
