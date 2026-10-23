@@ -30,7 +30,10 @@ import (
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -141,6 +144,34 @@ type PolicyEndpointsReconciler struct {
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 	enableIPv6 bool
+	// podSelectorMatchingEnabled makes rule derivation also include every
+	// PolicyEndpoint whose podSelector matches a local pod of the identifier,
+	// not only the PolicyEndpoints recorded in podIdentifierToPolicyEndpointMap.
+	// Off by default; see EnablePodSelectorMatching.
+	podSelectorMatchingEnabled bool
+	// podReader reads a Pod from the API server when the pod cache has not
+	// received it yet. Used only for the pod the CNI is setting up.
+	podReader client.Reader
+}
+
+// EnablePodSelectorMatching makes rule derivation use the complete set of
+// PolicyEndpoints that select a pod identifier:
+// - Problem: podIdentifierToPolicyEndpointMap is filled and pruned one
+// NetworkPolicy at a time, by each PolicyEndpoint's own reconcile, so it can
+// briefly hold only some of the policies that apply to an identifier (for
+// example a default-deny without its matching allow).
+// - Fix: also include every PolicyEndpoint whose podSelector matches a local pod
+// of the identifier. That set is complete regardless of reconcile order. It is
+// unioned with the recorded list, so it never removes a PolicyEndpoint the
+// agent would otherwise apply.
+// - Pod labels come from:
+//  1. The client's Pod cache. Callers must restrict that cache to pods on this
+//     node, otherwise listing pods starts a cluster-wide Pod informer.
+//  2. podReader, an uncached reader, only when the CNI is setting up a pod the
+//     cache has not received yet. A nil podReader disables this fallback.
+func (r *PolicyEndpointsReconciler) EnablePodSelectorMatching(podReader client.Reader) {
+	r.podSelectorMatchingEnabled = true
+	r.podReader = podReader
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
@@ -445,13 +476,22 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
 	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, bool, bool, error) {
+	return r.deriveIngressAndEgressFirewallRulesForPod(ctx, podIdentifier, resourceNamespace, resourceName, isDeleteFlow, nil)
+}
+
+// deriveIngressAndEgressFirewallRulesForPod derives podIdentifier's rules.
+// newPod, when set, is a pod of podIdentifier that is known to exist (the CNI
+// is setting it up); see policyEndpointsForPodIdentifier.
+func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRulesForPod(ctx context.Context,
+	podIdentifier string, resourceNamespace string, resourceName string, isDeleteFlow bool,
+	newPod *types.NamespacedName) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, bool, bool, error) {
 	var ingressRules, egressRules []fwrp.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
-	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(policyEndpointList.([]string)))
-		for _, policyEndpointResource := range policyEndpointList.([]string) {
+	if policyEndpointList := r.policyEndpointsForPodIdentifier(ctx, podIdentifier, resourceNamespace, newPod); len(policyEndpointList) > 0 {
+		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(policyEndpointList))
+		for _, policyEndpointResource := range policyEndpointList {
 			peNamespacedName := types.NamespacedName{
 				Name:      policyEndpointResource,
 				Namespace: resourceNamespace,
@@ -512,6 +552,126 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 		isEgressIsolated = false
 	}
 	return ingressRules, egressRules, isIngressIsolated, isEgressIsolated, nil
+}
+
+// policyEndpointsForPodIdentifier returns the names of the PolicyEndpoints to
+// build podIdentifier's rules from: the recorded list, plus, when pod selector
+// matching is enabled, every PolicyEndpoint that selects one of the
+// identifier's local pods. newPod, if set, is included as a local pod even when
+// the pod cache has not seen it yet. If the selector lookup fails, it falls
+// back to the recorded list alone, which is the behavior without selector
+// matching.
+func (r *PolicyEndpointsReconciler) policyEndpointsForPodIdentifier(ctx context.Context, podIdentifier, namespace string,
+	newPod *types.NamespacedName) []string {
+	var names []string
+	if recorded, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		// Copy: the stored slice is shared with updatePodIdentifierToPEMap.
+		names = append(names, recorded.([]string)...)
+	}
+	if !r.podSelectorMatchingEnabled {
+		return names
+	}
+
+	matched, err := r.selectorMatchedPolicyEndpoints(ctx, podIdentifier, namespace, newPod)
+	if err != nil {
+		log().Warnf("PolicyEndpoint selector lookup failed for podIdentifier %s, using recorded list: %v", podIdentifier, err)
+		return names
+	}
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		seen[name] = struct{}{}
+	}
+	for _, name := range matched {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		log().Infof("Including PE %s for podIdentifier %s: podSelector matches a local pod", name, podIdentifier)
+		names = append(names, name)
+	}
+	return names
+}
+
+// selectorMatchedPolicyEndpoints returns the PolicyEndpoints in namespace whose
+// podSelector matches at least one local pod of podIdentifier. The Pod cache
+// holds only this node's pods, so the pod list is local. If newPod is set and
+// the cache has not seen it yet, its labels are read from the API server.
+func (r *PolicyEndpointsReconciler) selectorMatchedPolicyEndpoints(ctx context.Context, podIdentifier, namespace string,
+	newPod *types.NamespacedName) ([]string, error) {
+	pods := &corev1.PodList{}
+	if err := r.k8sClient.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	var podLabels []labels.Set
+	newPodCached := false
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if utils.GetPodIdentifier(pod.Name, pod.Namespace) == podIdentifier {
+			podLabels = append(podLabels, labels.Set(pod.Labels))
+		}
+		if newPod != nil && pod.Name == newPod.Name {
+			newPodCached = true
+		}
+	}
+	if newPod != nil && !newPodCached {
+		if set, ok := r.readNewPodLabels(ctx, podIdentifier, *newPod); ok {
+			podLabels = append(podLabels, set)
+		}
+	}
+	if len(podLabels) == 0 {
+		return nil, nil
+	}
+
+	policyEndpoints := &policyk8sawsv1.PolicyEndpointList{}
+	if err := r.k8sClient.List(ctx, policyEndpoints, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	var names []string
+	for i := range policyEndpoints.Items {
+		pe := &policyEndpoints.Items[i]
+		// A PolicyEndpoint being deleted is handled by its own delete reconcile;
+		// don't re-apply it here.
+		if pe.DeletionTimestamp != nil || pe.Spec.PodSelector == nil {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(pe.Spec.PodSelector)
+		if err != nil {
+			log().Warnf("Skipping PE %s/%s with invalid podSelector: %v", pe.Namespace, pe.Name, err)
+			continue
+		}
+		for _, set := range podLabels {
+			if selector.Matches(set) {
+				names = append(names, pe.Name)
+				break
+			}
+		}
+	}
+	return names, nil
+}
+
+// newPodLabelsTimeout bounds the API read for a pod the cache has not seen, so
+// a slow API server cannot stall the CNI request.
+const newPodLabelsTimeout = 2 * time.Second
+
+// readNewPodLabels reads a pod's labels from the API server, for a pod the CNI
+// is setting up that the node's pod cache has not received yet. On any error
+// it reports false and the caller uses the labels it already has.
+func (r *PolicyEndpointsReconciler) readNewPodLabels(ctx context.Context, podIdentifier string, podName types.NamespacedName) (labels.Set, bool) {
+	if r.podReader == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, newPodLabelsTimeout)
+	defer cancel()
+	pod := &corev1.Pod{}
+	if err := r.podReader.Get(ctx, podName, pod); err != nil {
+		log().Warnf("Pod %s not in pod cache and API read failed, using cached pods only: %v", podName, err)
+		return nil, false
+	}
+	if utils.GetPodIdentifier(pod.Name, pod.Namespace) != podIdentifier {
+		return nil, false
+	}
+	log().Infof("Pod %s not in pod cache yet, read its labels from the API server", podName)
+	return labels.Set(pod.Labels), true
 }
 
 func (r *PolicyEndpointsReconciler) deriveDefaultPodIsolation(policyEndpoint *policyk8sawsv1.PolicyEndpoint,
@@ -801,9 +961,23 @@ func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 
 func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
+	return r.deriveFireWallRules(podIdentifier, podNamespace, nil)
+}
 
-	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(context.Background(), podIdentifier,
-		podNamespace, "", false)
+// DeriveFireWallRulesForNewPod is DeriveFireWallRulesPerPodIdentifier for a pod
+// the CNI is setting up right now. If the pod is not in the node's pod cache
+// yet, its labels are read from the API server so the policy set is still
+// complete.
+func (r *PolicyEndpointsReconciler) DeriveFireWallRulesForNewPod(podIdentifier string, pod types.NamespacedName) ([]fwrp.EbpfFirewallRules,
+	[]fwrp.EbpfFirewallRules, error) {
+	return r.deriveFireWallRules(podIdentifier, pod.Namespace, &pod)
+}
+
+func (r *PolicyEndpointsReconciler) deriveFireWallRules(podIdentifier string, podNamespace string, newPod *types.NamespacedName) ([]fwrp.EbpfFirewallRules,
+	[]fwrp.EbpfFirewallRules, error) {
+
+	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRulesForPod(context.Background(), podIdentifier,
+		podNamespace, "", false, newPod)
 	if err != nil {
 		log().Errorf("Error deriving firewall rules: %v", err)
 		return ingressRules, egressRules, nil
