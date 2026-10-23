@@ -17,7 +17,9 @@ import (
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfmetrics "github.com/aws/aws-ebpf-sdk-go/pkg/metrics"
+	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
+	goebpfutils "github.com/aws/aws-ebpf-sdk-go/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
@@ -26,6 +28,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -608,10 +611,13 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
-		_, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
+		_, loaded, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
 			log().Errorf("Failed to Attach Ingress TC probe for interface: %s podIdentifier: %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
+			if loaded {
+				l.unloadBPFProgram(podIdentifier, "ingress")
+			}
 		}
 		log().Infof("Updating ingress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, POD_STATE_MAP_KEY, state, true, false)
@@ -628,10 +634,13 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	for interfaceName, pinPath := range l.interfaceNametoEgressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching egress for %s interface %s", podIdentifier, interfaceName)
-		_, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
+		_, loaded, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
 			log().Errorf("Failed to Attach Egress TC probe for interface: %s podIdentifier %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+			if loaded {
+				l.unloadBPFProgram(podIdentifier, "egress")
+			}
 		}
 
 		log().Infof("Updating egress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
@@ -716,7 +725,7 @@ func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentif
 	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
 }
 
-func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
+func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (_ bool, err error) {
 	var ingressProgFD int
 	var egressProgFD int
 
@@ -747,6 +756,17 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	}
 	firstPodInPodIdentifier := l.isFirstPodInPodIdentifierLocked(podIdentifier)
 
+	// Unload the programs this call loaded if the attach fails, so their pins
+	// don't outlive the pod. Programs loaded earlier may be in use by other pods.
+	var loadedDirections []string
+	defer func() {
+		if err != nil {
+			for _, direction := range loadedDirections {
+				l.unloadBPFProgram(podIdentifier, direction)
+			}
+		}
+	}()
+
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
 	// If yes, then skip probe attach flow for this pod.
 	isIngressProbeAttached, isEgressProbeAttached := l.isEBPFProbeAttached(pod.Name, pod.Namespace)
@@ -775,7 +795,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 		if !isIngressProbeAttached {
 			start := time.Now()
-			ingressProgFD, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
+			var loaded bool
+			ingressProgFD, loaded, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
+			if loaded {
+				loadedDirections = append(loadedDirections, "ingress")
+			}
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 			if err != nil {
@@ -788,7 +812,11 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 		if !isEgressProbeAttached {
 			start := time.Now()
-			egressProgFD, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
+			var loaded bool
+			egressProgFD, loaded, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
+			if loaded {
+				loadedDirections = append(loadedDirections, "egress")
+			}
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachEgressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 			if err != nil {
@@ -813,13 +841,12 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	return firstPodInPodIdentifier, nil
 }
 
-func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (int, error) {
+// loaded reports whether this call loaded the program, even if the attach then failed.
+func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (progFD int, loaded bool, err error) {
 	// We will re-use the same eBPF program instance for pods belonging to same replicaset
 	// Check if we've already loaded an ELF file for this PolicyEndpoint resource and re-use
 	// if present, otherwise load a new instance and attach it
 
-	var progFD int
-	var err error
 	var ingressProgInfo map[string]goelf.BpfData
 	var peBPFContext BPFContext
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
@@ -834,8 +861,9 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 	} else {
 		ingressProgInfo, progFD, err = l.loadBPFProgram(l.ingressBinary, "ingress", podIdentifier)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
+		loaded = true
 		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
 		peBPFContext.ingressPgmInfo = ingressProgInfo[pinPath]
 		l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
@@ -847,24 +875,23 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 		log().Warnf("Stale ingress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCEgressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Ingress TC detach failed on %s: %v", hostVethName, detachErr)
-			return 0, detachErr
+			return 0, loaded, detachErr
 		}
 		err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
 	}
 	if err != nil {
 		log().Errorf("Ingress Attach failed %v", err)
-		return 0, err
+		return 0, loaded, err
 	}
-	return progFD, nil
+	return progFD, loaded, nil
 }
 
-func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier string) (int, error) {
+// loaded reports whether this call loaded the program, even if the attach then failed.
+func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier string) (progFD int, loaded bool, err error) {
 	// We will re-use the same eBPF program instance for pods belonging to same replicaset
 	// Check if we've already loaded an ELF file for this PolicyEndpoint resource and re-use
 	// if present, otherwise load a new instance and attach it
 
-	var progFD int
-	var err error
 	var egressProgInfo map[string]goelf.BpfData
 	var peBPFContext BPFContext
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
@@ -879,8 +906,9 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 	} else {
 		egressProgInfo, progFD, err = l.loadBPFProgram(l.egressBinary, "egress", podIdentifier)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
+		loaded = true
 		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
 		peBPFContext.egressPgmInfo = egressProgInfo[pinPath]
 		l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
@@ -892,16 +920,16 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 		log().Warnf("Stale egress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCIngressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Egress TC detach failed on %s: %v", hostVethName, detachErr)
-			return 0, detachErr
+			return 0, loaded, detachErr
 		}
 		err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
 	}
 	if err != nil {
 		log().Errorf("Egress Attach failed %v", err)
-		return 0, err
+		return 0, loaded, err
 	}
 
-	return progFD, nil
+	return progFD, loaded, nil
 }
 
 // HasBPFContext reports whether an eBPF context is currently registered for the given
@@ -985,24 +1013,89 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 
 	if pgmInfo.Program.ProgFD != 0 {
 		log().Infof("Found the Program and Map to delete - Program: %s Map: %s Map: %s", pgmPinPath, mapPinpath, podStateMapPinPath)
-		err = pgmInfo.Program.UnPinProg(pgmPinPath)
+		err = unpinProgram(&pgmInfo.Program, pgmPinPath)
 		if err != nil {
 			log().Errorf("Failed to delete the Program: %v", err)
 		}
-		err = mapToDelete.UnPinMap(mapPinpath)
+		err = unpinMap(&mapToDelete, mapPinpath)
 		if err != nil {
 			log().Errorf("Failed to delete the Map: %v", err)
 		}
-		err = podStateMapToDelete.UnPinMap(podStateMapPinPath)
+		err = unpinMap(&podStateMapToDelete, podStateMapPinPath)
 		if err != nil {
 			log().Errorf("Failed to delete PodState Map: %v", err)
 		}
-		err = clusterPolicyMap.UnPinMap(clusterPolicyMapPinpath)
+		err = unpinMap(&clusterPolicyMap, clusterPolicyMapPinpath)
 		if err != nil {
 			log().Errorf("Failed to delete the cluster policy Map: %v", err)
 		}
 	}
 	return nil
+}
+
+// unloadBPFProgram unpins one direction's program and maps and removes them from
+// the context. It does not detach the TC filter.
+func (l *bpfClient) unloadBPFProgram(podIdentifier string, direction string) {
+	log().Infof("Unloading %s program for podIdentifier %s after a failed attach", direction, podIdentifier)
+	l.deleteBPFProgramAndMaps(podIdentifier, direction)
+	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	if !ok {
+		return
+	}
+	peBPFContext := value.(BPFContext)
+	if direction == "ingress" {
+		peBPFContext.ingressPgmInfo = goelf.BpfData{}
+		l.ingressInMemoryMap.Delete(podIdentifier)
+		l.clusterPolicyIngressInMemoryMap.Delete(podIdentifier)
+	} else {
+		peBPFContext.egressPgmInfo = goelf.BpfData{}
+		l.egressInMemoryMap.Delete(podIdentifier)
+		l.clusterPolicyEgressInMemoryMap.Delete(podIdentifier)
+	}
+	if peBPFContext.ingressPgmInfo.Program.ProgFD == 0 && peBPFContext.egressPgmInfo.Program.ProgFD == 0 {
+		l.policyEndpointeBPFContext.Delete(podIdentifier)
+		return
+	}
+	l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
+}
+
+// Overridden in tests.
+var (
+	unpinObject  = goebpfutils.UnPinObject
+	unpinProgram = (*goebpfprogs.BpfProgram).UnPinProg
+	unpinMap     = (*goebpfmaps.BpfMap).UnPinMap
+	closeFD      = unix.Close
+)
+
+// unpinFailedLoad removes the pins a failed load may have left. The SDK pins
+// each map before it loads the program.
+func unpinFailedLoad(podIdentifier string, direction string) {
+	mapPinPath, clusterPolicyMapPinPath := utils.GetBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
+	for _, pinPath := range []string{
+		utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction),
+		mapPinPath,
+		clusterPolicyMapPinPath,
+		utils.GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier, direction),
+	} {
+		if err := unpinObject(pinPath); err != nil {
+			log().Errorf("Failed to unpin %s after a failed load: %v", pinPath, err)
+		}
+	}
+}
+
+// closeLoadedObjects closes the FDs of a discarded load. loadedMaps holds only
+// the maps the load created, not the global maps.
+func closeLoadedObjects(progInfo map[string]goelf.BpfData, loadedMaps map[string]goebpfmaps.BpfMap) {
+	for _, bpfData := range progInfo {
+		if bpfData.Program.ProgFD > 0 {
+			closeFD(bpfData.Program.ProgFD)
+		}
+	}
+	for _, bpfMap := range loadedMaps {
+		if bpfMap.MapFD > 0 {
+			closeFD(int(bpfMap.MapFD))
+		}
+	}
 }
 
 func (l *bpfClient) loadBPFProgram(fileName string, direction string,
@@ -1011,12 +1104,13 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	start := time.Now()
 	log().Info("Load the eBPF program")
 	// Load a new instance of the program
-	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
+	progInfo, loadedMaps, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
 		sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
 		log().Errorf("Load BPF failed err: %v", err)
+		unpinFailedLoad(podIdentifier, direction)
 		return nil, -1, err
 	}
 
@@ -1026,17 +1120,23 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	bpfData, ok := progInfo[pinPath]
 	if !ok {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoPinPath").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
+		unpinFailedLoad(podIdentifier, direction)
 		return nil, -1, fmt.Errorf("no program data found at pinPath %s for pod %s direction %s", pinPath, podIdentifier, direction)
 	}
 
 	progFD := bpfData.Program.ProgFD
 	if progFD == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-InvalidFD").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
+		unpinFailedLoad(podIdentifier, direction)
 		return nil, -1, fmt.Errorf("program loaded with invalid FD 0 for pod %s direction %s", podIdentifier, direction)
 	}
 
 	if len(bpfData.Maps) == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoMaps").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
+		unpinFailedLoad(podIdentifier, direction)
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
 	}
 
