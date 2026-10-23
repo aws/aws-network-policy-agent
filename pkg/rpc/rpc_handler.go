@@ -20,9 +20,11 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 
 	"github.com/aws/amazon-vpc-cni-k8s/rpc"
@@ -179,6 +181,15 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 		} else {
 			log().Info("Pod shares the eBPF firewall maps with other local pods. No Map update required..")
+		}
+	}
+
+	// Redirect the pod's DNS now if its identifier already has domain rules, so its first lookups reach the
+	// proxy. A failure does not fail pod setup: the reconciler adds the redirection for the pod later.
+	if s.proxymanager != nil && filter.HasAnyDomainRules(podIdentifier) {
+		pod := npatypes.Pod{NamespacedName: types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE}}
+		if redirectErr := s.proxymanager.AddDNSRedirectionRulesForPod(pod, podIdentifier); redirectErr != nil {
+			log().Errorf("Failed to redirect DNS for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, redirectErr)
 		}
 	}
 

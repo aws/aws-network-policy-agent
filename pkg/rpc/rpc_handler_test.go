@@ -23,8 +23,11 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	networking "k8s.io/api/networking/v1"
@@ -395,6 +398,62 @@ func TestDeletePodNp_DNSPolicy(t *testing.T) {
 			if tc.proxy != nil {
 				assert.Equal(t, tc.wantRemovals, tc.proxy.removedPods)
 			}
+		})
+	}
+}
+
+// addRecordingProxy records the pods whose DNS redirection is added; the addition fails with err when set.
+type addRecordingProxy struct {
+	proxymanager.ProxyManagerMock
+	addedPods []npatypes.Pod
+	err       error
+}
+
+func (p *addRecordingProxy) AddDNSRedirectionRulesForPod(pod npatypes.Pod, podIdentifier string) error {
+	p.addedPods = append(p.addedPods, pod)
+	return p.err
+}
+
+// A new pod of an identifier that already has domain rules gets its DNS redirected on CNI ADD, without
+// waiting for the reconciler. A failed redirection still lets the pod start.
+func TestEnforceNpToPod_RedirectsDNSWhenIdentifierHasDomainRules(t *testing.T) {
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	for _, tc := range []struct {
+		name           string
+		domainRules    bool
+		redirectErr    error
+		wantRedirected bool
+	}{
+		{name: "identifier with domain rules", domainRules: true, wantRedirected: true},
+		{name: "identifier without domain rules", domainRules: false},
+		{name: "failed redirection does not fail the pod", domainRules: true, redirectErr: errors.New("simulated nftables failure"), wantRedirected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.domainRules {
+				filter.SetPolicyEndpointDomains(podIdentifier, []fwrp.EbpfFirewallRules{{DomainName: "example.com.", Priority: utils.PE_PRIORITY*10 + 1}})
+				t.Cleanup(func() { filter.DeletePolicyEndpointDomains(podIdentifier) })
+			}
+			mockBpfClient := &ebpf.MockBpfClient{}
+			proxy := &addRecordingProxy{err: tc.redirectErr}
+			s := &server{
+				policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, proxy),
+				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient),
+				proxymanager:            proxy,
+			}
+
+			resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+				K8S_POD_NAME: pod.Name, K8S_POD_NAMESPACE: pod.Namespace, NETWORK_POLICY_MODE: "standard", InterfaceCount: 1,
+			})
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			if !tc.wantRedirected {
+				assert.Empty(t, proxy.addedPods)
+				return
+			}
+			require.Len(t, proxy.addedPods, 1)
+			assert.Equal(t, pod, proxy.addedPods[0].NamespacedName)
+			assert.Empty(t, proxy.addedPods[0].PodIP, "the CNI request has no pod IP; the proxy manager derives it")
 		})
 	}
 }

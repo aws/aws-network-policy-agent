@@ -321,14 +321,21 @@ func (pm *proxyManager) AddDNSRedirectionRulesForPod(pod npatypes.Pod, podIdenti
 		return nil
 	}
 
-	filter.SetPodIPToPodId(string(pod.PodIP), podIdentifier)
-	pm.podIPMap.Store(pod.NamespacedName.String(), string(pod.PodIP))
-
 	hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, 0, []string{ebpf.POD_VETH_PREFIX, ebpf.BRANCH_ENI_VETH_PREFIX})
 	if err != nil {
 		pm.log.Warnf("Failed to get veth name for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
 		return err
 	}
+
+	podIP := string(pod.PodIP)
+	if podIP == "" {
+		// A CNI ADD carries no pod IP; the CNI plugin has already routed the pod IP to its host veth
+		if podIP, err = podIPOfHostVeth(hostVethName); err != nil {
+			return err
+		}
+	}
+	filter.SetPodIPToPodId(podIP, podIdentifier)
+	pm.podIPMap.Store(pod.NamespacedName.String(), podIP)
 
 	// Add nftables rules for IPv4 and store rule references
 	rules, err := pm.addNftRulesForInterface(hostVethName)
@@ -340,6 +347,36 @@ func (pm *proxyManager) AddDNSRedirectionRulesForPod(pod npatypes.Pod, podIdenti
 	pm.log.Infof("Added nftables rules for pod %s with veth interface %s", pod.NamespacedName.String(), hostVethName)
 
 	return nil
+}
+
+// podIPOfHostVeth returns the pod IPv4 address the CNI plugin routes to hostVethName.
+func podIPOfHostVeth(hostVethName string) (string, error) {
+	link, err := netlink.LinkByName(hostVethName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get host veth %s: %w", hostVethName, err)
+	}
+	routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return "", fmt.Errorf("failed to list routes of host veth %s: %w", hostVethName, err)
+	}
+	podIP := hostRouteIP(routes)
+	if podIP == "" {
+		return "", fmt.Errorf("no /32 route to a pod IP on host veth %s", hostVethName)
+	}
+	return podIP, nil
+}
+
+// hostRouteIP returns the destination of the first /32 route, which is the pod IP on a pod host veth.
+func hostRouteIP(routes []netlink.Route) string {
+	for _, route := range routes {
+		if route.Dst == nil {
+			continue
+		}
+		if ones, bits := route.Dst.Mask.Size(); ones == 32 && bits == 32 {
+			return route.Dst.IP.String()
+		}
+	}
+	return ""
 }
 
 // addNftRulesForInterface adds nftables rules for DNS traffic redirection for a specific interface
