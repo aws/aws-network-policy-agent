@@ -9,6 +9,7 @@
 # ENABLE_STRICT_MODE: Optional, defaults to true. Runs the strict-mode suite (mutates aws-node to strict enforcement, so it runs last)
 # RUN_EBPF_TESTS: Optional, defaults to true. Runs the eBPF conntrack security suite (auto-skips on IPv6)
 # RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to true. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
+# RUN_DNS_POLICY_TESTS: Optional, defaults to false. Runs the DNS policy suite (needs IPv4, the ApplicationNetworkPolicy CRD, and egress to the internet)
 # RUN_RESTART_TESTS: Optional, defaults to false. Runs the agent restart suite (needs AL2023 or newer nodes since it runs aws-eks-na-cli on the host)
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
@@ -41,6 +42,7 @@ source "${DIR}/lib/tests.sh"
 : "${ENABLE_STRICT_MODE:="true"}"
 : "${RUN_EBPF_TESTS:="true"}"
 : "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="true"}"
+: "${RUN_DNS_POLICY_TESTS:="false"}"
 : "${RUN_RESTART_TESTS:="false"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
@@ -124,6 +126,10 @@ fi
 
 if [[ $RUN_CLUSTER_NETWORK_POLICY_TESTS == "true" ]]; then
     run_ginkgo_suite clusternetworkpolicy.test 30m
+fi
+
+if [[ $RUN_DNS_POLICY_TESTS == "true" ]]; then
+    run_ginkgo_suite dnspolicy.test 20m
 fi
 
 if [[ $RUN_RESTART_TESTS == "true" ]]; then
