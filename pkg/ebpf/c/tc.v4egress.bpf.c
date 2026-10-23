@@ -118,6 +118,8 @@ struct bpf_map_def_pvt SEC("maps") ipcache_map = {
 	.type = BPF_MAP_TYPE_LRU_HASH,
 	.key_size = sizeof(struct ipcache_key),
 	.value_size = sizeof(struct ipcache_value),
+	// TODO: same size as Auto Mode for now. LRU maps are preallocated, so this costs about 29 MiB per pod
+	// identifier even without domain rules; revisit the size or map type (LLD T7).
 	.max_entries = 65536,
 	.pinning = PIN_GLOBAL_NS,
 };
