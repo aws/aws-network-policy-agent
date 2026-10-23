@@ -20,7 +20,11 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
+	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 
 	"github.com/aws/amazon-vpc-cni-k8s/rpc"
@@ -44,6 +48,8 @@ const (
 type server struct {
 	policyReconciler        *controllers.PolicyEndpointsReconciler
 	clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler
+	// nil on IPv6 clusters, where DNS policy is not supported
+	proxymanager proxymanager.ProxyManager
 	rpc.UnimplementedNPBackendServer
 }
 
@@ -115,11 +121,12 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		log().Info("Active policies present against this pod and this is a new Pod to the local node, configuring firewall rules....")
 
 		if policiesAvailableInLocalCache {
-			//Derive Ingress and Egress Firewall Rules and Update the relevant eBPF maps
+			//Derive Ingress and Egress Firewall Rules, extract ip-based egress rules and update the relevant eBPF maps
 			ingressRules, egressRules, _ :=
 				s.policyReconciler.DeriveFireWallRulesPerPodIdentifier(podIdentifier, in.K8S_POD_NAMESPACE)
+			_, ipEgressRules := fwrp.SegregateDomainAndIPRules(egressRules)
 
-			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
+			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, ipEgressRules)
 			if err != nil {
 				log().Errorf("Network Policy map update(s) failed for podIdentifier: %s, error: %v", podIdentifier, err)
 				return nil, err
@@ -177,6 +184,15 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		}
 	}
 
+	// Redirect the pod's DNS now if its identifier already has domain rules, so its first lookups reach the
+	// proxy. A failure does not fail pod setup: the reconciler adds the redirection for the pod later.
+	if s.proxymanager != nil && filter.HasAnyDomainRules(podIdentifier) {
+		pod := npatypes.Pod{NamespacedName: types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE}}
+		if redirectErr := s.proxymanager.AddDNSRedirectionRulesForPod(pod, podIdentifier); redirectErr != nil {
+			log().Errorf("Failed to redirect DNS for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, redirectErr)
+		}
+	}
+
 	resp := rpc.EnforceNpReply{
 		Success: err == nil,
 	}
@@ -204,6 +220,15 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 		return &rpc.DeleteNpReply{Success: false}, err
 	}
 
+	if s.proxymanager != nil {
+		// TODO- ideally, we should be able to remove these IPTable rules from PEController logic, but the logic in controller is buggy is state management
+		err = s.proxymanager.ForceRemoveDNSRedirectionRulesForPod(pod, podIdentifier)
+		if err != nil {
+			log().Errorf("Failed to delete IPTable rule for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, err)
+			return &rpc.DeleteNpReply{Success: false}, err
+		}
+	}
+
 	resp := rpc.DeleteNpReply{
 		Success: true,
 	}
@@ -211,7 +236,7 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 }
 
 // RunRPCHandler handles request from gRPC
-func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler, npaSocketPath string) (<-chan error, error) {
+func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clusterPolicyReconciler *controllers.ClusterPolicyEndpointsReconciler, npaSocketPath string, proxyManager proxymanager.ProxyManager) (<-chan error, error) {
 	log().Infof("Serving RPC Handler on Unix socket: %s", npaSocketPath)
 
 	if _, err := os.Stat(npaSocketPath); err == nil {
@@ -228,7 +253,7 @@ func RunRPCHandler(policyReconciler *controllers.PolicyEndpointsReconciler, clus
 		return nil, errors.Wrap(err, "network policy agent: failed to listen on unix socket")
 	}
 	grpcServer := grpc.NewServer()
-	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler, clusterPolicyReconciler: clusterPolicyReconciler})
+	rpc.RegisterNPBackendServer(grpcServer, &server{policyReconciler: policyReconciler, clusterPolicyReconciler: clusterPolicyReconciler, proxymanager: proxyManager})
 	healthServer := health.NewServer()
 	// No need to ever change this to HealthCheckResponse_NOT_SERVING since it's a local service only
 	healthServer.SetServingStatus(grpcHealthServiceName, healthpb.HealthCheckResponse_SERVING)

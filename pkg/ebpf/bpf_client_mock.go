@@ -3,8 +3,10 @@ package ebpf
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -21,6 +23,7 @@ func NewMockBpfClient() *bpfClient {
 		hostMask:                        "/32",
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		deletedPods:                     new(sync.Map),
 	}
 }
 
@@ -30,7 +33,8 @@ type MockBpfClient struct {
 	// podConfirmedLive passed to the most recent AttacheBPFProbes call
 	LastAttachPodConfirmedLive bool
 
-	CallLog []string
+	WriteIPsForPodIdCount atomic.Uint32
+	CallLog               []string
 
 	// Injected errors for failure-path tests. Zero values preserve the
 	// original success-path behavior, so existing tests continue to pass.
@@ -207,6 +211,11 @@ func (m *MockBpfClient) GetNetworkPolicyMode() string {
 		return "standard"
 	}
 	return m.NetworkPolicyMode
+}
+
+func (m *MockBpfClient) WriteIPsForPod(podId string, ipsWithTTL []npatypes.IPWithTTL, l4Rules []npatypes.L4Rule) error {
+	m.WriteIPsForPodIdCount.Add(1)
+	return nil
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -38,6 +39,7 @@ var (
 	TC_EGRESS_MAP                   = "egress_map"
 	TC_CLUSTER_POLICY_INGRESS_MAP   = "cp_ingress_map"
 	TC_CLUSTER_POLICY_EGRESS_MAP    = "cp_egress_map"
+	TC_IPCACHE_MAP                  = "ipcache_map"
 	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
 
@@ -59,6 +61,7 @@ var NamespacedBPFMaps = []string{
 	TC_CLUSTER_POLICY_EGRESS_MAP,
 	TC_INGRESS_POD_STATE_MAP,
 	TC_EGRESS_POD_STATE_MAP,
+	TC_IPCACHE_MAP,
 }
 
 func log() logger.Logger {
@@ -300,6 +303,59 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	return key
 }
 
+// TODO- Revisit this duplicate function and consolidate with ComputeTrieValueForCPE
+func ComputeValueForL4Rules(l4Info []npatypes.L4Rule) []byte {
+	var startPort, endPort, protocol int
+
+	value := make([]byte, npatypes.L4RULE_VALUES_LENGTH)
+	startOffset := 0
+	maxEntries := npatypes.L4RULE_VALUES_LENGTH / 16 // Each entry is 16 bytes (4 uint32 fields)
+
+	if len(l4Info) == 0 {
+		// If no L4 rules, allow all protocols and ports
+		protocol = ANY_IP_PROTOCOL
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(PE_PRIORITY*10+1)) // priority
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
+		startOffset += 4
+		log().Debugf("L4 values (default allow all): protocol: %v startPort: %v endPort: %v", protocol, startPort, endPort)
+		return value
+	}
+
+	for i, l4Entry := range l4Info {
+		if i >= maxEntries {
+			log().Errorf("No.of unique port/protocol combinations supported for a single endpoint exceeded the supported maximum of %d", maxEntries)
+			return value
+		}
+		endPort = 0
+		startPort = 0
+
+		protocol = deriveProtocolValueFromL4Rule(l4Entry.L4PortProtocolInfo)
+		if l4Entry.L4PortProtocolInfo.Port != nil {
+			startPort = int(*l4Entry.L4PortProtocolInfo.Port)
+		}
+
+		if l4Entry.L4PortProtocolInfo.EndPort != nil {
+			endPort = int(*l4Entry.L4PortProtocolInfo.EndPort)
+		}
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v priority: %v", protocol, startPort, endPort, l4Entry.Priority)
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(l4Entry.Priority))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(startPort))
+		startOffset += 4
+		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(endPort))
+		startOffset += 4
+	}
+
+	return value
+}
+
 func ComputeTrieValueForCPE(l4Info []L4Rule) []byte {
 	var startPort, endPort, protocol int
 	value := make([]byte, ADMIN_TRIE_VALUE_LENGTH)
@@ -346,6 +402,29 @@ func ComputeTrieValueForCPE(l4Info []L4Rule) []byte {
 	}
 
 	return value
+}
+
+// TODO: Revisit this duplicate function and consolidate with deriveProtocolValueForCPE
+func deriveProtocolValueFromL4Rule(l4Info v1alpha1.Port) int {
+	protocol := ANY_IP_PROTOCOL
+
+	if l4Info.Protocol == nil {
+		return protocol //Protocol defaults to ANY_IP_PROTOCOL if not specified
+	}
+
+	switch *l4Info.Protocol {
+	case corev1.ProtocolTCP:
+		protocol = TCP_PROTOCOL_NUMBER
+	case corev1.ProtocolUDP:
+		protocol = UDP_PROTOCOL_NUMBER
+	case corev1.ProtocolSCTP:
+		protocol = SCTP_PROTOCOL_NUMBER
+	case CATCH_ALL_PROTOCOL:
+		protocol = ANY_IP_PROTOCOL
+	case DENY_ALL_PROTOCOL:
+		protocol = RESERVED_IP_PROTOCOL_NUMBER
+	}
+	return protocol
 }
 
 func IsL4RuleEmpty(p L4Rule) bool {

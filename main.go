@@ -19,13 +19,17 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"time"
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
+	dnsDiscovery "github.com/aws/aws-network-policy-agent/pkg/discovery"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
+	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
@@ -50,6 +54,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -64,6 +69,19 @@ func init() {
 
 	utilruntime.Must(policyk8sawsv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
+}
+
+// newHealthChecker creates a new custom health checker
+func newHealthChecker(proxyManager proxymanager.ProxyManager, log logger.Logger) healthz.Checker {
+	return func(req *http.Request) error {
+		if proxyManager != nil {
+			if err := proxyManager.HealthCheckDNSProxy(); err != nil {
+				log.Errorf("DNS proxy health check failed: %v", err)
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func main() {
@@ -106,6 +124,8 @@ func main() {
 
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	var clusterPolicyEndpointController *controllers.ClusterPolicyEndpointsReconciler
+	// proxyManager stays nil on IPv6 clusters, where DNS policy is not supported
+	var proxyManager proxymanager.ProxyManager
 	if ctrlConfig.EnableNetworkPolicy {
 		log.Info("Network Policy is enabled, registering controllers...")
 
@@ -118,11 +138,30 @@ func main() {
 
 		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
 
+		// When DNS policy is unavailable, proxyManager stays nil and the controllers skip domainName
+		// entries, as before DNS policy support. The rest of the policies are still enforced.
+		upstreamIP, dnsPolicyAvailable, dnsPolicyUnavailableReason := dnsDiscovery.ResolveDNSPolicyUpstream(ctrlConfig.EnableIPv6)
+		if !dnsPolicyAvailable {
+			log.Errorf("DNS policy is unavailable, domainName egress rules are ignored: %s", dnsPolicyUnavailableReason)
+		}
+
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
 		ebpfClient.ReAttachEbpfProbes()
 
-		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
+		if dnsPolicyAvailable {
+			filter.BpfClient = ebpfClient
+
+			listenerIP := net.ParseIP("169.254.20.10")
+			upstreamPort := 53
+			listenerPort := 50052
+			log.Infof("DNS policy is enabled: proxy upstream %s:%d, listener %s:%d, nftables chain priority %d",
+				upstreamIP, upstreamPort, listenerIP, listenerPort, proxymanager.NftChainPriority)
+
+			proxyManager = proxymanager.NewProxyManager(log, ebpfClient, upstreamIP, upstreamPort, listenerIP, listenerPort, npMode)
+		}
+
+		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6, proxyManager)
 
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
@@ -144,6 +183,13 @@ func main() {
 		if err := mgr.AddReadyzCheck("bpf-fs", ebpf.NewBpfFsReadinessCheck(ebpf.BPF_FS_ROOT)); err != nil {
 			log.Errorf("unable to set up bpf-fs readiness check %v", err)
 			os.Exit(1)
+		}
+
+		if proxyManager != nil {
+			if err := mgr.AddHealthzCheck("dns-proxy", newHealthChecker(proxyManager, log)); err != nil {
+				log.Errorf("unable to set up DNS proxy health check %v", err)
+				os.Exit(1)
+			}
 		}
 	} else {
 		log.Info("Network Policy is disabled, skip the controller registration")
@@ -174,7 +220,7 @@ func main() {
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
 	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
-	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath)
+	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath, proxyManager)
 	if err != nil {
 		log.Errorf("Failed to set up gRPC Handler %v", err)
 		os.Exit(1)

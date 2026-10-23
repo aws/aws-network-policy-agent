@@ -1115,7 +1115,7 @@ func TestAttacheBPFProbes_SkipsDeletedPod(t *testing.T) {
 	testBpfClient.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 
 	_, err := testBpfClient.AttacheBPFProbes(pod, utils.GetPodIdentifier(pod.Name, pod.Namespace), 1, false)
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, ErrPodDeleted)
 }
 
 func TestAttacheBPFProbes_ConfirmedLiveClearsDeletedMarker(t *testing.T) {
@@ -1395,7 +1395,7 @@ func TestBpfClient_AttacheBPFProbes_WaitsForInProgressDelete(t *testing.T) {
 	client.deletedPods.Store(utils.GetPodNamespacedName(pod.Name, pod.Namespace), time.Now())
 	client.podIdentifierLocks.Unlock(podIdentifier)
 
-	assert.NoError(t, receiveWithin(t, attachDone))
+	assert.ErrorIs(t, receiveWithin(t, attachDone), ErrPodDeleted)
 	assert.False(t, client.HasBPFContext(podIdentifier))
 }
 
@@ -1758,7 +1758,7 @@ func TestBpfClient_AttacheBPFProbes_DeletedPodSkipsWithoutWaitingForLock(t *test
 	done := make(chan bool)
 	go func() {
 		first, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, false)
-		done <- err == nil && !first
+		done <- errors.Is(err, ErrPodDeleted) && !first
 	}()
 	select {
 	case ok := <-done:

@@ -361,7 +361,7 @@ func newPEFixture(t *testing.T) *peFixture {
 		store:           map[string]policyk8sawsv1.PolicyEndpoint{},
 		sliceNamespaces: map[string]string{},
 	}
-	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
+	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false, nil)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).

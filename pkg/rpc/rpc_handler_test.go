@@ -23,7 +23,11 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/filter"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	"github.com/aws/aws-network-policy-agent/pkg/proxymanager"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	networking "k8s.io/api/networking/v1"
@@ -38,7 +42,7 @@ func TestRunRPCHandler_NoExistingSocket(t *testing.T) {
 	testSocketPath := "/tmp/test-rpc-handler.sock"
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, testSocketPath, nil)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }
@@ -54,14 +58,14 @@ func TestRunRPCHandler_StaleSocketCleanup(t *testing.T) {
 	file.Close()
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, testSocketPath, nil)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }
 
 func TestEnforceNpToPod_AttachesAsConfirmedLive(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
 
 	s := &server{
@@ -86,7 +90,7 @@ func TestEnforceNpToPod_AttachesAsConfirmedLive(t *testing.T) {
 
 func TestEnforceNpToPod_NilClusterPolicyReconciler_ReturnsError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -106,7 +110,7 @@ func TestEnforceNpToPod_NilClusterPolicyReconciler_ReturnsError(t *testing.T) {
 
 func TestEnforceNpToPod_NilClusterPolicyEBPFClient_ReturnsError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 	// clusterReconciler with nil eBPF client
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", nil)
 
@@ -166,7 +170,7 @@ func TestEnforceNpToPod_BothReconcilersNil_ReturnsSuccess(t *testing.T) {
 
 func TestEnforceNpToPod_NoPolicies_UpdatesBothPodStateMaps(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
 
 	s := &server{
@@ -205,7 +209,7 @@ func TestEnforceNpToPod_FailsClosedOnPodStateError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{
 		UpdatePodStateEbpfMapsErr: injected,
 	}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
 
 	s := &server{
@@ -244,7 +248,7 @@ func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient) *c
 		},
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pe).Build()
-	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false, nil)
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}})
 	require.NoError(t, err)
 	assert.True(t, reconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: policy cached")
@@ -325,7 +329,7 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 	mockBpfClient.Reset()
 	mockBpfClient.AttachFirstPodInPodIdentifier = true
 	s := &server{
-		policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false),
+		policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil),
 		clusterPolicyReconciler: clusterReconciler,
 	}
 	resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
@@ -343,4 +347,113 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 		{PodIdentifier: "nginx@default", MapKey: ebpf.POD_STATE_MAP_KEY}:                ebpf.DEFAULT_ALLOW,
 		{PodIdentifier: "nginx@default", MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}: ebpf.POLICIES_APPLIED,
 	}, mockBpfClient.PodStateByIdentifier)
+}
+
+// recordingProxy records the pods whose DNS redirection is force-removed; the removal fails with err when set.
+type recordingProxy struct {
+	proxymanager.ProxyManagerMock
+	removedPods []types.NamespacedName
+	err         error
+}
+
+func (p *recordingProxy) ForceRemoveDNSRedirectionRulesForPod(pod types.NamespacedName, podIdentifier string) error {
+	p.removedPods = append(p.removedPods, pod)
+	return p.err
+}
+
+func TestDeletePodNp_DNSPolicy(t *testing.T) {
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	removalErr := errors.New("simulated nftables failure")
+	for _, tc := range []struct {
+		name         string
+		proxy        *recordingProxy
+		wantRemovals []types.NamespacedName
+		wantErr      error
+	}{
+		{name: "DNS policy inactive", proxy: nil},
+		{name: "DNS policy active removes the pod's DNS redirection", proxy: &recordingProxy{}, wantRemovals: []types.NamespacedName{pod}},
+		{
+			name:         "a failed DNS redirection removal fails the request",
+			proxy:        &recordingProxy{err: removalErr},
+			wantRemovals: []types.NamespacedName{pod},
+			wantErr:      removalErr,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockBpfClient := &ebpf.MockBpfClient{}
+			s := &server{policyReconciler: controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)}
+			if tc.proxy != nil {
+				s.proxymanager = tc.proxy
+			}
+
+			resp, err := s.DeletePodNp(context.Background(), &rpc.DeleteNpRequest{K8S_POD_NAME: pod.Name, K8S_POD_NAMESPACE: pod.Namespace})
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+				assert.False(t, resp.Success)
+			} else {
+				assert.NoError(t, err)
+				assert.True(t, resp.Success)
+			}
+			assert.Equal(t, []string{"DeleteBPFProbes"}, mockBpfClient.CallLog)
+			if tc.proxy != nil {
+				assert.Equal(t, tc.wantRemovals, tc.proxy.removedPods)
+			}
+		})
+	}
+}
+
+// addRecordingProxy records the pods whose DNS redirection is added; the addition fails with err when set.
+type addRecordingProxy struct {
+	proxymanager.ProxyManagerMock
+	addedPods []npatypes.Pod
+	err       error
+}
+
+func (p *addRecordingProxy) AddDNSRedirectionRulesForPod(pod npatypes.Pod, podIdentifier string) error {
+	p.addedPods = append(p.addedPods, pod)
+	return p.err
+}
+
+// A new pod of an identifier that already has domain rules gets its DNS redirected on CNI ADD, without
+// waiting for the reconciler. A failed redirection still lets the pod start.
+func TestEnforceNpToPod_RedirectsDNSWhenIdentifierHasDomainRules(t *testing.T) {
+	pod := types.NamespacedName{Name: "nginx-abc123", Namespace: "default"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	for _, tc := range []struct {
+		name           string
+		domainRules    bool
+		redirectErr    error
+		wantRedirected bool
+	}{
+		{name: "identifier with domain rules", domainRules: true, wantRedirected: true},
+		{name: "identifier without domain rules", domainRules: false},
+		{name: "failed redirection does not fail the pod", domainRules: true, redirectErr: errors.New("simulated nftables failure"), wantRedirected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.domainRules {
+				filter.SetPolicyEndpointDomains(podIdentifier, []fwrp.EbpfFirewallRules{{DomainName: "example.com.", Priority: utils.PE_PRIORITY*10 + 1}})
+				t.Cleanup(func() { filter.DeletePolicyEndpointDomains(podIdentifier) })
+			}
+			mockBpfClient := &ebpf.MockBpfClient{}
+			proxy := &addRecordingProxy{err: tc.redirectErr}
+			s := &server{
+				policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, proxy),
+				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient),
+				proxymanager:            proxy,
+			}
+
+			resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+				K8S_POD_NAME: pod.Name, K8S_POD_NAMESPACE: pod.Namespace, NETWORK_POLICY_MODE: "standard", InterfaceCount: 1,
+			})
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			if !tc.wantRedirected {
+				assert.Empty(t, proxy.addedPods)
+				return
+			}
+			require.Len(t, proxy.addedPods, 1)
+			assert.Equal(t, pod, proxy.addedPods[0].NamespacedName)
+			assert.Empty(t, proxy.addedPods[0].PodIP, "the CNI request has no pod IP; the proxy manager derives it")
+		})
+	}
 }
