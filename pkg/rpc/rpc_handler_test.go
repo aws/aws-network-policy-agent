@@ -38,7 +38,7 @@ func TestRunRPCHandler_NoExistingSocket(t *testing.T) {
 	testSocketPath := "/tmp/test-rpc-handler.sock"
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, testSocketPath, false)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }
@@ -54,7 +54,7 @@ func TestRunRPCHandler_StaleSocketCleanup(t *testing.T) {
 	file.Close()
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, testSocketPath, false)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }

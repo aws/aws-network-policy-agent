@@ -102,14 +102,21 @@ func prometheusRegister() {
 	}
 }
 
+// directionSet records which traffic directions a policy isolates.
+type directionSet struct {
+	ingress bool
+	egress  bool
+}
+
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
-		k8sClient:        k8sClient,
-		nodeIP:           nodeIP,
-		ebpfClient:       ebpfClient,
-		enableIPv6:       enableIPv6,
-		trackerStartTime: time.Now(),
+		namespaceDefaultIsolationMap: map[string]map[string]directionSet{},
+		k8sClient:                    k8sClient,
+		nodeIP:                       nodeIP,
+		ebpfClient:                   ebpfClient,
+		enableIPv6:                   enableIPv6,
+		trackerStartTime:             time.Now(),
 	}
 
 	prometheusRegister()
@@ -138,6 +145,11 @@ type PolicyEndpointsReconciler struct {
 	policyEndpointSelectorMap sync.Map
 	// Maps a Network Policy to list of selected pod Identifiers
 	networkPolicyToPodIdentifierMap sync.Map
+	// Maps a namespace to the PolicyEndpoints in it whose podSelector is empty
+	// (they select every pod in the namespace) and the directions each one
+	// isolates. Consulted at CNI ADD, before the pod's own policies are known.
+	namespaceDefaultIsolationMap      map[string]map[string]directionSet
+	namespaceDefaultIsolationMapMutex sync.Mutex
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 	enableIPv6 bool
@@ -186,6 +198,7 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
 	r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
+	r.forgetNamespaceDefaultIsolation(req.NamespacedName.Namespace, req.NamespacedName.Name)
 
 	log().Infof("cleanUpPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
 
@@ -254,6 +267,8 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	parentNP := policyEndpoint.Spec.PolicyRef.Name
 	resourceNamespace := policyEndpoint.Namespace
 	resourceName := policyEndpoint.Name
+
+	r.recordNamespaceDefaultIsolation(policyEndpoint)
 
 	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
@@ -834,4 +849,61 @@ func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifi
 		}
 	}
 	return false
+}
+
+// selectsEveryPod reports whether a PolicyEndpoint's podSelector is empty,
+// which selects every pod in its namespace.
+func selectsEveryPod(policyEndpoint *policyk8sawsv1.PolicyEndpoint) bool {
+	selector := policyEndpoint.Spec.PodSelector
+	return selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0)
+}
+
+// recordNamespaceDefaultIsolation caches, per namespace, the PolicyEndpoints
+// with an empty podSelector and the directions they isolate.
+func (r *PolicyEndpointsReconciler) recordNamespaceDefaultIsolation(policyEndpoint *policyk8sawsv1.PolicyEndpoint) {
+	if !selectsEveryPod(policyEndpoint) {
+		r.forgetNamespaceDefaultIsolation(policyEndpoint.Namespace, policyEndpoint.Name)
+		return
+	}
+	directions := directionSet{}
+	for _, policyType := range policyEndpoint.Spec.PodIsolation {
+		switch policyType {
+		case networking.PolicyTypeIngress:
+			directions.ingress = true
+		case networking.PolicyTypeEgress:
+			directions.egress = true
+		}
+	}
+	r.namespaceDefaultIsolationMapMutex.Lock()
+	defer r.namespaceDefaultIsolationMapMutex.Unlock()
+	byName, ok := r.namespaceDefaultIsolationMap[policyEndpoint.Namespace]
+	if !ok {
+		byName = map[string]directionSet{}
+		r.namespaceDefaultIsolationMap[policyEndpoint.Namespace] = byName
+	}
+	byName[policyEndpoint.Name] = directions
+	log().Infof("Namespace %s default isolation from %s: ingress=%t egress=%t", policyEndpoint.Namespace, policyEndpoint.Name, directions.ingress, directions.egress)
+}
+
+func (r *PolicyEndpointsReconciler) forgetNamespaceDefaultIsolation(namespace, name string) {
+	r.namespaceDefaultIsolationMapMutex.Lock()
+	defer r.namespaceDefaultIsolationMapMutex.Unlock()
+	if byName, ok := r.namespaceDefaultIsolationMap[namespace]; ok {
+		delete(byName, name)
+		if len(byName) == 0 {
+			delete(r.namespaceDefaultIsolationMap, namespace)
+		}
+	}
+}
+
+// NamespaceDefaultIsolation reports the directions in which every pod of the
+// namespace is isolated by a policy with an empty podSelector.
+func (r *PolicyEndpointsReconciler) NamespaceDefaultIsolation(namespace string) (ingress bool, egress bool) {
+	r.namespaceDefaultIsolationMapMutex.Lock()
+	defer r.namespaceDefaultIsolationMapMutex.Unlock()
+	for _, directions := range r.namespaceDefaultIsolationMap[namespace] {
+		ingress = ingress || directions.ingress
+		egress = egress || directions.egress
+	}
+	return ingress, egress
 }
