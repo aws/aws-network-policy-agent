@@ -14,7 +14,7 @@ const (
 	flagLogFileMaxSize                 = "log-file-max-size"
 	flagLogFileMaxBackups              = "log-file-max-backups"
 	flagMaxConcurrentReconciles        = "max-concurrent-reconciles"
-	defaultLogLevel                    = "debug"
+	defaultLogLevel                    = "info"
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
 	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
