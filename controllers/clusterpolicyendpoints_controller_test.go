@@ -72,7 +72,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		).AnyTimes()
 
 		// Mock: Get for the CPE (used by cleanupClusterPolicyPod if it runs)
-		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
 				if cpObj, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint); ok {
 					*cpObj = *cpe
@@ -236,7 +236,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 				return nil
 			},
 		).AnyTimes()
-		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
 				if cpObj, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint); ok {
 					*cpObj = *currentCPE
@@ -352,7 +352,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
 				if cpObj, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint); ok {
 					*cpObj = *cpe
