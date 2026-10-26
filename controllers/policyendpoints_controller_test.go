@@ -55,7 +55,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
 			Name:      policyEndpoint.GetName(),
 			Namespace: policyEndpoint.GetNamespace(),
-		}, gomock.Any()).DoAndReturn(
+		}, gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 				*currentPE = policyEndpoint
 				return nil
@@ -63,7 +63,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		).AnyTimes()
 
 		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 				*list = policyendpoint.PolicyEndpointList{
 					Items: []policyendpoint.PolicyEndpoint{policyEndpoint},
 				}
@@ -101,7 +101,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
 			Name:      policyEndpoint.GetName(),
 			Namespace: policyEndpoint.GetNamespace(),
-		}, gomock.Any()).DoAndReturn(
+		}, gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 				*currentPE = policyEndpoint
 				return nil
@@ -109,7 +109,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		).MaxTimes(3)
 
 		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 				*list = policyendpoint.PolicyEndpointList{
 					Items: []policyendpoint.PolicyEndpoint{policyEndpoint},
 				}
@@ -140,14 +140,14 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 		mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{
 			Name:      policyEndpoint.GetName(),
 			Namespace: policyEndpoint.GetNamespace(),
-		}, gomock.Any()).DoAndReturn(
+		}, gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 				return apierrors.NewNotFound(schema.GroupResource{Group: networking.SchemeGroupVersion.Group, Resource: ""}, "")
 			},
 		).AnyTimes()
 
 		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+			func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 				*list = policyendpoint.PolicyEndpointList{}
 				return nil
 			},
@@ -240,7 +240,7 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 	// PodSelectorEndpoints to swap in a freshly-named non-local Job pod.
 	var currentPE policyendpoint.PolicyEndpoint
 
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*pe = currentPE
 			return nil
@@ -248,7 +248,7 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 	).AnyTimes()
 
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
 			return nil
 		},
@@ -315,14 +315,14 @@ func TestPolicyEndpointReconcile_StaleDeletedPodDoesNotBlockLiveProgramming(t *t
 	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
 
 	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{deletedEndpoint})
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*pe = currentPE
 			return nil
 		},
 	).AnyTimes()
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
 			return nil
 		},
@@ -363,14 +363,14 @@ func TestPolicyEndpointReconcile_LiveDeselectionPurgesMapsAndRestoresBaseline(t 
 	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
 
 	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{previousEndpoint})
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*pe = currentPE
 			return nil
 		},
 	).AnyTimes()
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
 			return nil
 		},
@@ -411,7 +411,7 @@ func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T)
 	mockBpf := &ebpf.MockBpfClient{}
 	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
 
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			switch key.Name {
 			case deletedPEName:
@@ -425,7 +425,7 @@ func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T)
 		},
 	).AnyTimes()
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{survivingPE}}
 			return nil
 		},
@@ -501,7 +501,7 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 			survivingPE := getPolicyEndpoint(policyName, namespace, tt.survivingPodEndpoints)
 			survivingPE.Name = survivingPEName
 
-			mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+			mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 				func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 					switch key.Name {
 					case deletedPEName:
@@ -515,7 +515,7 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 				},
 			).AnyTimes()
 			mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-				func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+				func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 					*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{survivingPE}}
 					return nil
 				},
@@ -575,14 +575,14 @@ func TestDeriveTargetPodsForParentNP_StaleIdentifierIsPurgedAndSelectedForCleanu
 	// The first reconcile records the prior local target in MAP2 and its identifier in
 	// MAP1/MAP3. The current PE then stops selecting that pod.
 	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{previousEndpoint})
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*pe = currentPE
 			return nil
 		},
 	).AnyTimes()
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
 			*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{currentPE}}
 			return nil
 		},
@@ -645,7 +645,7 @@ func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testi
 	mockClient := mock_client.NewMockClient(ctrl)
 	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
 
-	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			switch key {
 			case types.NamespacedName{Name: policyEndpointA.Name, Namespace: namespaceA}:
@@ -660,17 +660,15 @@ func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testi
 	).AnyTimes()
 
 	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...*client.ListOptions) error {
-			if len(opts) != 1 {
-				return fmt.Errorf("expected one ListOption, got %d", len(opts))
-			}
-			switch opts[0].Namespace {
+		func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
+			listOpts := (&client.ListOptions{}).ApplyOptions(opts)
+			switch listOpts.Namespace {
 			case namespaceA:
 				*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{policyEndpointA}}
 			case namespaceB:
 				*list = policyendpoint.PolicyEndpointList{Items: []policyendpoint.PolicyEndpoint{policyEndpointB}}
 			default:
-				return fmt.Errorf("unexpected PolicyEndpoint list namespace: %s", opts[0].Namespace)
+				return fmt.Errorf("unexpected PolicyEndpoint list namespace: %s", listOpts.Namespace)
 			}
 			return nil
 		},
@@ -1024,7 +1022,7 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
 		for _, item := range tt.policyendpointGetCall {
 			call := item
-			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any()).DoAndReturn(
+			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any(), gomock.Any()).DoAndReturn(
 				func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 					if call.pe != nil {
 						*currentPE = *call.pe
@@ -1766,7 +1764,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
 		for _, item := range tt.policyendpointGetCall {
 			call := item
-			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any()).DoAndReturn(
+			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any(), gomock.Any()).DoAndReturn(
 				func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 					if call.pe != nil {
 						*currentPE = *call.pe
@@ -1933,7 +1931,7 @@ func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
-	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*currentPE = remainingPolicy
 			return nil
@@ -1989,7 +1987,7 @@ func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
-	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*currentPE = remainingPolicy
 			return nil
@@ -2050,7 +2048,7 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
 
-	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any()).DoAndReturn(
+	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
 			*currentPE = remainingPolicy
 			return nil
