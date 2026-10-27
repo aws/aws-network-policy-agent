@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -246,4 +247,14 @@ func (m *MockBpfClient) contextErr(podIdentifier string) error {
 		return fmt.Errorf("no bpf context registered for pod %s", podIdentifier)
 	}
 	return nil
+}
+
+func (m *MockBpfClient) UpdateIPCache(podIdentifier string, answers []npatypes.IPWithTTL, encodedRules func() []byte) error {
+	m.CallLog = append(m.CallLog, "UpdateIPCache")
+	return m.contextErr(podIdentifier)
+}
+
+func (m *MockBpfClient) PruneIPCache(podIdentifier string, staleRules func() []byte) error {
+	m.CallLog = append(m.CallLog, "PruneIPCache")
+	return m.contextErr(podIdentifier)
 }

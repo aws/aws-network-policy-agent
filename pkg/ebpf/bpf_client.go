@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/google/go-cmp/cmp"
@@ -138,6 +139,8 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
 	HasBPFContext(podIdentifier string) bool
+	UpdateIPCache(podIdentifier string, answers []npatypes.IPWithTTL, encodedRules func() []byte) error
+	PruneIPCache(podIdentifier string, staleRules func() []byte) error
 }
 
 type BPFContext struct {
@@ -345,6 +348,8 @@ type bpfClient struct {
 	// each other while holding it. recoverBPFState and the attach helpers called by
 	// ReAttachEbpfProbes run without it, before the RPC server and controllers start.
 	podIdentifierLocks keyedMutex
+	// podIdentifier -> monotonic ns of the last sweep of its full IP cache
+	ipCacheSweeps sync.Map
 	// This is only updated and used for probe binary updates during initialization
 	interfaceNametoIngressPinPath map[string]string
 	// This is only updated and used for probe binary updates during initialization
@@ -957,6 +962,7 @@ func (l *bpfClient) deleteBPFProbes(podIdentifier string) error {
 	l.clusterPolicyIngressInMemoryMap.Delete(podIdentifier)
 	l.clusterPolicyEgressInMemoryMap.Delete(podIdentifier)
 	l.policyEndpointeBPFContext.Delete(podIdentifier)
+	l.ipCacheSweeps.Delete(podIdentifier)
 	return nil
 }
 
@@ -1000,6 +1006,12 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 		err = clusterPolicyMap.UnPinMap(clusterPolicyMapPinpath)
 		if err != nil {
 			log().Errorf("Failed to delete the cluster policy Map: %v", err)
+		}
+		// Only the IPv4 egress program has an IP cache.
+		if ipCache, ok := pgmInfo.Maps[utils.TC_IPCACHE_MAP]; ok {
+			if err := ipCache.UnPinMap(utils.BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + utils.TC_IPCACHE_MAP); err != nil {
+				log().Errorf("Failed to delete the IP cache Map: %v", err)
+			}
 		}
 	}
 	return nil

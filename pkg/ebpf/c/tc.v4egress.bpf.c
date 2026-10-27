@@ -136,8 +136,73 @@ struct bpf_map_def_pvt SEC("maps") egress_pod_state_map = {
     .pinning     = PIN_GLOBAL_NS,
 };
 
+// Allow rules learned from DNS answers, keyed by an answer IP (/32). rules[i] is valid until
+// expiry[i] (CLOCK_MONOTONIC ns), so domains that share an IP expire independently.
+struct ipcache_value {
+	struct lpm_cp_trie_val rules[MAX_PORT_PROTOCOL];
+	__u64 expiry[MAX_PORT_PROTOCOL];
+};
+
+struct bpf_map_def_pvt SEC("maps") ipcache_map = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct lpm_trie_key),
+	.value_size = sizeof(struct ipcache_value),
+	.max_entries = 8192,
+	.map_flags = BPF_F_NO_PREALLOC,
+	.pinning = PIN_GLOBAL_NS,
+};
+
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
+
+// Best (lowest) priority per tier of the unexpired DNS rules that match the flow.
+struct dns_priority {
+	__u32 admin;
+	__u32 network_policy;
+	__u32 baseline;
+};
+
+// A BPF-to-BPF call, not inlined: inlined, the verifier processed about 996k instructions for this
+// program (the limit is 1M), against about 135k as a call (kernel 6.12). Always returns 0, as a
+// subprogram has to return a value.
+static __attribute__((noinline)) int lookupDNSRules(struct keystruct *trie_key, struct conntrack_key *flow_key, struct dns_priority *prio) {
+	prio->admin = MAX_RULE_PRIORITY;
+	prio->network_policy = MAX_RULE_PRIORITY;
+	prio->baseline = MAX_RULE_PRIORITY;
+
+	struct ipcache_value *val = bpf_map_lookup_elem(&ipcache_map, trie_key);
+	if (val == NULL) {
+		return 0;
+	}
+	__u64 now = bpf_ktime_get_ns();
+
+	for (int i = 0; i < MAX_PORT_PROTOCOL; i++) {
+		struct lpm_cp_trie_val *rule = &val->rules[i];
+		if (val->expiry[i] < now) {
+			continue;
+		}
+		if ((rule->protocol == ANY_IP_PROTOCOL) || (rule->protocol == flow_key->protocol &&
+					((rule->start_port == ANY_PORT) || (flow_key->dest_port == rule->start_port) ||
+						(rule->end_port > 0 && flow_key->dest_port >= rule->start_port && flow_key->dest_port <= rule->end_port)))) {
+			__u32 priority = rule->priority/10;
+			if (priority <= ADMIN_TIER_PRIORITY_LIMIT) {
+				if (priority < prio->admin) {
+					prio->admin = priority;
+				}
+			} else if (priority == NETWORK_POLICY_TIER_PRIORITY) {
+				prio->network_policy = priority;
+			} else if (priority < prio->baseline) {
+				prio->baseline = priority;
+			}
+		}
+	}
+	return 0;
+}
+
+// DNS rules only allow, so on a priority tie they lose to Deny and win over Pass.
+static __always_inline int dnsRuleWins(__u32 dns_priority, __u32 tier_priority, int tier_action) {
+	return dns_priority < tier_priority || (dns_priority == tier_priority && tier_action == ACTION_PASS);
+}
 
 static __always_inline int evaluateClusterPolicyByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, __u32 *admin_tier_priority, __u8 *baseline_tier_action, __u32 *baseline_tier_priority) {
 
@@ -234,22 +299,29 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 		// 1. Lookup Cluster Network Policy
 		//    a. If matched, return the highest priority (lowest numerical value) action from admin tier
 		//       and the highest priority action (lowest numerical value > ADMIN_TIER_PRIORITY_LIMIT) from baseline tier
+		//    b. Lookup the DNS rules (ipcache_map) for the destination IP, per tier
 		// 2. Evaluate admin tier action:
-		//    a. Admin Tier rules from both the above
+		//    a. Admin Tier rules from 1a and 1b. DNS rules only allow: on a tie they lose to Deny and win over Pass
 		//       We enforce the lowest priority action. Deny always takes precedence on same priority.
 		//    b. If no match or admin tier action is PASS, proceed to check namespace scoped network policy
 		// 3. Lookup Namespace Scoped Network Policy
-		//    a. If a namespace scoped DNS rule is found from 1a, enforce that action. (DNS rules get priority at Namespace scoped level only if there are rules defined at Namespace scoped policy level)
+		//    a. If a namespace scoped DNS rule from 1b matches, allow
 		//    b. If not, evaluate namespace scoped network policy rules and return the action
 		//    c. If no match, proceed to evaluate based on baseline tier action from cluster policy
 		// 4. Evaluate baseline tier action
-		//    a. Baseline Tier rules are compared from 1a and 1b. IPCache rules are always action ALLOW since PASS will always have lowest priority (65536).
+		//    a. Baseline Tier rules are compared from 1a and 1b, as for the admin tier
 		//       We enforce the lowest priority action. Deny always takes precedence on same priority.
 		//    b. If no match found, proceed to default pod actions 
 		// 5. If baseline tier action is PASS, enforce default pod policy (DEFAULT_ALLOW or DEFAULT_DENY)
 
 		
 		int admin_tier_action = evaluateClusterPolicyByLookUp(trie_key, flow_key, &admin_tier_priority, &baseline_tier_action, &baseline_tier_priority);
+		struct dns_priority dns;
+		lookupDNSRules(&trie_key, &flow_key, &dns);
+		if (dns.admin <= ADMIN_TIER_PRIORITY_LIMIT && dnsRuleWins(dns.admin, admin_tier_priority, admin_tier_action)) {
+			admin_tier_priority = dns.admin;
+			admin_tier_action = ACTION_ALLOW;
+		}
 		if (admin_tier_priority <= ADMIN_TIER_PRIORITY_LIMIT) {
 			// Enforce the lowest priority action. Deny always takes precedence on same priority
 			effective_action = admin_tier_action;
@@ -274,6 +346,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 		}
 
 		int verdict = evaluateNamespacePolicyByLookUp(trie_key, flow_key, pod_state);
+		if (dns.network_policy == NETWORK_POLICY_TIER_PRIORITY) {
+			verdict = ACTION_ALLOW;
+		}
 
 		switch (verdict){
 		case ACTION_ALLOW:{
@@ -295,6 +370,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			// If no DNS rules and Baseline rules are defined (minimum_dns_cache_priority = baseline_tier_priority == MAX_RULE_PRIORITY), 
 			// effective action is baseline tier (PASS)
 			effective_action = baseline_tier_action;
+			if (dns.baseline < MAX_RULE_PRIORITY && dnsRuleWins(dns.baseline, baseline_tier_priority, baseline_tier_action)) {
+				effective_action = ACTION_ALLOW;
+			}
 			switch (effective_action) {
 			case ACTION_DENY: {
 				evt->verdict = 0;

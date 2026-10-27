@@ -40,6 +40,7 @@ var (
 	TC_CLUSTER_POLICY_EGRESS_MAP    = "cp_egress_map"
 	TC_INGRESS_POD_STATE_MAP        = "ingress_pod_state_map"
 	TC_EGRESS_POD_STATE_MAP         = "egress_pod_state_map"
+	TC_IPCACHE_MAP                  = "ipcache_map"
 
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
@@ -59,6 +60,7 @@ var NamespacedBPFMaps = []string{
 	TC_CLUSTER_POLICY_EGRESS_MAP,
 	TC_INGRESS_POD_STATE_MAP,
 	TC_EGRESS_POD_STATE_MAP,
+	TC_IPCACHE_MAP,
 }
 
 func log() logger.Logger {
