@@ -42,7 +42,9 @@ func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, networ
 	return stalePodIdentifiers
 }
 
-// DeletePolicyEndpointFromPodIdentifierMap removes a policy endpoint from a pod's identifier map
+// DeletePolicyEndpointFromPodIdentifierMap removes a policy endpoint from a pod's identifier map.
+// The stored list must stay sorted (see UpdatePodIdentifierToPolicyEndpointMap), so this
+// filters in order into a new slice; readers load the list without the mutex.
 func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpoint string) {
 	mutex.Lock()
 	defer mutex.Unlock()
@@ -66,6 +68,11 @@ func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *
 // UpdatePodIdentifierToPolicyEndpointMap adds the supplied policy endpoints to the ones
 // already tracked for this pod identifier, skipping duplicates. It never removes a name.
 //
+// The stored list is kept sorted so membership is a binary search. This function and
+// DeletePolicyEndpointFromPodIdentifierMap are its only writers and must both preserve the
+// order. The list is replaced rather than modified in place because readers (e.g. the CNI
+// RPC path) load it without the mutex.
+//
 // Append-only is deliberate. Replacing a parent's names would reclaim the names of
 // re-sliced PolicyEndpoints, but deciding which stored names belong to this parent means
 // deriving it with GetParentNPNameFromPEName, which is lossy above 58 chars -- so it can
@@ -83,16 +90,34 @@ func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *s
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	var policyEndpoints []string
+	var current []string
 	if currentSet, ok := podIdentifierMap.Load(podIdentifier); ok {
-		policyEndpoints = currentSet.([]string)
-		for _, policyEndpointResourceName := range policyEndpointList {
-			if !slices.Contains(policyEndpoints, policyEndpointResourceName) {
-				policyEndpoints = append(policyEndpoints, policyEndpointResourceName)
-			}
-		}
-	} else {
-		policyEndpoints = append(policyEndpoints, policyEndpointList...)
+		current = currentSet.([]string)
 	}
+	var missing []string
+	for _, policyEndpointResourceName := range policyEndpointList {
+		if _, tracked := slices.BinarySearch(current, policyEndpointResourceName); !tracked {
+			log().Debugf("Adding policy endpoint %s for podIdentifier %s", policyEndpointResourceName, podIdentifier)
+			missing = append(missing, policyEndpointResourceName)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	slices.Sort(missing)
+	missing = slices.Compact(missing)
+	policyEndpoints := make([]string, 0, len(current)+len(missing))
+	i, j := 0, 0
+	for i < len(current) && j < len(missing) {
+		if current[i] < missing[j] {
+			policyEndpoints = append(policyEndpoints, current[i])
+			i++
+		} else {
+			policyEndpoints = append(policyEndpoints, missing[j])
+			j++
+		}
+	}
+	policyEndpoints = append(policyEndpoints, current[i:]...)
+	policyEndpoints = append(policyEndpoints, missing[j:]...)
 	podIdentifierMap.Store(podIdentifier, policyEndpoints)
 }
