@@ -48,7 +48,10 @@ var _ = Describe("Conntrack Shortening for Denied Connections", func() {
 		By("Creating server pod (nginx)")
 		serverPod = &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "ct-server", Namespace: namespace,
+				// No "-": GetPodIdentifier drops a pod name's last "-" segment, so
+				// "ct-server" and "ct-client" would share one identifier, and on the
+				// same node one set of BPF programs and policy maps.
+				Name: "ctserver", Namespace: namespace,
 				Labels: map[string]string{"app": "ct-server"},
 			},
 			Spec: v1.PodSpec{
@@ -72,7 +75,7 @@ var _ = Describe("Conntrack Shortening for Denied Connections", func() {
 		By("Creating client pod (python, for connects from a fixed source port)")
 		clientPod = &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "ct-client", Namespace: namespace,
+				Name: "ctclient", Namespace: namespace,
 				Labels: map[string]string{"app": "ct-client"},
 			},
 			Spec: v1.PodSpec{
