@@ -27,11 +27,11 @@ destination node, in SYN_SENT for nf_conntrack_tcp_timeout_syn_sent (120 s by
 default). On kernels with the nf_conntrack kfuncs the agent loads the ct-deny
 ingress program, which shortens that entry to NPA_DENIED_CT_TIMEOUT_MS (1 s).
 
-The specs read the destination node's conntrack table from /proc/net/nf_conntrack
-right after a denied attempt from a fixed source port. Which ingress program the
-agent chose on that node comes from its log, so on a kernel without the kfuncs,
-or where the ct-deny program failed its startup probe, the denied spec skips
-rather than fails.
+The specs look the flow's entry up in the destination node's conntrack table
+(conntrack -G) right after a denied attempt from a fixed source port. Which
+ingress program the agent chose on that node comes from its log, so on a kernel
+without the kfuncs, or where the ct-deny program failed its startup probe, the
+denied spec skips rather than fails.
 */
 var _ = Describe("Conntrack Shortening for Denied Connections", func() {
 
@@ -285,37 +285,45 @@ type ctEntry struct {
 	line    string
 }
 
-// flowEntries returns the conntrack entries on the check pod's node whose
-// original direction is src:sport -> dst:dport over TCP. The check pod shares the
-// host's network namespace, so /proc/net/nf_conntrack is the node's table.
+// flowEntries returns the node's conntrack entry whose original direction is
+// src:sport -> dst:dport over TCP, if there is one. It looks the tuple up over
+// netlink with the host's conntrack tool (conntrack-tools, on the EKS AL2023
+// AMI) rather than reading /proc/net/nf_conntrack: that file is produced while
+// the table is walked, and a read can skip entries when others are inserted or
+// deleted meanwhile, which the specs' own probes and expiring entries cause.
 func flowEntries(checkPodName, src, dst string, sport, dport int) []ctEntry {
-	out, err := fw.PodManager.ExecInPod(namespace, checkPodName, []string{"cat", "/proc/net/nf_conntrack"})
-	Expect(err).ToNot(HaveOccurred(), "failed to read /proc/net/nf_conntrack")
+	cmd := fmt.Sprintf("chroot /host conntrack -G -p tcp -s %s -d %s --sport %d --dport %d 2>&1; echo rc=$?", src, dst, sport, dport)
+	out, err := fw.PodManager.ExecInPod(namespace, checkPodName, []string{"sh", "-c", cmd})
+	Expect(err).ToNot(HaveOccurred(), "failed to run conntrack -G")
+	if strings.Contains(out, "such conntrack doesn't exist") {
+		return nil
+	}
+	Expect(out).To(ContainSubstring("rc=0"), "conntrack -G failed: %s", out)
 
 	srcIP, dstIP := net.ParseIP(src), net.ParseIP(dst)
 	var entries []ctEntry
 	for _, line := range strings.Split(out, "\n") {
 		// For example:
-		//   ipv4 2 tcp 6 117 SYN_SENT src=10.0.1.5 dst=10.0.2.7 sport=34567 dport=80 [UNREPLIED] src=...
-		// Field 4 is the seconds left. The first src/dst/sport/dport are the original
+		//   tcp 6 117 SYN_SENT src=10.0.1.5 dst=10.0.2.7 sport=34567 dport=80 [UNREPLIED] src=...
+		// Field 2 is the seconds left. The first src/dst/sport/dport are the original
 		// direction, the second set the reply.
 		fields := strings.Fields(line)
-		if len(fields) < 5 || fields[2] != "tcp" {
+		if len(fields) < 4 || fields[0] != "tcp" {
 			continue
 		}
-		timeout, err := strconv.Atoi(fields[4])
+		timeout, err := strconv.Atoi(fields[2])
 		if err != nil {
 			continue
 		}
 		tuple := map[string]string{}
-		for _, f := range fields[5:] {
+		for _, f := range fields[3:] {
 			k, v, ok := strings.Cut(f, "=")
 			if _, seen := tuple[k]; ok && !seen {
 				tuple[k] = v
 			}
 		}
-		// Parsed rather than compared as strings: IPv6 addresses are printed in
-		// full here, but the pod IPs come compressed.
+		// Parsed rather than compared as strings, in case the tool prints IPv6
+		// addresses in another form than the pod IPs.
 		if net.ParseIP(tuple["src"]).Equal(srcIP) && net.ParseIP(tuple["dst"]).Equal(dstIP) &&
 			tuple["sport"] == strconv.Itoa(sport) && tuple["dport"] == strconv.Itoa(dport) {
 			entries = append(entries, ctEntry{timeout: timeout, line: line})
