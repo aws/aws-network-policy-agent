@@ -151,41 +151,63 @@ func BenchmarkPEReconcileReads(b *testing.B) {
 }
 
 // TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices guards the UnsafeDisableDeepCopy read
-// in deriveIngressAndEgressFirewallRules: the rule processor appends to L4Info, which must
-// not write into spare capacity of the Ports slice owned by the informer cache.
+// in deriveIngressAndEgressFirewallRules: the rule processor appends to L4Info and Except,
+// which must not write into spare capacity of the Ports/Except slices owned by the informer
+// cache.
 func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
-	tcp := corev1.ProtocolTCP
-	port80, port443 := int32(80), int32(443)
-	// Spare capacity, as left behind by JSON decoding into the cache.
-	cachedPorts := make([]policyk8sawsv1.Port, 1, 4)
-	cachedPorts[0] = policyk8sawsv1.Port{Protocol: &tcp, Port: &port80}
+	for _, direction := range []string{"ingress", "egress"} {
+		t.Run(direction, func(t *testing.T) {
+			tcp := corev1.ProtocolTCP
+			port80, port443 := int32(80), int32(443)
+			// Spare capacity, as left behind by JSON decoding into the cache.
+			cachedPorts := make([]policyk8sawsv1.Port, 1, 4)
+			cachedPorts[0] = policyk8sawsv1.Port{Protocol: &tcp, Port: &port80}
+			cachedExcept := make([]policyk8sawsv1.NetworkAddress, 1, 4)
+			cachedExcept[0] = "10.0.0.128/26"
 
-	pe := &policyk8sawsv1.PolicyEndpoint{}
-	pe.Name, pe.Namespace = "np-abcd", "ns"
-	pe.Spec.PolicyRef = policyk8sawsv1.PolicyReference{Name: "np", Namespace: "ns"}
-	pe.Spec.Ingress = []policyk8sawsv1.EndpointInfo{
-		{CIDR: "10.0.0.1", Ports: []policyk8sawsv1.Port{{Protocol: &tcp, Port: &port443}}},
-		// Same CIDR again: the rule processor merges by appending the earlier rule's L4Info onto this one.
-		{CIDR: "10.0.0.1", Ports: cachedPorts},
-	}
-	pe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{{HostIP: benchNodeIP, PodIP: "172.16.0.1", Name: "pod", Namespace: "ns"}}
+			endpoints := []policyk8sawsv1.EndpointInfo{
+				{CIDR: "10.0.0.0/24", Except: []policyk8sawsv1.NetworkAddress{"10.0.0.192/26"}, Ports: []policyk8sawsv1.Port{{Protocol: &tcp, Port: &port443}}},
+				// Same CIDR again: the rule processor merges by appending the earlier rule's
+				// L4Info and Except onto this one.
+				{CIDR: "10.0.0.0/24", Except: cachedExcept, Ports: cachedPorts},
+			}
+			pe := &policyk8sawsv1.PolicyEndpoint{}
+			pe.Name, pe.Namespace = "np-abcd", "ns"
+			pe.Spec.PolicyRef = policyk8sawsv1.PolicyReference{Name: "np", Namespace: "ns"}
+			if direction == "ingress" {
+				pe.Spec.Ingress = endpoints
+			} else {
+				pe.Spec.Egress = endpoints
+			}
+			pe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{{HostIP: benchNodeIP, PodIP: "172.16.0.1", Name: "pod", Namespace: "ns"}}
 
-	reader := &cacheReader{pes: map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{{Namespace: "ns", Name: pe.Name}: pe}}
-	r := NewPolicyEndpointsReconciler(reader, benchNodeIP, nil, false)
-	ctx := context.Background()
+			reader := &cacheReader{pes: map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{{Namespace: "ns", Name: pe.Name}: pe}}
+			r := NewPolicyEndpointsReconciler(reader, benchNodeIP, nil, false)
+			ctx := context.Background()
 
-	_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", pe.Name)
-	assert.NoError(t, err)
-	assert.Len(t, podIdentifiers, 1)
-	for podIdentifier := range podIdentifiers {
-		ingressRules, _, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", pe.Name, false)
-		assert.NoError(t, err)
-		_, err = fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(ingressRules)
-		assert.NoError(t, err)
-	}
+			_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", pe.Name)
+			assert.NoError(t, err)
+			assert.Len(t, podIdentifiers, 1)
+			for podIdentifier := range podIdentifiers {
+				ingressRules, egressRules, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", pe.Name, false)
+				assert.NoError(t, err)
+				rules := ingressRules
+				if direction == "egress" {
+					rules = egressRules
+				}
+				assert.Len(t, rules, 2)
+				_, err = fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(rules)
+				assert.NoError(t, err)
+			}
 
-	assert.Len(t, pe.Spec.Ingress[1].Ports, 1)
-	for i, p := range cachedPorts[:cap(cachedPorts)][1:] {
-		assert.Equal(t, policyk8sawsv1.Port{}, p, "cached Ports backing array overwritten at index %d", i+1)
+			assert.Len(t, endpoints[1].Ports, 1)
+			assert.Len(t, endpoints[1].Except, 1)
+			for i, p := range cachedPorts[:cap(cachedPorts)][1:] {
+				assert.Equal(t, policyk8sawsv1.Port{}, p, "cached Ports backing array overwritten at index %d", i+1)
+			}
+			for i, e := range cachedExcept[:cap(cachedExcept)][1:] {
+				assert.Equal(t, policyk8sawsv1.NetworkAddress(""), e, "cached Except backing array overwritten at index %d", i+1)
+			}
+		})
 	}
 }
