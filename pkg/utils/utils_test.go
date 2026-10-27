@@ -901,3 +901,27 @@ func TestKtimeGetNs(t *testing.T) {
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, t2, t1, "KtimeGetNs must be monotonically non-decreasing")
 }
+
+func TestConvByteArrayToIP(t *testing.T) {
+	// These values specifically exercise IPv4 addresses whose final octets are zero.
+	tests := []struct {
+		name string
+		ip   uint32
+		want string
+	}{
+		{name: "ordinary address", ip: 0x1604960a, want: "10.150.4.22"},
+		{name: "one trailing zero octet", ip: 0x0004960a, want: "10.150.4.0"},
+		{name: "two trailing zero octets", ip: 0x0000960a, want: "10.150.0.0"},
+		{name: "three trailing zero octets", ip: 0x0000000a, want: "10.0.0.0"},
+		{name: "all zero octets", ip: 0x00000000, want: "0.0.0.0"},
+		{name: "zero octet in the middle", ip: 0x1604000a, want: "10.0.4.22"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ConvByteArrayToIP(tt.ip); got != tt.want {
+				t.Errorf("ConvByteArrayToIP(%#08x) = %q, want %q", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
