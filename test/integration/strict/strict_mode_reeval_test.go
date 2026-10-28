@@ -735,25 +735,29 @@ func persistentHTTPResponseCount(podName string) (int, error) {
 // non-CNP byte and pass even on a datapath that never fixed the CNP collision.
 //
 // It reads egress_pod_state_map key 1 (CLUSTER_NETWORK_POLICY_KEY) for the client pod by
-// resolving the pod -> node -> map ID (via `aws-eks-na-cli ebpf loaded-ebpfdata`) ->
-// value (via `bpftool map dump id`). Egress because the client's outbound traffic is what
-// these scenarios govern.
+// resolving the pod -> node -> map ID (via `<cli> ebpf loaded-ebpfdata`) -> value (via
+// `<cli> ebpf dump-maps <mapID>`), where <cli> is the node-agent CLI for the cluster's IP
+// family. Egress because the client's outbound traffic is what these scenarios govern.
+// The privileged check pod is created once and only the two reads repeat, so a slow pod
+// start or delete can't use up the polling window.
 func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
 	nodeName := clientPod.Spec.NodeName
 	Expect(nodeName).ToNot(BeEmpty(), "client pod must be scheduled before reading its datapath state")
 	podIdentifier := pkgutils.GetPodIdentifier(clientPod.Name, clientPod.Namespace)
 	mapKey := podIdentifier + "/egress_pod_state_map"
+	cli := naCLIPath(fw.Options.IpFamily)
+
+	checkPod, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, utils.BuildBPFCheckPod(namespace, nodeName), 1*time.Minute)
+	Expect(err).ToNot(HaveOccurred(), "BPF check pod should start on the client pod's node")
+	defer func() {
+		delCtx, cancel := cleanupCtx()
+		defer cancel()
+		fw.PodManager.DeleteAndWaitTillPodIsDeleted(delCtx, checkPod)
+	}()
 
 	Eventually(func() (uint8, error) {
-		checkPod := utils.BuildBPFCheckPod(namespace, nodeName)
-		checkPod, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, checkPod, 1*time.Minute)
-		if err != nil {
-			return 0, err
-		}
-		defer fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
-
 		loaded, err := fw.PodManager.ExecInPod(namespace, checkPod.Name,
-			[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "loaded-ebpfdata"})
+			[]string{"chroot", "/host", cli, "ebpf", "loaded-ebpfdata"})
 		if err != nil {
 			return 0, err
 		}
@@ -767,13 +771,23 @@ func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
 		}
 
 		dump, err := fw.PodManager.ExecInPod(namespace, checkPod.Name,
-			[]string{"chroot", "/host", "/opt/cni/bin/aws-eks-na-cli", "ebpf", "dump-maps", strconv.Itoa(mapID)})
+			[]string{"chroot", "/host", cli, "ebpf", "dump-maps", strconv.Itoa(mapID)})
 		if err != nil {
 			return 0, err
 		}
 		return utils.ParsePodStateFromMapDump(dump, utils.ClusterPolicyPodStateKey)
 	}, utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal(utils.PodStatePoliciesApplied),
 		"client pod's cluster-policy tier must be programmed as POLICIES_APPLIED before traffic starts")
+}
+
+// naCLIPath returns the host path of the node-agent CLI for the cluster's IP family. NPA
+// installs only one per node (pkg/ebpf/bpf_client.go): aws-eks-na-cli on IPv4 clusters and
+// aws-eks-na-cli-v6 on IPv6 clusters.
+func naCLIPath(ipFamily string) string {
+	if ipFamily == "IPv6" {
+		return "/opt/cni/bin/aws-eks-na-cli-v6"
+	}
+	return "/opt/cni/bin/aws-eks-na-cli"
 }
 
 // Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value
