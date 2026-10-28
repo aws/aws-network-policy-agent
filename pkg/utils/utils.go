@@ -275,13 +275,20 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
 
+	var found []string
 	for _, prefix := range interfacePrefixes {
 		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
 		if _, err := getHostLinkByName(interfaceName); err == nil {
-			return interfaceName, nil
+			found = append(found, interfaceName)
 		} else {
 			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
 		}
+	}
+	if len(found) == 1 {
+		return found[0], nil
+	}
+	if len(found) > 1 {
+		return "", fmt.Errorf("multiple host interfaces %v for pod %s/%s", found, podNamespace, podName)
 	}
 
 	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
