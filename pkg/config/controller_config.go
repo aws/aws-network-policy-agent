@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
@@ -28,6 +29,8 @@ const (
 	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
 	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
 	flagEnableProfiling                = "enable-profiling"
+	flagPolicyEventLogsScope           = "policy-event-logs-scope"
+	defaultPolicyEventLogsScope        = "all"
 )
 
 // ControllerConfig contains the controller configuration
@@ -58,6 +61,8 @@ type ControllerConfig struct {
 	RuntimeConfig RuntimeConfig
 	// Configuration for enabling profiling
 	EnableProfiling bool
+	// PolicyEventLogsScope is the raw --policy-event-logs-scope value ("all" or "deny")
+	PolicyEventLogsScope string
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -76,6 +81,10 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
 	fs.BoolVar(&cfg.EnableNetworkPolicy, flagEnableNetworkPolicy, false, "If enabled, Network Policy agent will initialize BPF maps and start reconciler")
 	fs.BoolVar(&cfg.EnableProfiling, flagEnableProfiling, false, "If enabled, Network Policy agent will enable profiling")
+	fs.StringVar(&cfg.PolicyEventLogsScope, flagPolicyEventLogsScope, defaultPolicyEventLogsScope, ""+
+		"Which policy verdicts produce policy events: \"all\" (ACCEPT and DENY) or \"deny\" (DENY only; ACCEPT events "+
+		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Invalid values fall back to \"all\". "+
+		"Requires enable-policy-event-logs=true.")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
@@ -91,4 +100,19 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
 	}
 	return nil
+}
+
+// ParsePolicyEventLogsScope returns whether --policy-event-logs-scope selects
+// DENY-only events. "all" and "" select both verdicts; "deny" selects DENY
+// only (case-insensitive, surrounding spaces ignored). Any other value returns
+// valid=false and falls back to both verdicts, so a typo never hides events.
+func ParsePolicyEventLogsScope(raw string) (denyOnly bool, valid bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "all":
+		return false, true
+	case "deny":
+		return true, true
+	default:
+		return false, false
+	}
 }
