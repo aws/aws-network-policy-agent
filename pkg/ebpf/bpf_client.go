@@ -172,6 +172,8 @@ type BPFContext struct {
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
+	var policyEventsDropCountMap goebpfmaps.BpfMap
+	var policyEventsDropCountMapPresent bool
 
 	ebpfClient := &bpfClient{
 		// Maps PolicyEndpoint resource to it's eBPF context
@@ -303,6 +305,10 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			if mapName == AWS_EVENTS_MAP {
 				eventBufferFD = int(mapInfo.MapFD)
 			}
+			if mapName == AWS_EVENTS_DROP_COUNT_MAP {
+				policyEventsDropCountMap = mapInfo
+				policyEventsDropCountMapPresent = true
+			}
 		}
 	}
 
@@ -334,6 +340,15 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
+		// Export the kernel's failed-DENY-write counter. Read only at /metrics
+		// scrape time on the existing controller-runtime registry; no new
+		// listener. Non-fatal if the map is absent.
+		dropMap, haveDropMap := ebpfClient.resolveGlobalMap(policyEventsDropCountMap, policyEventsDropCountMapPresent, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+		if haveDropMap {
+			registerRingbufDropMetrics(dropMap)
+		} else {
+			log().Warn("Policy events drop count map not found; ring buffer DENY drop metric disabled")
+		}
 		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
@@ -434,6 +449,24 @@ type bpfClient struct {
 	deletedPods *sync.Map
 }
 
+// resolveGlobalMap prefers the map from a fresh events-binary load, else the
+// one recoverBPFState stored under pinPath. A stored value that is not a
+// goebpfmaps.BpfMap is treated as not found.
+func (l *bpfClient) resolveGlobalMap(fresh goebpfmaps.BpfMap, freshOK bool, pinPath string) (goebpfmaps.BpfMap, bool) {
+	if freshOK {
+		return fresh, true
+	}
+	if l.globalMaps == nil {
+		return goebpfmaps.BpfMap{}, false
+	}
+	v, ok := l.globalMaps.Load(pinPath)
+	if !ok {
+		return goebpfmaps.BpfMap{}, false
+	}
+	m, ok := v.(goebpfmaps.BpfMap)
+	return m, ok
+}
+
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
 	updateIngressProbe, updateEgressProbe, updateEventsProbe := false, false, false
 	var existingProbePath string
@@ -525,6 +558,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				isPolicyEventsMapPresent = true
 				eventsMapFD = int(globalMap.MapFD)
 				log().Infof("Policy event Map is already present on the node Recovered FD: %d", eventsMapFD)
+			}
+			if globalMapName == POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH {
+				// Store so the DENY drop counter can be exported on warm restart.
+				globalMaps.Store(globalMapName, globalMap)
+				log().Info("Policy events drop count map recovered")
 			}
 		}
 	}
