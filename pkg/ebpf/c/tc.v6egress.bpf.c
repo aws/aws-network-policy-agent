@@ -139,6 +139,27 @@ struct bpf_map_def_pvt SEC("maps") egress_pod_state_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 struct bpf_map_def_pvt policy_events;
 
+// policy_events_drop_count_map: failed bpf_ringbuf_output for DENY events.
+// key 0 = ingress, key 1 = egress; per-CPU u64, summed by userspace.
+// Defined (and pinned globally) by the events program; declared here like
+// policy_events so every TC program shares that one map.
+struct bpf_map_def_pvt policy_events_drop_count_map;
+
+#define POLICY_EVENTS_DROP_KEY_INGRESS 0
+#define POLICY_EVENTS_DROP_KEY_EGRESS  1
+
+// emit_deny_event always emits the DENY record; on ring buffer failure it
+// counts the drop per direction. A missing map entry fails open (no count).
+static __always_inline void emit_deny_event(struct data_t *evt) {
+	if (bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0) != 0) {
+		__u32 key = evt->is_egress ? POLICY_EVENTS_DROP_KEY_EGRESS : POLICY_EVENTS_DROP_KEY_INGRESS;
+		__u64 *cnt = bpf_map_lookup_elem(&policy_events_drop_count_map, &key);
+		if (cnt) {
+			*cnt += 1; // per-CPU slot: no atomic needed
+		}
+	}
+}
+
 static __always_inline int evaluateClusterPolicyByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, __u32 *admin_tier_priority, __u8 *baseline_tier_action, __u32 *baseline_tier_priority) {
 
 	__u32 admin_tier_action = ACTION_PASS;
@@ -255,7 +276,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			case ACTION_DENY: {
 				evt->verdict = 0;
 				evt->tier = ADMIN_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				emit_deny_event(evt);
 				return BPF_DROP;
 			}
 			case ACTION_ALLOW: {
@@ -285,7 +306,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 		case ACTION_DENY:{
 			evt->verdict = 0;
 			evt->tier = NETWORK_POLICY_TIER;
-			bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+			emit_deny_event(evt);
 			return BPF_DROP;
 		}
 		case ACTION_PASS:
@@ -293,7 +314,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			case ACTION_DENY: {
 				evt->verdict = 0;
 				evt->tier = BASELINE_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				emit_deny_event(evt);
 				return BPF_DROP;
 			}
 			case ACTION_ALLOW: {
@@ -317,7 +338,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 				case DEFAULT_DENY: {
 					evt->verdict = 0;
 					evt->tier = DEFAULT_TIER;
-					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+					emit_deny_event(evt);
 					return BPF_DROP;
 					}
 				}
@@ -436,7 +457,7 @@ int handle_egress(struct __sk_buff *skb)
 		if ((pst == NULL) || (clusterpolicy_pst == NULL)) {
 			evt.verdict = 0;
 			evt.tier = ERROR_TIER;
-			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+			emit_deny_event(&evt);
 			return BPF_DROP;
 		}
 		
