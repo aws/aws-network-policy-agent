@@ -266,7 +266,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 				evt->verdict = 1;
 				evt->tier = ADMIN_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				if (policy_scope_allows_accept()) {
+					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				}
 				return BPF_OK;
 			}
 			default:
@@ -282,7 +284,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0); // 0 - BPF_ANY
 			evt->verdict = 1;
 			evt->tier = NETWORK_POLICY_TIER;
-			bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+			if (policy_scope_allows_accept()) {
+				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+			}
 			return BPF_OK;
 		}
 		case ACTION_DENY:{
@@ -308,7 +312,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 				evt->verdict = 1;
 				evt->tier = BASELINE_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				if (policy_scope_allows_accept()) {
+					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				}
 				return BPF_OK;
 			}
 			case ACTION_PASS: {
@@ -318,7 +324,9 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 					bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 					evt->verdict = 1;
 					evt->tier = DEFAULT_TIER;
-					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+					if (policy_scope_allows_accept()) {
+						bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+					}
 					return BPF_OK;
 					}
 				case DEFAULT_DENY: {
