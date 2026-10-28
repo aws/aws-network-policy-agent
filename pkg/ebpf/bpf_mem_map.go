@@ -20,6 +20,10 @@ type InMemoryBpfMap struct {
 	mutex sync.RWMutex
 }
 
+// newInMemoryBpfMap is the constructor shadowMapForLocked uses. It is a variable so
+// tests can build shadow maps without a kernel.
+var newInMemoryBpfMap = NewInMemoryBpfMap
+
 // NewInMemoryBpfMap creates a new in-memory representation of an eBPF map
 // and optionally loads the initial state from the kernel
 func NewInMemoryBpfMap(bpfMap *maps.BpfMap) (*InMemoryBpfMap, error) {
