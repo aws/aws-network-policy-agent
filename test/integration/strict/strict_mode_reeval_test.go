@@ -290,10 +290,10 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			})
 
 			By("verifying the decoy ClusterNetworkPolicy is programmed into the datapath", func() {
-				// Without this, the stream could start while the decoy CNP's pod-state
-				// is still DEFAULT_ALLOW; the flow would then be cached in a non-CNP
-				// state and the test would pass even on a datapath that never fixed the
-				// CNP-involved collision this scenario targets.
+				// The probe above is satisfied by the NetworkPolicy alone, so it does not
+				// prove the decoy CNP is programmed. Without this, the stream could start
+				// while the decoy CNP's pod-state is still DEFAULT_ALLOW, and the scenario
+				// would never exercise re-evaluation with the CNP tier applied.
 				waitForClusterPolicyProgrammed(clientPod)
 			})
 
@@ -625,8 +625,8 @@ var _ = Describe("Strict Mode Re-evaluation Test Cases", func() {
 			By("verifying the ClusterNetworkPolicy is programmed into the datapath", func() {
 				// The successful probe above is satisfied by the NetworkPolicy tier
 				// alone, so it does not prove the CNP's pod-state is POLICIES_APPLIED.
-				// Gate on the actual datapath state so both tiers are confirmed applied
-				// before the stream starts and both are removed at once.
+				// Gate on the CNP's actual datapath state (the probe already covers the
+				// NetworkPolicy tier) so both are applied before they're removed at once.
 				waitForClusterPolicyProgrammed(clientPod)
 			})
 
@@ -731,13 +731,13 @@ func persistentHTTPResponseCount(podName string) (int, error) {
 // Kubernetes API. CreateClusterNetworkPolicy only performs the API write, and a probe on
 // the server port can be satisfied by the NetworkPolicy tier alone -- so without this
 // gate a scenario could start traffic while the CNP's pod-state entry is still
-// DEFAULT_ALLOW, making the subsequent NetworkPolicy removal re-evaluate through a
-// non-CNP byte and pass even on a datapath that never fixed the CNP collision.
+// DEFAULT_ALLOW, and the flow would be cached without the CNP tier ever being applied.
 //
 // It reads egress_pod_state_map key 1 (CLUSTER_NETWORK_POLICY_KEY) for the client pod by
-// resolving the pod -> node -> map ID (via `<cli> ebpf loaded-ebpfdata`) -> value (via
-// `<cli> ebpf dump-maps <mapID>`), where <cli> is the node-agent CLI for the cluster's IP
-// family. Egress because the client's outbound traffic is what these scenarios govern.
+// resolving the pod -> node -> map ID (via `aws-eks-na-cli ebpf loaded-ebpfdata`) -> value
+// (via `aws-eks-na-cli ebpf dump-maps <mapID>`). On IPv6 nodes that host binary is the v6
+// build (see naCLIPath). Egress because the client's outbound traffic is what these
+// scenarios govern.
 // The privileged check pod is created once and only the two reads repeat, so a slow pod
 // start or delete can't use up the polling window.
 func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
@@ -745,7 +745,7 @@ func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
 	Expect(nodeName).ToNot(BeEmpty(), "client pod must be scheduled before reading its datapath state")
 	podIdentifier := pkgutils.GetPodIdentifier(clientPod.Name, clientPod.Namespace)
 	mapKey := podIdentifier + "/egress_pod_state_map"
-	cli := naCLIPath(fw.Options.IpFamily)
+	cli := naCLIPath
 
 	checkPod, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, utils.BuildBPFCheckPod(namespace, nodeName), 1*time.Minute)
 	Expect(err).ToNot(HaveOccurred(), "BPF check pod should start on the client pod's node")
@@ -780,15 +780,10 @@ func waitForClusterPolicyProgrammed(clientPod *v1.Pod) {
 		"client pod's cluster-policy tier must be programmed as POLICIES_APPLIED before traffic starts")
 }
 
-// naCLIPath returns the host path of the node-agent CLI for the cluster's IP family. NPA
-// installs only one per node (pkg/ebpf/bpf_client.go): aws-eks-na-cli on IPv4 clusters and
-// aws-eks-na-cli-v6 on IPv6 clusters.
-func naCLIPath(ipFamily string) string {
-	if ipFamily == "IPv6" {
-		return "/opt/cni/bin/aws-eks-na-cli-v6"
-	}
-	return "/opt/cni/bin/aws-eks-na-cli"
-}
+// naCLIPath is the host path of the node-agent CLI. NPA picks the v4 or v6 build by IP
+// family (pkg/ebpf/bpf_client.go), but always installs it on the host as aws-eks-na-cli
+// (pkg/utils/cp/cp.go InstallBPFBinaries), so the path is the same on both families.
+const naCLIPath = "/opt/cni/bin/aws-eks-na-cli"
 
 // Polls the persistent stream's response count until two consecutive reads (one utils.ProbeInterval apart) agree -> then returns that value
 func waitForPersistentHTTPResponseCountToStabilize(podName string) int {
