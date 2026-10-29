@@ -21,12 +21,20 @@ func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod,
 	return podsToBeCleanedUp
 }
 
-// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy
-func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, resourceName string, targetPodIdentifiers []string) []string {
+// GetNetworkPolicyIdentifier returns an injective in-memory key for a namespaced
+// NetworkPolicy. "/" cannot appear in either Kubernetes name component.
+func GetNetworkPolicyIdentifier(policyName, policyNamespace string) string {
+	return policyName + "/" + policyNamespace
+}
+
+// DeriveStalePodIdentifiers finds pod identifiers that are no longer selected by the policy.
+// targetPodIdentifiers covers every identifier the policy selects cluster-wide, so it can be
+// large under churn.
+func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, networkPolicyIdentifier string, targetPodIdentifiers map[string]bool) []string {
 	var stalePodIdentifiers []string
-	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(GetParentNPNameFromPEName(resourceName)); ok {
+	if currentPodIdentifiers, ok := networkPolicyToPodIdentifierMap.Load(networkPolicyIdentifier); ok {
 		for _, podIdentifier := range currentPodIdentifiers.([]string) {
-			if !slices.Contains(targetPodIdentifiers, podIdentifier) {
+			if !targetPodIdentifiers[podIdentifier] {
 				stalePodIdentifiers = append(stalePodIdentifiers, podIdentifier)
 			}
 		}
@@ -55,7 +63,22 @@ func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *
 	}
 }
 
-// UpdatePodIdentifierToPolicyEndpointMap adds policy endpoints to a pod's identifier map
+// UpdatePodIdentifierToPolicyEndpointMap adds the supplied policy endpoints to the ones
+// already tracked for this pod identifier, skipping duplicates. It never removes a name.
+//
+// Append-only is deliberate. Replacing a parent's names would reclaim the names of
+// re-sliced PolicyEndpoints, but deciding which stored names belong to this parent means
+// deriving it with GetParentNPNameFromPEName, which is lossy above 58 chars -- so it can
+// evict another policy's names and stop its rules being assembled, dropping a Deny on the
+// cluster path. Mis-tracking costs enforcement; under-tracking costs memory.
+//
+// The cost: a name that leaves the live slice set while the identifier is still selected is
+// never pruned, so the key survives. Bounded by resharding, not pod churn. See the skipped
+// subtests in controllers/{cluster,}policyendpoints_slice_test.go.
+//
+// Fix: store the parent per entry (podIdentifier -> []struct{ParentNP, Name string}) so both
+// eviction and pruning compare a recorded Spec.PolicyRef.Name. Needs the parent on the
+// delete path too, where the object is gone.
 func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpointList []string) {
 	mutex.Lock()
 	defer mutex.Unlock()
