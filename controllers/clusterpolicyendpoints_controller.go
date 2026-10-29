@@ -142,8 +142,10 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 		return err
 	}
 
-	// Remove the deleted CPE from the identifiers it tracked on this node. Derive removes only
-	// the parent's remaining CPEs, and later reconciles read these entries.
+	// Remove the deleted CPE's name from the identifiers whose local pods it tracked. Derive
+	// prunes names only for identifiers that went stale, i.e. ones the parent no longer
+	// selects anywhere, so an identifier still selected via a sibling CPE keeps this name.
+	// Later reconciles read these entries, so the departing name has to be scrubbed here.
 	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
 		for _, pod := range existingPods.([]npatypes.Pod) {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -464,8 +466,24 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	}
 	currentPods = lo.Uniq(currentPods)
 
+	// Prune by exact ClusterPolicyEndpoint name rather than by derived parent CNP name.
+	// GetParentNPNameFromPEName is lossy under GenerateName truncation, so a parent-wide
+	// match can drop a different CNP's slices -- and for cluster policies those carry Deny
+	// rules. Exact names can only ever under-delete.
+	//
+	// The live list alone is not sufficient: a stale identifier still holds the slice names
+	// from the reconcile that last selected it, and the CPE being deleted is by definition no
+	// longer in the live list. Prune against the live slices PLUS resourceName, which on the
+	// delete path is the departing CPE's own name (and is already a member of parentCPEList
+	// on the reconcile path, making it a no-op).
+	pruneNames := parentCPEList
+	if !slices.Contains(pruneNames, resourceName) {
+		pruneNames = append(slices.Clone(parentCPEList), resourceName)
+	}
 	for _, podIdentifier := range stalePodIdentifiers {
-		utils.DeleteParentNPFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCNPName)
+		for _, cpeName := range pruneNames {
+			utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, cpeName)
+		}
 	}
 
 	if len(currentPods) > 0 {

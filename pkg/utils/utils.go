@@ -249,8 +249,15 @@ func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) str
 	return policyEndpointName + "/" + policyNamespace
 }
 
+// GetParentNPNameFromPEName derives the parent policy name by stripping the
+// GenerateName suffix. A name with no "-" carries no suffix to strip, so it is
+// returned unchanged rather than slicing on LastIndex's -1 and panicking.
 func GetParentNPNameFromPEName(policyEndpointName string) string {
-	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
+	i := strings.LastIndex(policyEndpointName, "-")
+	if i < 0 {
+		return policyEndpointName
+	}
+	return policyEndpointName[:i]
 }
 
 func getHostLinkByName(name string) (netlink.Link, error) {

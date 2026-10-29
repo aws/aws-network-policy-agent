@@ -472,7 +472,12 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 		wantBaselineRestore   bool
 	}{
 		{
-			name:                  "surviving shard still selects identifier prunes deleted shard name",
+			// The identifier stays selected via the surviving shard, so it never goes stale
+			// and deriveTargetPodsForParentNP's purge never visits it. The per-pod scrub at
+			// the end of cleanUpPolicyEndpoint is what reclaims the deleted shard's name
+			// here: it matches resourceName exactly, off the delete event, and runs over the
+			// selector map's full prior pod set rather than only the deselected pods.
+			name:                  "surviving shard still selects identifier reclaims deleted shard name",
 			survivingPodEndpoints: []policyendpoint.PodEndpoint{podEndpoint},
 			wantMAP1:              []string{survivingPEName},
 			wantMAP3:              true,

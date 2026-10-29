@@ -510,6 +510,28 @@ func (fx *peFixture) podState(podIdentifier string) (int, bool) {
 	return state, ok
 }
 
+// clusterTierState reads the cluster-policy half of the pod-state map. The namespaced
+// reconciler only ever seeds this key, so it is what distinguishes "left alone" from
+// "overwritten by the namespaced tier".
+func (fx *peFixture) clusterTierState(podIdentifier string) (int, bool) {
+	state, ok := fx.bpf.PodStateByIdentifier[ebpf.PodStateKey{
+		PodIdentifier: podIdentifier,
+		MapKey:        ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY,
+	}]
+	return state, ok
+}
+
+// parentIdentifiers reports the identifiers the reconciler believes the parent NetworkPolicy
+// still selects cluster-wide. Mirrors cpeFixture.parentIdentifiers; the namespaced map is
+// keyed by name and namespace, since two namespaces may hold same-named policies.
+func (fx *peFixture) parentIdentifiers(parent, namespace string) ([]string, bool) {
+	v, ok := fx.r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(parent, namespace))
+	if !ok {
+		return nil, false
+	}
+	return v.([]string), true
+}
+
 func (fx *peFixture) assertIdentifierAbsent(podIdentifier string) {
 	fx.t.Helper()
 	_, ok := fx.r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
