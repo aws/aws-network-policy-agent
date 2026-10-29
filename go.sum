@@ -8,8 +8,8 @@ github.com/aws/amazon-vpc-cni-k8s v1.22.4 h1:040AzVL94vW4i9f8d5vz4tI83sKaxUM2KjB
 github.com/aws/amazon-vpc-cni-k8s v1.22.4/go.mod h1:H9f69VZbroA/1ns5LtTnoMA4vAdPghcgU0tIH5FX4+s=
 github.com/aws/amazon-vpc-resource-controller-k8s v1.7.18 h1:V/h33TgtVkR/1hkYVWU8RFD8i8h5G+xZ6eX9Hr0zKpk=
 github.com/aws/amazon-vpc-resource-controller-k8s v1.7.18/go.mod h1:iZa92r5f6vu42hQhyzrQa9UnxieNWcYmQ9DEKYMuXWo=
-github.com/aws/aws-ebpf-sdk-go v1.0.17 h1:ghFTci/7PxhJzDZjozcUJxm6//SEAroUEJXENgOQy/E=
-github.com/aws/aws-ebpf-sdk-go v1.0.17/go.mod h1:2v/brJqgaXZxyg2XzOPOQX8v0CL2gOlIzgP/mMPB00o=
+github.com/aws/aws-ebpf-sdk-go v1.0.19 h1:PNmBWzKf/vKmiPruHD3aeVLv8du7+unmxmes3voCZRY=
+github.com/aws/aws-ebpf-sdk-go v1.0.19/go.mod h1:2v/brJqgaXZxyg2XzOPOQX8v0CL2gOlIzgP/mMPB00o=
 github.com/aws/aws-sdk-go-v2 v1.47.3 h1:HRoT/MkNi3bjO5xF4dCzLzvVmkvRGHj3/cLINDnJejk=
 github.com/aws/aws-sdk-go-v2 v1.47.3/go.mod h1:xSl+OSI5ZUw6bSMupWc218zE5Pl+65MCCu3ySWFY99A=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.22 h1:oiEmPz/YMMeh/JvAE8xSxNCIsvWE6lpFe4ZPlyFykQI=
