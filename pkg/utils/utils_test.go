@@ -392,6 +392,49 @@ func TestGetPodNamespacedName_NoCollisionAcrossDistinctPods(t *testing.T) {
 	}
 }
 
+func TestGetParentNPNameFromPEName(t *testing.T) {
+	tests := []struct {
+		name               string
+		policyEndpointName string
+		want               string
+	}{
+		{
+			name:               "GenerateName suffix is stripped",
+			policyEndpointName: "deny-all-ingress-abcde",
+			want:               "deny-all-ingress",
+		},
+		{
+			name:               "only the last dash segment is stripped",
+			policyEndpointName: "a-b-c-xyz12",
+			want:               "a-b-c",
+		},
+		{
+			// No "-" means no GenerateName suffix to strip. Previously
+			// LastIndex returned -1 and the slice panicked.
+			name:               "dashless name is returned unchanged",
+			policyEndpointName: "policy",
+			want:               "policy",
+		},
+		{
+			name:               "empty name is returned unchanged",
+			policyEndpointName: "",
+			want:               "",
+		},
+		{
+			name:               "trailing dash yields the bare prefix",
+			policyEndpointName: "policy-",
+			want:               "policy",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				assert.Equal(t, tt.want, GetParentNPNameFromPEName(tt.policyEndpointName))
+			})
+		})
+	}
+}
+
 func TestGetPodIdentifier(t *testing.T) {
 	type args struct {
 		podName      string
@@ -665,7 +708,7 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 				policyName:      "testPolicy",
 				policyNamespace: "testPolicyNamespace",
 			},
-			want: "testPolicytestPolicyNamespace",
+			want: "testPolicy/testPolicyNamespace",
 		},
 	}
 	for _, tt := range tests {
@@ -674,6 +717,15 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGetPolicyEndpointIdentifier_DistinguishesFormerlyCollidingPairs(t *testing.T) {
+	first := GetPolicyEndpointIdentifier("policy-a", "bc")
+	second := GetPolicyEndpointIdentifier("policy-ab", "c")
+
+	assert.Equal(t, "policy-a/bc", first)
+	assert.Equal(t, "policy-ab/c", second)
+	assert.NotEqual(t, first, second)
 }
 
 func TestIsNonHostCIDR(t *testing.T) {
