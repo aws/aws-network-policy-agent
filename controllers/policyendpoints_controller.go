@@ -328,7 +328,9 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
 	}
 
-	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed)
+	// Observe E2E policy programming latency (NPC change → NPA eBPF programmed).
+	// Skips count as neither: programming nothing records no sample, but
+	// programming some identifiers still reports the latency that was real.
 	r.observePolicyProgrammingLatency(policyEndpoint, programmed > 0 && len(programmingErrs) == 0)
 
 	return errors.Join(programmingErrs...)

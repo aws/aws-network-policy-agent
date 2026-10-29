@@ -237,7 +237,8 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	}
 
 	// Latency is recorded only for a pass whose cleanup succeeded, so the retry after a failed
-	// cleanup measures the change.
+	// cleanup measures the change. Skips count as neither: programming nothing records no
+	// sample, but programming some identifiers still reports the latency that was real.
 	if cleanupErr == nil {
 		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmed > 0 && programmingErr == nil)
 	}
