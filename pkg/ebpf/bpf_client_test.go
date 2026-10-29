@@ -529,7 +529,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			}
 
 			_, gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces, false)
-			assert.Equal(t, tt.wantErr, gotError)
+			assert.ErrorIs(t, gotError, tt.wantErr)
 		})
 	}
 }

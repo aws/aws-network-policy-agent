@@ -17,7 +17,8 @@ import (
 type InMemoryBpfMap struct {
 	// Underlying BPF map
 	bpfMap *maps.BpfMap
-	// Kernel mutations, swappable in tests
+	// Optional test hooks for the kernel mutations. Nil means "use bpfMap", so a
+	// zero-value InMemoryBpfMap works; see updateEntryOrSDK/deleteEntryOrSDK.
 	updateEntry func(key, value []byte) error
 	deleteEntry func(key []byte) error
 	// In-memory representation of the map contents
@@ -30,24 +31,33 @@ type InMemoryBpfMap struct {
 // tests can build shadow maps without a kernel.
 var newInMemoryBpfMap = NewInMemoryBpfMap
 
+// updateEntryOrSDK and deleteEntryOrSDK write to the kernel, honouring a test
+// hook when one is installed. The backing slice is kept alive across the call,
+// since a uintptr is not a reference as far as the collector is concerned.
+func (m *InMemoryBpfMap) updateEntryOrSDK(key, value []byte) error {
+	if m.updateEntry != nil {
+		return m.updateEntry(key, value)
+	}
+	err := m.bpfMap.UpdateMapEntry(uintptr(unsafe.Pointer(&key[0])), uintptr(unsafe.Pointer(&value[0])))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return err
+}
+
+func (m *InMemoryBpfMap) deleteEntryOrSDK(key []byte) error {
+	if m.deleteEntry != nil {
+		return m.deleteEntry(key)
+	}
+	err := m.bpfMap.DeleteMapEntry(uintptr(unsafe.Pointer(&key[0])))
+	runtime.KeepAlive(key)
+	return err
+}
+
 // NewInMemoryBpfMap creates a new in-memory representation of an eBPF map
 // and optionally loads the initial state from the kernel
 func NewInMemoryBpfMap(bpfMap *maps.BpfMap) (*InMemoryBpfMap, error) {
 	m := &InMemoryBpfMap{
-		bpfMap: bpfMap,
-		// Keep the backing slices alive across the call: a uintptr is not a
-		// reference as far as the collector is concerned.
-		updateEntry: func(key, value []byte) error {
-			err := bpfMap.UpdateMapEntry(uintptr(unsafe.Pointer(&key[0])), uintptr(unsafe.Pointer(&value[0])))
-			runtime.KeepAlive(key)
-			runtime.KeepAlive(value)
-			return err
-		},
-		deleteEntry: func(key []byte) error {
-			err := bpfMap.DeleteMapEntry(uintptr(unsafe.Pointer(&key[0])))
-			runtime.KeepAlive(key)
-			return err
-		},
+		bpfMap:   bpfMap,
 		contents: make(map[string][]byte),
 	}
 
@@ -135,7 +145,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	for k, v := range toAdd {
 		keyByte := []byte(k)
 
-		if err := m.updateEntry(keyByte, v); err != nil {
+		if err := m.updateEntryOrSDK(keyByte, v); err != nil {
 			// Carry on rather than return. Aborting here would leave the kernel
 			// holding a random subset of the new entries and skip the stale-entry
 			// sweep below, so a policy the user revoked would stay in force.
@@ -154,7 +164,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	for _, k := range toDelete {
 		keyByte := []byte(k)
 
-		if err := m.deleteEntry(keyByte); err != nil {
+		if err := m.deleteEntryOrSDK(keyByte); err != nil {
 			log().Errorf("Failed to delete from kernel map for key %s: %v", k, err)
 			// Continue with other deletions
 		} else {

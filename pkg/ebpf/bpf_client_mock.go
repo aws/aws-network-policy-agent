@@ -120,10 +120,10 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
-	if m.AttacheBPFProbesErr != nil {
-		return m.AttacheBPFProbesErr
-  }
 	m.LastAttachPodConfirmedLive = podConfirmedLive
+	if m.AttacheBPFProbesErr != nil {
+		return false, m.AttacheBPFProbesErr
+	}
 	// A CNI ADD proves the pod exists and clears its deleted-pod marker, as production does.
 	if podConfirmedLive {
 		delete(m.DeletedPods, pod)
