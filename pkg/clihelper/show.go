@@ -266,50 +266,57 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 	}
 
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_HASH.Index() {
-		var key, nextKey uint32
-		// Get the first entry
-		err = goebpfmaps.GetFirstMapEntryByID(
-			uintptr(unsafe.Pointer(&key)),
-			mapID)
-		if err != nil {
-			if errors.Is(err, unix.ENOENT) {
-				fmt.Println("No entries found, empty HASH map (pod_state_map?)")
-				return nil
-			}
-			return fmt.Errorf("unable to get first key (HASH): %v", err)
-		}
-
-		for {
-			var val PodState
-			err = goebpfmaps.GetMapEntryByID(
-				uintptr(unsafe.Pointer(&key)),
-				uintptr(unsafe.Pointer(&val)),
-				mapID)
-			if err != nil {
-				return fmt.Errorf("unable to get HASH entry for key=%d: %v", key, err)
-			}
-
-			fmt.Println("Key : ", key)
-			fmt.Println("State - ", val.State)
-			fmt.Println("*******************************")
-
-			err = goebpfmaps.GetNextMapEntryByID(
-				uintptr(unsafe.Pointer(&key)),
-				uintptr(unsafe.Pointer(&nextKey)),
-				mapID)
-			if errors.Is(err, unix.ENOENT) {
-				fmt.Println("Done reading all entries in BPF_MAP_TYPE_HASH")
-				break
-			}
-			if err != nil {
-				fmt.Println("Failed to get next entry, done searching")
-				break
-			}
-			key = nextKey
-		}
-		return nil
+		return dumpPodStateMap(mapID)
 	}
 
+	return nil
+}
+
+// dumpPodStateMap prints every entry of a pod_state map (BPF_MAP_TYPE_HASH keyed by a
+// __u32 with a single-byte pod_state value). The layout is the same for the IPv4 and IPv6
+// programs, so both MapWalk and MapWalkv6 use it.
+func dumpPodStateMap(mapID int) error {
+	var key, nextKey uint32
+	// Get the first entry
+	err := goebpfmaps.GetFirstMapEntryByID(
+		uintptr(unsafe.Pointer(&key)),
+		mapID)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			fmt.Println("No entries found, empty HASH map (pod_state_map?)")
+			return nil
+		}
+		return fmt.Errorf("unable to get first key (HASH): %v", err)
+	}
+
+	for {
+		var val PodState
+		err = goebpfmaps.GetMapEntryByID(
+			uintptr(unsafe.Pointer(&key)),
+			uintptr(unsafe.Pointer(&val)),
+			mapID)
+		if err != nil {
+			return fmt.Errorf("unable to get HASH entry for key=%d: %v", key, err)
+		}
+
+		fmt.Println("Key : ", key)
+		fmt.Println("State - ", val.State)
+		fmt.Println("*******************************")
+
+		err = goebpfmaps.GetNextMapEntryByID(
+			uintptr(unsafe.Pointer(&key)),
+			uintptr(unsafe.Pointer(&nextKey)),
+			mapID)
+		if errors.Is(err, unix.ENOENT) {
+			fmt.Println("Done reading all entries in BPF_MAP_TYPE_HASH")
+			break
+		}
+		if err != nil {
+			fmt.Println("Failed to get next entry, done searching")
+			break
+		}
+		key = nextKey
+	}
 	return nil
 }
 
@@ -436,6 +443,11 @@ func MapWalkv6(mapID int) error {
 				copy(byteSlice, nextbyteSlice)
 			}
 		}
+	}
+
+	// pod_state maps have the same layout in the IPv6 programs.
+	if mapInfo.Type == constdef.BPF_MAP_TYPE_HASH.Index() {
+		return dumpPodStateMap(mapID)
 	}
 
 	return nil
