@@ -27,14 +27,18 @@ Sequence:
  2. P's selector is updated to target pod B -> A recovers (allow), B becomes blocked.
  3. A new policy Q targets pod A -> A blocked again by Q, B remains blocked by P.
 */
-var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
+// Poll for the expected verdict instead of sleeping a fixed interval: eBPF programming
+// latency varies with cluster size and reconcile backlog, so a fixed sleep is both flaky
+// when slow and wasteful when fast.
+const (
+	bpfSettleTimeout = 90 * time.Second
+	bpfPollInterval  = 2 * time.Second
+	// Unprivileged port: the busybox test image runs as a non-root user and cannot bind
+	// 80. Kept as a constant so the servers and the prober can't drift apart.
+	retargetPort = 8080
+)
 
-	const (
-		bpfSettleInterval = 15 * time.Second
-		// Unprivileged port: the busybox test image runs as a non-root user and cannot
-		// bind 80. Kept as a constant so the servers and the prober can't drift apart.
-		retargetPort = 8080
-	)
+var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 
 	// busybox `nc -l` serves one connection and exits, and `-e` is not available in all
 	// busybox builds - so re-listen in a loop instead. Same shape as except_block_test.go.
@@ -123,12 +127,17 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 				PolicyTypes: []network.PolicyType{network.PolicyTypeIngress},
 			},
 		}
+		By("Verifying both pods are reachable before any policy is applied")
+		// Without this precondition a later BLOCKED result could mean a broken prober,
+		// an unready server or a wrong IP rather than an enforced policy.
+		expectConn(proberPod.Name, podA.Status.PodIP, "CONNECTED", "pod A before policy P")
+		expectConn(proberPod.Name, podB.Status.PodIP, "CONNECTED", "pod B before policy P")
+
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, policyP)).To(Succeed())
-		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A is blocked and pod B is unaffected")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("CONNECTED"))
+		expectConn(proberPod.Name, podA.Status.PodIP, "BLOCKED", "pod A after policy P")
+		expectConn(proberPod.Name, podB.Status.PodIP, "CONNECTED", "pod B after policy P")
 
 		By("Updating policy P's selector to target pod B instead of pod A")
 		Eventually(func() error {
@@ -139,11 +148,10 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 			current.Spec.PodSelector = metav1.LabelSelector{MatchLabels: map[string]string{"app": "retarget-b"}}
 			return fw.K8sClient.Update(ctx, current)
 		}, 30*time.Second, 2*time.Second).Should(Succeed())
-		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A recovered to allow and pod B is now blocked")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("CONNECTED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
+		expectConn(proberPod.Name, podA.Status.PodIP, "CONNECTED", "pod A after P retargeted to B")
+		expectConn(proberPod.Name, podB.Status.PodIP, "BLOCKED", "pod B after P retargeted to B")
 
 		By("Creating a new policy Q that re-targets pod A")
 		policyQ = &network.NetworkPolicy{
@@ -154,11 +162,10 @@ var _ = Describe("Network Policy Selector Retargeting", Ordered, func() {
 			},
 		}
 		Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, policyQ)).To(Succeed())
-		time.Sleep(bpfSettleInterval)
 
 		By("Verifying pod A is blocked again by Q and pod B remains blocked by P")
-		Expect(retargetConnect(proberPod.Name, podA.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
-		Expect(retargetConnect(proberPod.Name, podB.Status.PodIP, retargetPort)).To(Equal("BLOCKED"))
+		expectConn(proberPod.Name, podA.Status.PodIP, "BLOCKED", "pod A after policy Q")
+		expectConn(proberPod.Name, podB.Status.PodIP, "BLOCKED", "pod B still blocked by P")
 	})
 })
 
@@ -169,12 +176,41 @@ func getSinglePod(appLabel string) v1.Pod {
 	return pods[0]
 }
 
-func retargetConnect(proberPodName, ip string, port int) string {
-	cmd := fmt.Sprintf("nc -z -w3 %s %d && echo CONNECTED || echo BLOCKED", ip, port)
+// retargetConnect probes ip:port from the prober pod and returns "CONNECTED" or
+// "BLOCKED", or an error. It deliberately does not treat every non-CONNECTED outcome as
+// BLOCKED: a missing nc, a failed exec or unrecognised output means the harness is broken,
+// and reporting that as BLOCKED would let a policy assertion pass for the wrong reason.
+func retargetConnect(proberPodName, ip string, port int) (string, error) {
+	cmd := fmt.Sprintf(
+		"command -v nc >/dev/null 2>&1 || { echo NO_NC; exit 0; }; "+
+			"nc -z -w3 %s %d && echo CONNECTED || echo BLOCKED", ip, port)
 	out, err := fw.PodManager.ExecInPod(namespace, proberPodName, []string{"/bin/sh", "-c", cmd})
-	Expect(err).ToNot(HaveOccurred(), "retargetConnect exec failed")
-	if strings.Contains(out, "CONNECTED") {
-		return "CONNECTED"
+	if err != nil {
+		return "", fmt.Errorf("exec in prober pod %s: %w", proberPodName, err)
 	}
-	return "BLOCKED"
+	switch {
+	case strings.Contains(out, "NO_NC"):
+		return "", fmt.Errorf("prober image has no nc; cannot probe %s:%d", ip, port)
+	case strings.Contains(out, "CONNECTED"):
+		return "CONNECTED", nil
+	case strings.Contains(out, "BLOCKED"):
+		return "BLOCKED", nil
+	}
+	return "", fmt.Errorf("unrecognised probe output for %s:%d: %q", ip, port, out)
+}
+
+// expectConn polls until the probe reports want, so the test tracks actual eBPF
+// programming latency instead of a fixed sleep. A probe error fails immediately rather
+// than being retried into a timeout, since it means the harness is broken, not slow.
+func expectConn(proberPodName, ip, want, desc string) {
+	var last string
+	EventuallyWithOffset(1, func() (string, error) {
+		v, err := retargetConnect(proberPodName, ip, retargetPort)
+		if err != nil {
+			StopTrying(err.Error()).Now()
+		}
+		last = v
+		return v, nil
+	}, bpfSettleTimeout, bpfPollInterval).Should(Equal(want),
+		"%s: expected %s, last observed %s", desc, want, &last)
 }
