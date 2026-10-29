@@ -343,11 +343,18 @@ func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction s
 }
 
 func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) string {
-	return policyEndpointName + policyNamespace
+	return policyEndpointName + "/" + policyNamespace
 }
 
+// GetParentNPNameFromPEName derives the parent policy name by stripping the
+// GenerateName suffix. A name with no "-" carries no suffix to strip, so it is
+// returned unchanged rather than slicing on LastIndex's -1 and panicking.
 func GetParentNPNameFromPEName(policyEndpointName string) string {
-	return policyEndpointName[0:strings.LastIndex(policyEndpointName, "-")]
+	i := strings.LastIndex(policyEndpointName, "-")
+	if i < 0 {
+		return policyEndpointName
+	}
+	return policyEndpointName[:i]
 }
 
 func getHostLinkByName(name string) (netlink.Link, error) {
@@ -600,27 +607,13 @@ func IsNonHostCIDR(ipAddr string) bool {
 }
 
 func ConvByteArrayToIP(ipInInt uint32) string {
-	hexIPString := fmt.Sprintf("%x", ipInInt)
-
-	if len(hexIPString)%2 != 0 {
-		hexIPString = "0" + hexIPString
-	}
-
-	byteData, _ := hex.DecodeString(hexIPString)
-	reverseByteData := reverseByteArray(byteData)
-
-	return strings.Trim(strings.Join(strings.Fields(fmt.Sprint(reverseByteData)), "."), "[]")
-}
-
-func reverseByteArray(input []byte) []byte {
-	if len(input) == 0 {
-		return input
-	}
-	return append(reverseByteArray(input[1:]), input[0])
+	return ConvIntToIPv4(ipInInt).String()
 }
 
 func ConvIntToIPv4(ipaddr uint32) net.IP {
 	ip := make(net.IP, 4)
+	// ip is represented as a 4-byte slice, and the eBPF/kernel value is little-
+	// endian, so we must pack the uint32 into the slice using LittleEndian.
 	binary.LittleEndian.PutUint32(ip, ipaddr)
 	return ip
 }

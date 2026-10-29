@@ -392,6 +392,49 @@ func TestGetPodNamespacedName_NoCollisionAcrossDistinctPods(t *testing.T) {
 	}
 }
 
+func TestGetParentNPNameFromPEName(t *testing.T) {
+	tests := []struct {
+		name               string
+		policyEndpointName string
+		want               string
+	}{
+		{
+			name:               "GenerateName suffix is stripped",
+			policyEndpointName: "deny-all-ingress-abcde",
+			want:               "deny-all-ingress",
+		},
+		{
+			name:               "only the last dash segment is stripped",
+			policyEndpointName: "a-b-c-xyz12",
+			want:               "a-b-c",
+		},
+		{
+			// No "-" means no GenerateName suffix to strip. Previously
+			// LastIndex returned -1 and the slice panicked.
+			name:               "dashless name is returned unchanged",
+			policyEndpointName: "policy",
+			want:               "policy",
+		},
+		{
+			name:               "empty name is returned unchanged",
+			policyEndpointName: "",
+			want:               "",
+		},
+		{
+			name:               "trailing dash yields the bare prefix",
+			policyEndpointName: "policy-",
+			want:               "policy",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				assert.Equal(t, tt.want, GetParentNPNameFromPEName(tt.policyEndpointName))
+			})
+		})
+	}
+}
+
 func TestGetPodIdentifier(t *testing.T) {
 	type args struct {
 		podName      string
@@ -827,7 +870,7 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 				policyName:      "testPolicy",
 				policyNamespace: "testPolicyNamespace",
 			},
-			want: "testPolicytestPolicyNamespace",
+			want: "testPolicy/testPolicyNamespace",
 		},
 	}
 	for _, tt := range tests {
@@ -836,6 +879,15 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGetPolicyEndpointIdentifier_DistinguishesFormerlyCollidingPairs(t *testing.T) {
+	first := GetPolicyEndpointIdentifier("policy-a", "bc")
+	second := GetPolicyEndpointIdentifier("policy-ab", "c")
+
+	assert.Equal(t, "policy-a/bc", first)
+	assert.Equal(t, "policy-ab/c", second)
+	assert.NotEqual(t, first, second)
 }
 
 func TestIsNonHostCIDR(t *testing.T) {
@@ -1062,4 +1114,28 @@ func TestKtimeGetNs(t *testing.T) {
 	t2, err := KtimeGetNs()
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, t2, t1, "KtimeGetNs must be monotonically non-decreasing")
+}
+
+func TestConvByteArrayToIP(t *testing.T) {
+	// These values specifically exercise IPv4 addresses whose final octets are zero.
+	tests := []struct {
+		name string
+		ip   uint32
+		want string
+	}{
+		{name: "ordinary address", ip: 0x1604960a, want: "10.150.4.22"},
+		{name: "one trailing zero octet", ip: 0x0004960a, want: "10.150.4.0"},
+		{name: "two trailing zero octets", ip: 0x0000960a, want: "10.150.0.0"},
+		{name: "three trailing zero octets", ip: 0x0000000a, want: "10.0.0.0"},
+		{name: "all zero octets", ip: 0x00000000, want: "0.0.0.0"},
+		{name: "zero octet in the middle", ip: 0x1604000a, want: "10.0.4.22"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ConvByteArrayToIP(tt.ip); got != tt.want {
+				t.Errorf("ConvByteArrayToIP(%#08x) = %q, want %q", tt.ip, got, tt.want)
+			}
+		})
+	}
 }
