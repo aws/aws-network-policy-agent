@@ -25,6 +25,11 @@ func NewMockBpfClient() *bpfClient {
 }
 
 type MockBpfClient struct {
+	// AttacheBPFProbes returns this as "first pod of the identifier on this node"
+	AttachFirstPodInPodIdentifier bool
+	// podConfirmedLive passed to the most recent AttacheBPFProbes call
+	LastAttachPodConfirmedLive bool
+
 	CallLog []string
 
 	// Injected errors for failure-path tests. Zero values preserve the
@@ -38,6 +43,11 @@ type MockBpfClient struct {
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
+
+	// Captured args from the most recent UpdatePodStateEbpfMaps call, so tests can assert
+	// which baseline (DEFAULT_ALLOW vs DEFAULT_DENY) was programmed.
+	LastPodStateKey int
+	LastPodState    int
 
 	// Captured args from the most recent UpdateClusterPolicyEbpfMaps call, so tests can
 	// assert that the rules were actually cleared and not just that the call happened.
@@ -88,6 +98,7 @@ type PodStateKey struct {
 // reconcile and then assert only on what a later reconcile did.
 func (m *MockBpfClient) Reset() {
 	m.CallLog = nil
+	m.LastAttachPodConfirmedLive = false
 	m.LastIngressRules = nil
 	m.LastEgressRules = nil
 	m.LastClusterPolicyIngressRules = nil
@@ -104,18 +115,28 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 		*dst = map[string][]fwrp.EbpfFirewallRules{}
 	}
 	(*dst)[podIdentifier] = rules
+
 }
 
-func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int) error {
+func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
 	if m.AttacheBPFProbesErr != nil {
 		return m.AttacheBPFProbesErr
+  }
+	m.LastAttachPodConfirmedLive = podConfirmedLive
+	// A CNI ADD proves the pod exists and clears its deleted-pod marker, as production does.
+	if podConfirmedLive {
+		delete(m.DeletedPods, pod)
+	}
+	// Production skips the attach for a deleted pod.
+	if m.DeletedPods[pod] {
+		return false, nil
 	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
-	if !m.DeletedPods[pod] && m.PodIdentifiersWithoutBPFContext[podIdentifier] {
+	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.ForgetIdentifier(podIdentifier)
 	}
-	return nil
+	return m.AttachFirstPodInPodIdentifier, nil
 }
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
@@ -188,11 +209,7 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	}
 	m.recordPodState(podIdentifier, key, state)
 	return nil
-}
 
-func (m *MockBpfClient) IsFirstPodInPodIdentifier(podIdentifier string) bool {
-	m.CallLog = append(m.CallLog, "IsFirstPodInPodIdentifier")
-	return false
 }
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
@@ -221,10 +238,6 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 	return nil
 }
 
-func (m *MockBpfClient) ClearDeletedPod(podNamespacedName string) {
-	m.CallLog = append(m.CallLog, "ClearDeletedPod")
-}
-
 func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {
 	return !m.PodIdentifiersWithoutBPFContext[podIdentifier]
 }
@@ -239,6 +252,13 @@ func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int)
 	k := PodStateKey{PodIdentifier: podIdentifier, MapKey: key}
 	m.PodStateByIdentifier[k] = state
 	m.podStateSeeded[k] = true
+	// LastPodState tracks the pod-state map write (POD_STATE_MAP_KEY) that carries the
+	// policy verdict. The cluster-policy seed (CLUSTER_POLICY_POD_STATE_MAP_KEY) is always
+	// DEFAULT_ALLOW and must not clobber the verdict the caller asserts on.
+	if key == POD_STATE_MAP_KEY {
+		m.LastPodStateKey = key
+		m.LastPodState = state
+	}
 }
 
 // contextErr fails a map write for an identifier whose probes are detached, as the real
