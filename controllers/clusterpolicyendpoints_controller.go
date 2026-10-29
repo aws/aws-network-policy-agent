@@ -374,6 +374,11 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 				return nil, nil, err
 			}
 
+			// currentCPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
+			// makes appends to L4Info reallocate, but its existing elements, and the
+			// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
+			// processing must treat them as read-only. Guarded by
+			// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
 			for _, endPointInfo := range currentCPE.Spec.Ingress {
 				priority := int(currentCPE.Spec.Priority)
 				if currentCPE.Spec.Tier == policyk8sawsv1.BaselineTier {

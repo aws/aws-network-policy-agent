@@ -559,6 +559,11 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				return nil, nil, isIngressIsolated, isEgressIsolated, err
 			}
 
+			// currentPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
+			// makes appends to Except/L4Info reallocate, but their existing elements, and the
+			// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
+			// processing must treat them as read-only. Guarded by
+			// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
 			for _, endPointInfo := range currentPE.Spec.Ingress {
 				ingressRules = append(ingressRules,
 					fwrp.EbpfFirewallRules{

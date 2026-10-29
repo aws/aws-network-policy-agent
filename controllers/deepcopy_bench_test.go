@@ -22,6 +22,7 @@ import (
 type cacheReader struct {
 	client.Client
 	pes           map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint
+	cpes          map[string]*policyk8sawsv1.ClusterPolicyEndpoint
 	forceDeepCopy bool
 }
 
@@ -44,14 +45,30 @@ func (c *cacheReader) unsafeList(opts []client.ListOption) bool {
 }
 
 func (c *cacheReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	pe, ok := c.pes[key]
-	if !ok {
-		return apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, key.Name)
-	}
-	if c.unsafe(opts) {
-		*obj.(*policyk8sawsv1.PolicyEndpoint) = *pe
-	} else {
-		*obj.(*policyk8sawsv1.PolicyEndpoint) = *pe.DeepCopy()
+	unsafe := c.unsafe(opts)
+	switch out := obj.(type) {
+	case *policyk8sawsv1.PolicyEndpoint:
+		pe, ok := c.pes[key]
+		if !ok {
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, key.Name)
+		}
+		if unsafe {
+			*out = *pe
+		} else {
+			*out = *pe.DeepCopy()
+		}
+	case *policyk8sawsv1.ClusterPolicyEndpoint:
+		cpe, ok := c.cpes[key.Name]
+		if !ok {
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "clusterpolicyendpoints"}, key.Name)
+		}
+		if unsafe {
+			*out = *cpe
+		} else {
+			*out = *cpe.DeepCopy()
+		}
+	default:
+		return fmt.Errorf("cacheReader: unsupported type %T", obj)
 	}
 	return nil
 }
@@ -60,17 +77,30 @@ func (c *cacheReader) List(_ context.Context, list client.ObjectList, opts ...cl
 	lo := &client.ListOptions{}
 	lo.ApplyOptions(opts)
 	unsafe := c.unsafeList(opts)
-	out := list.(*policyk8sawsv1.PolicyEndpointList)
-	out.Items = out.Items[:0]
-	for _, pe := range c.pes {
-		if lo.Namespace != "" && pe.Namespace != lo.Namespace {
-			continue
+	switch out := list.(type) {
+	case *policyk8sawsv1.PolicyEndpointList:
+		out.Items = out.Items[:0]
+		for _, pe := range c.pes {
+			if lo.Namespace != "" && pe.Namespace != lo.Namespace {
+				continue
+			}
+			if unsafe {
+				out.Items = append(out.Items, *pe)
+			} else {
+				out.Items = append(out.Items, *pe.DeepCopy())
+			}
 		}
-		if unsafe {
-			out.Items = append(out.Items, *pe)
-		} else {
-			out.Items = append(out.Items, *pe.DeepCopy())
+	case *policyk8sawsv1.ClusterPolicyEndpointList:
+		out.Items = out.Items[:0]
+		for _, cpe := range c.cpes {
+			if unsafe {
+				out.Items = append(out.Items, *cpe)
+			} else {
+				out.Items = append(out.Items, *cpe.DeepCopy())
+			}
 		}
+	default:
+		return fmt.Errorf("cacheReader: unsupported type %T", list)
 	}
 	return nil
 }
@@ -210,4 +240,125 @@ func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
 			}
 		})
 	}
+}
+
+// cachedPorts returns Ports with spare capacity, as left behind by JSON decoding into the
+// cache, whose Protocol/Port/EndPort pointers are owned by the cached object.
+func cachedPorts(protocol corev1.Protocol, port, endPort int32) []policyk8sawsv1.Port {
+	ports := make([]policyk8sawsv1.Port, 1, 4)
+	ports[0] = policyk8sawsv1.Port{Protocol: &protocol, Port: &port}
+	if endPort != 0 {
+		ports[0].EndPort = &endPort
+	}
+	return ports
+}
+
+// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged guards the UnsafeDisableDeepCopy reads
+// as a whole: everything reachable from a cached PE/CPE -- slice elements and the pointers
+// inside each Port included -- must be byte-for-byte unchanged after deriving and computing
+// firewall rules from it. The rules use the same CIDR twice and nested CIDRs so the rule
+// processor's merge and L4 inheritance paths run, across two sibling slices.
+func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
+	localPod := policyk8sawsv1.PodEndpoint{HostIP: benchNodeIP, PodIP: "172.16.0.1", Name: "pod", Namespace: "ns"}
+
+	t.Run("PolicyEndpoint", func(t *testing.T) {
+		endpoints := func() []policyk8sawsv1.EndpointInfo {
+			return []policyk8sawsv1.EndpointInfo{
+				{CIDR: "10.0.0.0/16", Except: append(make([]policyk8sawsv1.NetworkAddress, 0, 4), "10.0.255.0/24"), Ports: cachedPorts(corev1.ProtocolTCP, 80, 90)},
+				{CIDR: "10.0.0.0/24", Except: append(make([]policyk8sawsv1.NetworkAddress, 0, 4), "10.0.0.128/26"), Ports: cachedPorts(corev1.ProtocolUDP, 53, 0)},
+				{CIDR: "10.0.0.0/24", Ports: cachedPorts(corev1.ProtocolTCP, 443, 0)},
+				{CIDR: "10.0.0.7"},
+			}
+		}
+		pes := map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{}
+		for _, name := range []string{"np-aaaa", "np-bbbb"} {
+			pe := &policyk8sawsv1.PolicyEndpoint{}
+			pe.Name, pe.Namespace = name, "ns"
+			pe.Spec.PolicyRef = policyk8sawsv1.PolicyReference{Name: "np", Namespace: "ns"}
+			pe.Spec.Ingress, pe.Spec.Egress = endpoints(), endpoints()
+			pe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{localPod}
+			pes[types.NamespacedName{Namespace: "ns", Name: name}] = pe
+		}
+		snapshots := map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{}
+		for k, pe := range pes {
+			snapshots[k] = pe.DeepCopy()
+		}
+
+		r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, nil, false)
+		ctx := context.Background()
+		_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", "np-aaaa")
+		assert.NoError(t, err)
+		assert.Len(t, podIdentifiers, 1)
+		processor := fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false)
+		for podIdentifier := range podIdentifiers {
+			// Reconcile path.
+			ingressRules, egressRules, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", "np-aaaa", false)
+			assert.NoError(t, err)
+			assert.NotEmpty(t, ingressRules)
+			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
+				_, err = processor.ComputeMapEntriesFromEndpointRules(rules)
+				assert.NoError(t, err)
+			}
+			// CNI RPC path.
+			ingressRules, egressRules, err = r.DeriveFireWallRulesPerPodIdentifier(podIdentifier, "ns")
+			assert.NoError(t, err)
+			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
+				_, err = processor.ComputeMapEntriesFromEndpointRules(rules)
+				assert.NoError(t, err)
+			}
+		}
+
+		for k, pe := range pes {
+			assert.Equal(t, snapshots[k], pe, "cached PolicyEndpoint %s modified", k)
+		}
+	})
+
+	t.Run("ClusterPolicyEndpoint", func(t *testing.T) {
+		endpoints := func() []policyk8sawsv1.ClusterEndpointInfo {
+			return []policyk8sawsv1.ClusterEndpointInfo{
+				{CIDR: "10.0.0.0/16", Action: policyk8sawsv1.ClusterNetworkPolicyRuleActionAccept, Ports: cachedPorts(corev1.ProtocolTCP, 80, 90)},
+				{CIDR: "10.0.0.0/24", Action: policyk8sawsv1.ClusterNetworkPolicyRuleActionDeny, Ports: cachedPorts(corev1.ProtocolUDP, 53, 0)},
+				{CIDR: "10.0.0.0/24", Action: policyk8sawsv1.ClusterNetworkPolicyRuleActionPass, Ports: cachedPorts(corev1.ProtocolTCP, 443, 0)},
+				{CIDR: "10.0.0.7", Action: policyk8sawsv1.ClusterNetworkPolicyRuleActionDeny},
+			}
+		}
+		cpes := map[string]*policyk8sawsv1.ClusterPolicyEndpoint{}
+		for i, name := range []string{"cnp-aaaa", "cnp-bbbb"} {
+			cpe := &policyk8sawsv1.ClusterPolicyEndpoint{}
+			cpe.Name = name
+			cpe.Spec.PolicyRef = policyk8sawsv1.ClusterPolicyReference{Name: "cnp"}
+			cpe.Spec.Tier = policyk8sawsv1.AdminTier
+			if i == 1 {
+				cpe.Spec.Tier = policyk8sawsv1.BaselineTier
+			}
+			cpe.Spec.Priority = int32(10 + i)
+			cpe.Spec.Ingress, cpe.Spec.Egress = endpoints(), endpoints()
+			cpe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{localPod}
+			cpes[name] = cpe
+		}
+		snapshots := map[string]*policyk8sawsv1.ClusterPolicyEndpoint{}
+		for k, cpe := range cpes {
+			snapshots[k] = cpe.DeepCopy()
+		}
+
+		r := NewClusterPolicyEndpointsReconciler(&cacheReader{cpes: cpes}, benchNodeIP, nil)
+		ctx := context.Background()
+		_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentCNP(ctx, "cnp", "cnp-aaaa")
+		assert.NoError(t, err)
+		assert.Len(t, podIdentifiers, 1)
+		processor := fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false)
+		for podIdentifier := range podIdentifiers {
+			ingressRules, egressRules, err := r.DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx, podIdentifier)
+			assert.NoError(t, err)
+			assert.NotEmpty(t, ingressRules)
+			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
+				_, err = processor.ComputeClusterPolicyMapEntriesFromEndpointRules(rules)
+				assert.NoError(t, err)
+			}
+		}
+
+		for k, cpe := range cpes {
+			assert.Equal(t, snapshots[k], cpe, "cached ClusterPolicyEndpoint %s modified", k)
+		}
+	})
 }
