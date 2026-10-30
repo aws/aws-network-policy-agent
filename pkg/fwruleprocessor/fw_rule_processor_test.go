@@ -3,6 +3,8 @@ package fwruleprocessor
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
+	"slices"
 	"sort"
 	"testing"
 
@@ -419,11 +421,15 @@ func TestFWRuleProcessor_SortFirewallRulesByPrefixLength(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a copy of the input rules to avoid modifying the test data
-			inputCopy := make([]EbpfFirewallRules, len(tt.inputRules))
-			copy(inputCopy, tt.inputRules)
+			inputCopy := slices.Clone(tt.inputRules)
 
 			// Call the function being tested
-			sortFirewallRulesByPrefixLength(inputCopy, tt.hostMask)
+			parsed, err := NewFirewallRuleProcessor("", tt.hostMask, false).parseRules(inputCopy)
+			assert.NoError(t, err)
+			sortFirewallRulesByPrefixLength(parsed)
+			for i, rule := range parsed {
+				inputCopy[i] = rule.EbpfFirewallRules
+			}
 
 			// Check if the result matches the expected output
 			assert.Equal(t, tt.expectedOutput, inputCopy, "Sorted rules do not match expected output")
@@ -510,36 +516,18 @@ func TestFWRuleProcessor_SortFirewallRulesByPrefixLengthWithL4Info(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a copy of the input rules to avoid modifying the test data
-			inputCopy := make([]EbpfFirewallRules, len(tt.inputRules))
-			copy(inputCopy, tt.inputRules)
+			inputCopy := slices.Clone(tt.inputRules)
 
 			// Call the function being tested
-			sortFirewallRulesByPrefixLength(inputCopy, tt.hostMask)
+			parsed, err := NewFirewallRuleProcessor("", tt.hostMask, false).parseRules(inputCopy)
+			assert.NoError(t, err)
+			sortFirewallRulesByPrefixLength(parsed)
+			for i, rule := range parsed {
+				inputCopy[i] = rule.EbpfFirewallRules
+			}
 
 			// Check if the result matches the expected output
 			assert.Equal(t, tt.expectedOutput, inputCopy, "Sorted rules do not match expected output")
-		})
-	}
-}
-
-func TestIsIPv6(t *testing.T) {
-	tests := []struct {
-		name     string
-		cidr     string
-		expected bool
-	}{
-		{"IPv6 compressed", "2001:db8::1/128", true},
-		{"IPv6 fully qualified", "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", true},
-		{"IPv6 catch-all", "::/0", true},
-		{"IPv6 no mask", "2001:db8::1", true},
-		{"IPv4 standard", "10.0.0.1/32", false},
-		{"IPv4 catch-all", "0.0.0.0/0", false},
-		{"IPv4 no mask", "192.168.1.1", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, isIPv6(tt.cidr))
 		})
 	}
 }
@@ -569,7 +557,7 @@ func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6)
-			assert.Equal(t, tt.expected, f.shouldSkipRule(tt.cidr))
+			assert.Equal(t, tt.expected, f.shouldSkipRule(canonicalPrefix(netip.MustParsePrefix(tt.cidr))))
 		})
 	}
 }
