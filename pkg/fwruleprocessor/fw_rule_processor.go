@@ -2,9 +2,7 @@ package fwruleprocessor
 
 import (
 	"cmp"
-	"encoding/binary"
 	"fmt"
-	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -38,23 +36,35 @@ type EbpfFirewallRules struct {
 
 type parsedFirewallRule struct {
 	EbpfFirewallRules
-	prefix     netip.Prefix
-	prefixBits int // NP sorts original widths; CNP uses canonical widths.
-	except     []netip.Prefix
+	prefix         netip.Prefix
+	prefixBits     int // NP sorts original widths; CNP uses canonical widths.
+	exceptPrefixes []netip.Prefix
 }
 
 type FirewallRuleProcessor struct {
 	// Primary IP of the node
 	nodeIP   netip.Addr
+	nodeKey  string
+	nodeErr  error
 	hostMask string
 	// Flag to track the IPv6 mode
 	enableIPv6 bool
 }
 
 func NewFirewallRuleProcessor(nodeIP string, hostMask string, enableIPv6 bool) *FirewallRuleProcessor {
-	address, _ := netip.ParseAddr(nodeIP)
+	address, err := netip.ParseAddr(nodeIP)
+	var nodeKey string
+	if err == nil {
+		var prefix netip.Prefix
+		prefix, err = parsePrefix(nodeIP + hostMask)
+		if err == nil {
+			nodeKey = string(utils.ComputeTrieKeyFromPrefix(prefix.Masked(), enableIPv6))
+		}
+	}
 	fwrp := &FirewallRuleProcessor{
 		nodeIP:     address,
+		nodeKey:    nodeKey,
+		nodeErr:    err,
 		hostMask:   hostMask,
 		enableIPv6: enableIPv6,
 	}
@@ -91,13 +101,11 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	containmentTrie := newCIDRTrie()
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
-	nodePrefix, err := parsePrefix(f.nodeIP.String() + f.hostMask)
-	if err != nil {
-		return nil, fmt.Errorf("parse node CIDR: %w", err)
+	if f.nodeErr != nil {
+		return nil, fmt.Errorf("parse node CIDR: %w", f.nodeErr)
 	}
-	key := computeTrieKey(nodePrefix.Masked(), f.enableIPv6)
 	value := utils.ComputeTrieValue([]v1alpha1.Port{}, true, false)
-	firewallMap[string(key)] = value
+	firewallMap[f.nodeKey] = value
 
 	rules, err := f.parseRules(firewallRules)
 	if err != nil {
@@ -122,7 +130,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 				return nil, fmt.Errorf("parse except CIDR %q: %w", exceptCidr, err)
 			}
 			prefix = canonicalPrefix(prefix)
-			firewallRule.except = append(firewallRule.except, prefix)
+			firewallRule.exceptPrefixes = append(firewallRule.exceptPrefixes, prefix)
 			exceptCidrs[prefix] = struct{}{}
 		}
 
@@ -134,7 +142,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 		if existingFirewallRuleInfo, ok := cidrsMap[firewallRule.prefix]; ok {
 			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
-			firewallRule.except = append(firewallRule.except, existingFirewallRuleInfo.except...)
+			firewallRule.exceptPrefixes = append(firewallRule.exceptPrefixes, existingFirewallRuleInfo.exceptPrefixes...)
 		} else {
 			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule.prefix, containmentTrie, nonHostCIDRs)
 			if len(cidrL4Info) > 0 {
@@ -153,7 +161,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	}
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
-	for exceptCidr := range maps.Keys(exceptCidrs) {
+	for exceptCidr := range exceptCidrs {
 		if _, ok := cidrsMap[exceptCidr]; !ok {
 			exceptFirewall := EbpfFirewallRules{}
 			addDenyAllL4Entry(&exceptFirewall)
@@ -165,7 +173,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	for key, value := range cidrsMap {
 		log().Infof("Updating Map with IP Key: %s", key)
 		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
-		firewallKey := computeTrieKey(key, f.enableIPv6)
+		firewallKey := utils.ComputeTrieKeyFromPrefix(key, f.enableIPv6)
 
 		if len(value.L4Info) != 0 {
 			value.L4Info = mergeDuplicateL4Info(value.L4Info)
@@ -209,7 +217,7 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule netip.Prefix,
 			continue
 		}
 		foundInExcept := false
-		for _, except := range cidrFirewallInfo.except {
+		for _, except := range cidrFirewallInfo.exceptPrefixes {
 			if except.Contains(firewallRule.Addr()) {
 				foundInExcept = true
 				break
@@ -267,11 +275,9 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 	// Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	// This ensures kubelet liveness/readiness probes are never blocked by cluster network policies.
-	nodePrefix, err := parsePrefix(f.nodeIP.String() + f.hostMask)
-	if err != nil {
-		return nil, fmt.Errorf("parse node CIDR: %w", err)
+	if f.nodeErr != nil {
+		return nil, fmt.Errorf("parse node CIDR: %w", f.nodeErr)
 	}
-	key := computeTrieKey(nodePrefix.Masked(), f.enableIPv6)
 	nodeIPL4Rule := []utils.L4Rule{
 		{
 			Action:   "Accept",
@@ -279,7 +285,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 		},
 	}
 	value := utils.ComputeTrieValueForCPE(nodeIPL4Rule)
-	firewallMap[string(key)] = value
+	firewallMap[f.nodeKey] = value
 
 	// Step 1: Sort by CIDR length
 	rules, err := f.parseRules(firewallRules)
@@ -338,7 +344,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 		log().Infof("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
 		resolvedL4Rules := f.removeDuplicateL4Rules(l4Rules)
 
-		firewallKey := computeTrieKey(cidr, f.enableIPv6)
+		firewallKey := utils.ComputeTrieKeyFromPrefix(cidr, f.enableIPv6)
 
 		firewallValue := utils.ComputeTrieValueForCPE(resolvedL4Rules)
 		firewallMap[string(firewallKey)] = firewallValue
@@ -356,12 +362,11 @@ func (f *FirewallRuleProcessor) parseRules(rules []EbpfFirewallRules) ([]parsedF
 		}
 		prefix, err := parsePrefix(cidr)
 		if err != nil {
-			// IPv6 mode previously skipped bare IPv4 addresses with its /128 host mask.
-			if address, addrErr := netip.ParseAddr(string(rule.IPCidr)); f.enableIPv6 && addrErr == nil && address.Is4() {
-				bits, maskErr := strconv.Atoi(strings.TrimPrefix(f.hostMask, "/"))
-				if maskErr != nil {
-					return nil, fmt.Errorf("parse host mask %q: %w", f.hostMask, maskErr)
-				}
+			// Legacy IPv6 filtering treats unparseable CIDRs as wrong-family rules.
+			if f.enableIPv6 {
+				_, mask, _ := strings.Cut(cidr, "/")
+				bits, _ := strconv.Atoi(mask)
+				log().Warnf("Skipping unparseable rule CIDR %q in IPv6 mode: %v", rule.IPCidr, err)
 				parsed = append(parsed, parsedFirewallRule{EbpfFirewallRules: rule, prefixBits: bits})
 				continue
 			}
@@ -398,23 +403,6 @@ func canonicalPrefix(prefix netip.Prefix) netip.Prefix {
 		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
 	}
 	return prefix
-}
-
-func computeTrieKey(prefix netip.Prefix, enableIPv6 bool) []byte {
-	length := utils.TRIE_KEY_LENGTH
-	if enableIPv6 {
-		length = utils.TRIE_V6_KEY_LENGTH
-	}
-	key := make([]byte, length)
-	binary.LittleEndian.PutUint32(key[:4], uint32(prefix.Bits()))
-	if prefix.Addr().Is4() {
-		address := prefix.Addr().As4()
-		copy(key[4:], address[:])
-	} else {
-		address := prefix.Addr().As16()
-		copy(key[4:], address[:])
-	}
-	return key
 }
 
 func (f *FirewallRuleProcessor) shouldSkipRule(cidr netip.Prefix) bool {

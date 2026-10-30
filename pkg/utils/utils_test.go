@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"bytes"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -45,6 +47,24 @@ func TestComputeTrieKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ComputeTrieKey(tt.args.IPNet, false)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestComputeTrieKeyFromPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		cidr string
+		ipv6 bool
+		want []byte
+	}{
+		{"10.0.0.0/8", false, []byte{8, 0, 0, 0, 10, 0, 0, 0}},
+		{"2001:db8::/32", true, []byte{32, 0, 0, 0, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+	} {
+		t.Run(tt.cidr, func(t *testing.T) {
+			got := ComputeTrieKeyFromPrefix(netip.MustParsePrefix(tt.cidr), tt.ipv6)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("key = %x, want %x", got, tt.want)
+			}
 		})
 	}
 }
@@ -671,53 +691,6 @@ func TestGetPolicyEndpointIdentifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := GetPolicyEndpointIdentifier(tt.args.policyName, tt.args.policyNamespace)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestIsNonHostCIDR(t *testing.T) {
-	type args struct {
-		ipAddr string
-	}
-
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{
-			name: "IPv4 Catch All IP Entry",
-			args: args{
-				ipAddr: "0.0.0.0/0",
-			},
-			want: true,
-		},
-		{
-			name: "IPv4 Host IP Entry",
-			args: args{
-				ipAddr: "1.1.1.1/32",
-			},
-			want: false,
-		},
-		{
-			name: "IPv6 Host IP Entry",
-			args: args{
-				ipAddr: "2000::/128",
-			},
-			want: false,
-		},
-		{
-			name: "Random /m IPv4 CIDR",
-			args: args{
-				ipAddr: "1.1.1.2/24",
-			},
-			want: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsNonHostCIDR(tt.args.ipAddr)
 			assert.Equal(t, tt.want, got)
 		})
 	}

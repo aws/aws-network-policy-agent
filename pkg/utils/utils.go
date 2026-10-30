@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -283,6 +284,20 @@ var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, int
 
 func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	prefixLen, _ := n.Mask.Size()
+	return computeTrieKey(prefixLen, n.IP, isIPv6Enabled)
+}
+
+// ComputeTrieKeyFromPrefix encodes a valid parsed prefix in the BPF key layout.
+func ComputeTrieKeyFromPrefix(prefix netip.Prefix, isIPv6Enabled bool) []byte {
+	if prefix.Addr().Is4() {
+		address := prefix.Addr().As4()
+		return computeTrieKey(prefix.Bits(), address[:], isIPv6Enabled)
+	}
+	address := prefix.Addr().As16()
+	return computeTrieKey(prefix.Bits(), address[:], isIPv6Enabled)
+}
+
+func computeTrieKey(prefixLen int, address []byte, isIPv6Enabled bool) []byte {
 	var key []byte
 
 	if isIPv6Enabled {
@@ -295,7 +310,7 @@ func ComputeTrieKey(n net.IPNet, isIPv6Enabled bool) []byte {
 	}
 
 	binary.LittleEndian.PutUint32(key[0:4], uint32(prefixLen))
-	copy(key[4:], n.IP)
+	copy(key[4:], address)
 
 	return key
 }
@@ -480,23 +495,6 @@ func IsInvalidFilterListError(error string) bool {
 func IsMissingFilterError(error string) bool {
 	errCode := strings.Split(error, "-")
 	if errCode[0] == ErrMissingFilter {
-		return true
-	}
-	return false
-}
-
-func IsNodeIP(nodeIP string, ipCidr string) bool {
-	ipAddr, _, _ := net.ParseCIDR(ipCidr)
-	if net.ParseIP(nodeIP).Equal(ipAddr) {
-		return true
-	}
-	return false
-}
-
-func IsNonHostCIDR(ipAddr string) bool {
-	ipSplit := strings.Split(ipAddr, "/")
-	//Ignore Catch All IP entry as well
-	if ipSplit[1] != "32" && ipSplit[1] != "128" {
 		return true
 	}
 	return false

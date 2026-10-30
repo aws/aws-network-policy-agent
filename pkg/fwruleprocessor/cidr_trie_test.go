@@ -209,7 +209,7 @@ func assertEquivalent(t *testing.T, ruleMap map[string]EbpfFirewallRules, target
 		prefix := canonicalPrefix(netip.MustParsePrefix(cidr))
 		entry := parsedFirewallRule{EbpfFirewallRules: rule, prefix: prefix}
 		for _, except := range rule.Except {
-			entry.except = append(entry.except, canonicalPrefix(netip.MustParsePrefix(string(except))))
+			entry.exceptPrefixes = append(entry.exceptPrefixes, canonicalPrefix(netip.MustParsePrefix(string(except))))
 		}
 		parsed[prefix] = entry
 	}

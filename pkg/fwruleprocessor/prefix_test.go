@@ -2,7 +2,9 @@ package fwruleprocessor
 
 import (
 	"bytes"
+	"maps"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -32,7 +34,7 @@ func TestParsedCIDRMatchesLegacyKey(t *testing.T) {
 			// The compiler historically reparsed IPNet.String before encoding.
 			_, legacy, _ = net.ParseCIDR(legacy.String())
 			for _, ipv6 := range []bool{false, true} {
-				if got, want := computeTrieKey(prefix, ipv6), utils.ComputeTrieKey(*legacy, ipv6); !bytes.Equal(got, want) {
+				if got, want := utils.ComputeTrieKeyFromPrefix(prefix, ipv6), utils.ComputeTrieKey(*legacy, ipv6); !bytes.Equal(got, want) {
 					t.Fatalf("IPv6=%t: key = %x, want %x", ipv6, got, want)
 				}
 			}
@@ -79,17 +81,78 @@ func TestIPv6CompilationSkipsBareIPv4(t *testing.T) {
 		"ClusterNetworkPolicy": processor.ComputeClusterPolicyMapEntriesFromEndpointRules,
 	} {
 		t.Run(name, func(t *testing.T) {
-			rules := []EbpfFirewallRules{
-				{IPCidr: "10.1.2.3", Except: []v1alpha1.NetworkAddress{"ignored-invalid-exception"}},
+			validRules := []EbpfFirewallRules{
+				{IPCidr: "10.2.0.0/16"},
 				{IPCidr: "2001:db8:1::/64"},
 				{IPCidr: "2001:db8:1::7/128"},
 			}
-			got, err := compile(rules)
+			want, err := compile(slices.Clone(validRules))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got) != 3 || rules[0].IPCidr != "2001:db8:1::/64" || rules[1].IPCidr != "10.1.2.3" {
-				t.Fatalf("wrong-family filtering or stable input order changed: %v, %v", got, rules)
+			for _, cidr := range []string{"10.1.2.3", "010.0.0.0/8", "10.0.0.0/33", "fd00::/129", "invalid"} {
+				t.Run(cidr, func(t *testing.T) {
+					rules := append([]EbpfFirewallRules{{
+						IPCidr: v1alpha1.NetworkAddress(cidr),
+						Except: []v1alpha1.NetworkAddress{"ignored-invalid-exception"},
+					}}, validRules...)
+					got, err := compile(rules)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !maps.EqualFunc(got, want, bytes.Equal) {
+						t.Fatalf("skipped rule changed valid IPv6 entries: got %v, want %v", got, want)
+					}
+					if cidr == "10.1.2.3" && rules[2].IPCidr != "10.1.2.3" {
+						t.Fatalf("stable bare-IPv4 input order changed: %v", rules)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestIPv4CompilationRejectsUnparseableCIDRs(t *testing.T) {
+	processor := NewFirewallRuleProcessor("192.168.1.1", "/32", false)
+	for name, compile := range map[string]func([]EbpfFirewallRules) (map[string][]byte, error){
+		"NetworkPolicy":        processor.ComputeMapEntriesFromEndpointRules,
+		"ClusterNetworkPolicy": processor.ComputeClusterPolicyMapEntriesFromEndpointRules,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, cidr := range []string{"010.0.0.0/8", "10.0.0.0/33", "fd00::/129", "invalid"} {
+				t.Run(cidr, func(t *testing.T) {
+					got, err := compile([]EbpfFirewallRules{{IPCidr: v1alpha1.NetworkAddress(cidr)}})
+					if err == nil || got != nil {
+						t.Fatalf("invalid CIDR must fail compilation: entries=%v, error=%v", got, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCompilationRejectsInvalidNodeCIDRs(t *testing.T) {
+	for _, tt := range []struct {
+		node string
+		mask string
+		ipv6 bool
+	}{
+		{"invalid", "/32", false},
+		{"192.168.1.1", "/33", false},
+		{"2001:db8::1", "/129", true},
+	} {
+		t.Run(tt.node+tt.mask, func(t *testing.T) {
+			processor := NewFirewallRuleProcessor(tt.node, tt.mask, tt.ipv6)
+			for name, compile := range map[string]func([]EbpfFirewallRules) (map[string][]byte, error){
+				"NetworkPolicy":        processor.ComputeMapEntriesFromEndpointRules,
+				"ClusterNetworkPolicy": processor.ComputeClusterPolicyMapEntriesFromEndpointRules,
+			} {
+				t.Run(name, func(t *testing.T) {
+					got, err := compile(nil)
+					if err == nil || got != nil {
+						t.Fatalf("invalid node CIDR must fail compilation: entries=%v, error=%v", got, err)
+					}
+				})
 			}
 		})
 	}
