@@ -216,6 +216,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	}
 	r.commitClusterPolicyEndpointState(resourceName, trackedPods, trackedPodIdentifiers, parentCPEList)
 
+	programmed := 0
 	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
 		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
@@ -224,26 +225,32 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 			programmingErr = errors.Join(programmingErr, err)
 			continue
 		}
-		if err := r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules); err != nil {
+		err = r.configureClusterPolicyBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
+		switch {
+		case err == nil:
+			programmed++
+		case errors.Is(err, ebpf.ErrProbeAttachSkipped):
+			// Retrying cannot resolve this, so do not report it as a failure.
+			log().Warnf("Skipped cluster policy eBPF programming for podIdentifier %s: %v", podIdentifier, err)
+		default:
 			log().Errorf("Error configuring Cluster Policy eBPF Probes for podIdentifier %s: %v", podIdentifier, err)
 			programmingErr = errors.Join(programmingErr, err)
 		}
 	}
 
 	// Latency is recorded only for a pass whose cleanup succeeded, so the retry after a failed
-	// cleanup measures the change. A programming error consumes the annotation without
-	// recording a sample.
+	// cleanup measures the change. Skips count as neither: programming nothing records no
+	// sample, but programming some identifiers still reports the latency that was real.
 	if cleanupErr == nil {
-		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmingErr == nil)
+		r.observeClusterPolicyProgrammingLatency(ClusterPolicyEndpoint, programmed > 0 && programmingErr == nil)
 	}
 
 	return errors.Join(cleanupErr, programmingErr)
 }
 
 // observeClusterPolicyProgrammingLatency emits the E2E latency histogram from
-// the last-change-trigger-time annotation. Each annotation value is consumed
-// at most once per CPE, even when the observation is suppressed (programming
-// failure, clock skew), so stale rewrites/resyncs/relists never re-observe it.
+// the last-change-trigger-time annotation. Each annotation value is consumed at
+// most once per CPE, so stale rewrites/resyncs/relists never re-observe it.
 func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatency(cpe *policyk8sawsv1.ClusterPolicyEndpoint, programmingSucceeded bool) {
 	if cpe.Annotations == nil {
 		return
@@ -263,13 +270,15 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 	if prev, ok := r.lastObservedTriggerTimes.Load(cpe.Name); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	// Consume before the suppression checks below: a suppressed observation
-	// must never be re-emitted (inflated) by a later resync of the same annotation.
-	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
 	if !programmingSucceeded {
+		// Leave the trigger time unconsumed: the reconcile is retried, and the
+		// retry that succeeds must still be able to observe this latency.
 		log().Debugf("Skipping E2E cluster policy programming latency for CPE %s: programming failed", cpe.Name)
 		return
 	}
+	// Consume before the suppression check below: a suppressed observation must
+	// never be re-emitted (inflated) by a later resync of the same annotation.
+	r.lastObservedTriggerTimes.Store(cpe.Name, triggerTimeStr)
 	latency := time.Since(triggerTime).Seconds()
 	if latency < 0 {
 		// Clock skew between NPC (control plane) and this node
