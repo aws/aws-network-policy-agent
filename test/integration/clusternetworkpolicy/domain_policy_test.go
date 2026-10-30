@@ -15,12 +15,6 @@ import (
 )
 
 var _ = Describe("Domain-based Cluster Network Policy Tests", Ordered, func() {
-	BeforeAll(func() {
-		if !fw.Options.IsAutoCluster {
-			Skip("Skipping domain policy tests when is-auto-cluster is false")
-		}
-	})
-
 	Context("When testing domain name egress rules", func() {
 		var deployments []*appsv1.Deployment
 		var policies []*unstructured.Unstructured
@@ -576,6 +570,124 @@ var _ = Describe("Domain-based Cluster Network Policy Tests", Ordered, func() {
 				_, err = fw.PodManager.ValidateConnection(testNamespace, selectedPod.Name, "http://amazon.com", fw.Options.IpFamily)
 				Expect(err).To(HaveOccurred())
 			})
+		})
+
+		It("should drop the domain rules of a workload whose pods left the node", func() {
+			const app = "returning-app"
+			// Waits until the workload has exactly n pods, all running.
+			runningPods := func(n int) []v1.Pod {
+				var running []v1.Pod
+				Eventually(func(g Gomega) {
+					pods, err := fw.PodManager.GetPodsWithLabel(ctx, testNamespace, "app", app)
+					g.Expect(err).ToNot(HaveOccurred())
+					running = nil
+					for _, pod := range pods {
+						if pod.Status.Phase == v1.PodRunning && pod.DeletionTimestamp == nil {
+							running = append(running, pod)
+						}
+					}
+					g.Expect(pods).To(HaveLen(n))
+					g.Expect(running).To(HaveLen(n))
+				}, 2*time.Minute, 2*time.Second).Should(Succeed())
+				return running
+			}
+
+			var nodes v1.NodeList
+			Expect(fw.K8sClient.List(ctx, &nodes)).To(Succeed())
+			container := manifest.NewAgnHostContainerBuilder().
+				ImageRepository(fw.Options.TestImageRegistry).
+				Command([]string{"/bin/sh", "-c"}).
+				Args([]string{"while true; do sleep 30; done"}).
+				Build()
+			// One node, so the workload's last pod leaves it and its next pod comes back to it. No grace
+			// period, so the pod can be gone from the node before the policy controller updates the policy.
+			deployment, err := fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, manifest.NewDefaultDeploymentBuilder().
+				Namespace(testNamespace).
+				Name(app).
+				Replicas(1).
+				TerminationGracePeriod(0).
+				AddLabel("app", app).
+				NodeSelector(map[string]string{"kubernetes.io/hostname": nodes.Items[0].Labels["kubernetes.io/hostname"]}).
+				Container(container).
+				Build())
+			Expect(err).ToNot(HaveOccurred())
+			deployments = append(deployments, deployment)
+
+			networkPolicy := manifest.NewNetworkPolicyBuilder().
+				Name("deny-all-egress-"+app).
+				Namespace(testNamespace).
+				PodSelector("app", app).
+				SetPolicyTypes([]network.PolicyType{network.PolicyTypeEgress}).
+				Build()
+			Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, networkPolicy)).To(Succeed())
+			networkPolicies = append(networkPolicies, networkPolicy)
+			adminPolicy := manifest.NewClusterNetworkPolicyBuilder().
+				Name("admin-accept-example-"+app).
+				Priority(10).
+				Tier("Admin").
+				SubjectPods(map[string]string{"test": "domain-policy"}, map[string]string{"app": app}).
+				AddEgressRule(manifest.NewClusterEgressRuleBuilder().
+					Name("accept-example").
+					Action("Accept").
+					AddPort(443, "TCP").
+					BuildEgressRule([]map[string]interface{}{manifest.NewDomainNamesPeer([]string{"example.com"})})).
+				Build()
+			Expect(fw.ClusterNetworkPolicyManager.CreateClusterNetworkPolicy(ctx, adminPolicy)).To(Succeed())
+			policies = append(policies, adminPolicy)
+			time.Sleep(10 * time.Second)
+
+			_, err = fw.PodManager.ValidateConnection(testNamespace, runningPods(1)[0].Name, "https://example.com", fw.Options.IpFamily)
+			Expect(err).ToNot(HaveOccurred(), "the Admin domain rule allows example.com")
+
+			Expect(fw.DeploymentManager.ScaleDeploymentAndWaitTillReady(ctx, testNamespace, app, 0)).To(Succeed())
+			runningPods(0)
+			time.Sleep(5 * time.Second)
+			Expect(fw.ClusterNetworkPolicyManager.DeleteClusterNetworkPolicy(ctx, adminPolicy)).To(Succeed())
+			time.Sleep(10 * time.Second)
+
+			Expect(fw.DeploymentManager.ScaleDeploymentAndWaitTillReady(ctx, testNamespace, app, 1)).To(Succeed())
+			pod := runningPods(1)[0]
+			time.Sleep(10 * time.Second)
+			_, err = fw.PodManager.ValidateConnection(testNamespace, pod.Name, "https://example.com", fw.Options.IpFamily)
+			Expect(err).To(HaveOccurred(), "the deleted Admin rule must not allow example.com to the workload's new pod")
+		})
+
+		It("should not let a Baseline domain rule override an Admin deny", func() {
+			createPolicy := func(name, tier string, priority int32, rule map[string]interface{}) {
+				policy := manifest.NewClusterNetworkPolicyBuilder().
+					Name(name).
+					Priority(priority).
+					Tier(tier).
+					SubjectNamespaces(map[string]string{"test": "domain-policy"}).
+					AddEgressRule(rule).
+					Build()
+				Expect(fw.ClusterNetworkPolicyManager.CreateClusterNetworkPolicy(ctx, policy)).To(Succeed())
+				policies = append(policies, policy)
+				time.Sleep(10 * time.Second)
+			}
+			acceptExample := manifest.NewClusterEgressRuleBuilder().
+				Name("accept-example").
+				Action("Accept").
+				AddPort(443, "TCP").
+				BuildEgressRule([]map[string]interface{}{manifest.NewDomainNamesPeer([]string{"example.com"})})
+			denyHTTPS := manifest.NewClusterEgressRuleBuilder().
+				Name("deny-https").
+				Action("Deny").
+				AddPort(443, "TCP").
+				BuildEgressRule([]map[string]interface{}{manifest.NewNetworksPeer([]string{"0.0.0.0/0"})})
+
+			testPods, err := fw.PodManager.GetPodsWithLabel(ctx, testNamespace, "app", "test-app")
+			Expect(err).ToNot(HaveOccurred())
+			selectedPod := testPods[rand.Intn(len(testPods))]
+
+			createPolicy("admin-deny-https", "Admin", 20, denyHTTPS)
+			createPolicy("baseline-accept-example", "Baseline", 10, acceptExample)
+			_, err = fw.PodManager.ValidateConnection(testNamespace, selectedPod.Name, "https://example.com", fw.Options.IpFamily)
+			Expect(err).To(HaveOccurred(), "the Admin deny must win over a Baseline domain rule")
+
+			createPolicy("admin-accept-example", "Admin", 10, acceptExample)
+			_, err = fw.PodManager.ValidateConnection(testNamespace, selectedPod.Name, "https://example.com", fw.Options.IpFamily)
+			Expect(err).ToNot(HaveOccurred(), "an Admin domain rule with a higher priority wins over the Admin deny")
 		})
 
 		AfterEach(func() {

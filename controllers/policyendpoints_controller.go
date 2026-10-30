@@ -26,6 +26,7 @@ import (
 	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/dnsproxy"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
@@ -105,12 +106,13 @@ func prometheusRegister() {
 }
 
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
-func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
+func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool, dnsProxy *dnsproxy.Proxy) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
 		k8sClient:        k8sClient,
 		nodeIP:           nodeIP,
 		ebpfClient:       ebpfClient,
 		enableIPv6:       enableIPv6,
+		dnsProxy:         dnsProxy,
 		trackerStartTime: time.Now(),
 	}
 
@@ -145,6 +147,7 @@ type PolicyEndpointsReconciler struct {
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 	enableIPv6 bool
+	dnsProxy   *dnsproxy.Proxy
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints,verbs=get;list;watch
@@ -417,6 +420,10 @@ func (r *PolicyEndpointsReconciler) configureeBPFProbes(ctx context.Context, pod
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+		if err := r.dnsProxy.AddRunningPod(pod.NamespacedName, podIdentifier); err != nil {
+			// Not fatal: updateeBPFMaps syncs the redirects of the pod identifier again and reports the error.
+			log().Errorf("DNS redirect failed for pod %s namespace %s: %v", pod.Name, pod.Namespace, err)
+		}
 	}
 
 	// AttacheBPFProbes skips pods already deleted from the node, so the PolicyEndpoint can
@@ -579,7 +586,13 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 					continue
 				}
 				if endPointInfo.CIDR == "" {
-					log().Infof("CIDR is empty, skipping the egress rule %s, NS: %s", currentPE.Name, currentPE.Namespace)
+					egressRules = append(egressRules,
+						fwrp.EbpfFirewallRules{
+							Priority:   utils.PE_PRIORITY,
+							Action:     policyk8sawsv1.ClusterNetworkPolicyRuleActionAccept,
+							DomainName: string(endPointInfo.DomainName),
+							L4Info:     endPointInfo.Ports,
+						})
 					continue
 				}
 
@@ -625,6 +638,8 @@ func (r *PolicyEndpointsReconciler) deriveDefaultPodIsolation(policyEndpoint *po
 func (r *PolicyEndpointsReconciler) updateeBPFMaps(podIdentifier string,
 	ingressRules, egressRules []fwrp.EbpfFirewallRules, state int) error {
 
+	domainRules, egressRules := fwrp.SegregateDomainAndIPRules(egressRules)
+
 	// Map Update should only happen once for those that share the same Map
 	if err := r.ebpfClient.UpdateEbpfMaps(podIdentifier, ingressRules, egressRules); err != nil {
 		return fmt.Errorf("update ingress/egress maps for podIdentifier %s: %w", podIdentifier, err)
@@ -637,7 +652,8 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(podIdentifier string,
 	if err := r.ebpfClient.CreatePodStateEbpfEntryIfNotExists(podIdentifier, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY, ebpf.DEFAULT_ALLOW); err != nil {
 		return fmt.Errorf("seed cluster-policy pod_state for podIdentifier %s: %w", podIdentifier, err)
 	}
-	return nil
+	// After the IP rules, so a DNS redirect failure only affects the domain rules.
+	return r.dnsProxy.SetRules(podIdentifier, dnsproxy.PolicyEndpoints, domainRules)
 }
 
 func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,

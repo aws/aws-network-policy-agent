@@ -27,7 +27,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		podName := "nginx-abc123"
 		podNamespace := "np-target"
@@ -116,7 +116,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			PodIdentifiersWithoutBPFContext: map[string]bool{podIdentifier: true},
 		}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		cpeName := "isolate-dark-corner-t7p5w"
 		parentCNP := "isolate-dark-corner"
@@ -163,7 +163,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		podIdentifier := "nginx@np-target"
 		cpeA := "isolate-dark-corner-aaaaa"
@@ -221,7 +221,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		parentCNP := "restrict-egress-from-payment-service-to-external-endpoints-prod"
 		cpeName := "restrict-egress-from-payment-service-to-external-endpoints-abcde"
@@ -303,7 +303,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		podName := "nginx-abc123"
 		podNamespace := "np-target"
@@ -383,7 +383,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		podIdentifier := "nginx@np-target"
 		cpeName := "isolate-dark-corner-t7p5w"
@@ -432,7 +432,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
-		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 		podIdentifier := "nginx@np-target"
 		deletedCPE := "isolate-dark-corner-t7p5w"
@@ -487,7 +487,7 @@ func TestReconcileClusterPolicyEndpoint_TransientListErrorDoesNotClearEbpf(t *te
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
 
-	reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
+	reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, nil)
 
 	podIdentifier := "nginx@np-target"
 	cpeName := "isolate-dark-corner-t7p5w"

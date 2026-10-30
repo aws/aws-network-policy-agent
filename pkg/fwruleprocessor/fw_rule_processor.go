@@ -461,6 +461,19 @@ func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) [
 	return result
 }
 
+// SegregateDomainAndIPRules splits off the domain name rules, which the DNS proxy enforces. A rule
+// with a CIDR is an IP rule, as for PolicyEndpoints.
+func SegregateDomainAndIPRules(rules []EbpfFirewallRules) (domainRules, ipRules []EbpfFirewallRules) {
+	for _, rule := range rules {
+		if rule.DomainName != "" && rule.IPCidr == "" {
+			domainRules = append(domainRules, rule)
+		} else {
+			ipRules = append(ipRules, rule)
+		}
+	}
+	return domainRules, ipRules
+}
+
 // isIPv6 returns true if the given CIDR or IP address is IPv6.
 func isIPv6(cidr string) bool {
 	ip, _, err := net.ParseCIDR(cidr)

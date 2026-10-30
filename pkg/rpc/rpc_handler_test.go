@@ -22,10 +22,13 @@ import (
 	"github.com/aws/amazon-vpc-cni-k8s/rpc"
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/controllers"
+	"github.com/aws/aws-network-policy-agent/pkg/dnsproxy"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,7 +41,7 @@ func TestRunRPCHandler_NoExistingSocket(t *testing.T) {
 	testSocketPath := "/tmp/test-rpc-handler.sock"
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, nil, testSocketPath)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }
@@ -54,15 +57,15 @@ func TestRunRPCHandler_StaleSocketCleanup(t *testing.T) {
 	file.Close()
 	defer os.Remove(testSocketPath)
 
-	errCh, err := RunRPCHandler(nil, nil, testSocketPath)
+	errCh, err := RunRPCHandler(nil, nil, nil, testSocketPath)
 	assert.Nil(t, err)
 	assert.NotNil(t, errCh)
 }
 
 func TestEnforceNpToPod_AttachesAsConfirmedLive(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -86,7 +89,7 @@ func TestEnforceNpToPod_AttachesAsConfirmedLive(t *testing.T) {
 
 func TestEnforceNpToPod_NilClusterPolicyReconciler_ReturnsError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -106,9 +109,9 @@ func TestEnforceNpToPod_NilClusterPolicyReconciler_ReturnsError(t *testing.T) {
 
 func TestEnforceNpToPod_NilClusterPolicyEBPFClient_ReturnsError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
 	// clusterReconciler with nil eBPF client
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", nil)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", nil, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -129,7 +132,7 @@ func TestEnforceNpToPod_NilClusterPolicyEBPFClient_ReturnsError(t *testing.T) {
 func TestEnforceNpToPod_OneReconcilerReady_ReturnsError(t *testing.T) {
 	// Reverse case: clusterPolicyReconciler is ready but policyReconciler is nil
 	mockBpfClient := &ebpf.MockBpfClient{}
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil)
 
 	s := &server{
 		policyReconciler:        nil,
@@ -166,8 +169,8 @@ func TestEnforceNpToPod_BothReconcilersNil_ReturnsSuccess(t *testing.T) {
 
 func TestEnforceNpToPod_NoPolicies_UpdatesBothPodStateMaps(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -205,8 +208,8 @@ func TestEnforceNpToPod_FailsClosedOnPodStateError(t *testing.T) {
 	mockBpfClient := &ebpf.MockBpfClient{
 		UpdatePodStateEbpfMapsErr: injected,
 	}
-	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false)
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient)
+	reconciler := controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil)
 
 	s := &server{
 		policyReconciler:        reconciler,
@@ -228,8 +231,11 @@ func TestEnforceNpToPod_FailsClosedOnPodStateError(t *testing.T) {
 // cache knows an egress policy for the "nginx" podIdentifier in "default",
 // populated the same way production does it: by reconciling a PolicyEndpoint
 // that selects a pod of that identifier on this node.
-func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient) *controllers.PolicyEndpointsReconciler {
+func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient, egress ...policyk8sawsv1.EndpointInfo) *controllers.PolicyEndpointsReconciler {
 	t.Helper()
+	if len(egress) == 0 {
+		egress = []policyk8sawsv1.EndpointInfo{{CIDR: "10.1.0.0/16"}}
+	}
 	scheme := runtime.NewScheme()
 	assert.NoError(t, policyk8sawsv1.AddToScheme(scheme))
 	pe := &policyk8sawsv1.PolicyEndpoint{
@@ -240,11 +246,11 @@ func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient) *c
 			PodSelectorEndpoints: []policyk8sawsv1.PodEndpoint{
 				{Name: "nginx-old123", Namespace: "default", PodIP: "10.0.0.5", HostIP: "10.0.0.1"},
 			},
-			Egress: []policyk8sawsv1.EndpointInfo{{CIDR: "10.1.0.0/16"}},
+			Egress: egress,
 		},
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pe).Build()
-	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false)
+	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false, nil)
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}})
 	require.NoError(t, err)
 	assert.True(t, reconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: policy cached")
@@ -270,7 +276,7 @@ func TestEnforceNpToPod_CachedPolicies_ProgramsMapsOnlyForFirstPod(t *testing.T)
 			mockBpfClient.AttachFirstPodInPodIdentifier = tt.firstPod
 			s := &server{
 				policyReconciler:        reconciler,
-				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient),
+				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil),
 			}
 
 			resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
@@ -317,7 +323,7 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 	}
 	mockBpfClient := &ebpf.MockBpfClient{}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cpe).Build()
-	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(k8sClient, "10.0.0.1", mockBpfClient)
+	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(k8sClient, "10.0.0.1", mockBpfClient, nil)
 	_, err := clusterReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: cpe.Name}})
 	require.NoError(t, err)
 	require.True(t, clusterReconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: cluster policy cached")
@@ -325,7 +331,7 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 	mockBpfClient.Reset()
 	mockBpfClient.AttachFirstPodInPodIdentifier = true
 	s := &server{
-		policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false),
+		policyReconciler:        controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil),
 		clusterPolicyReconciler: clusterReconciler,
 	}
 	resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
@@ -343,4 +349,85 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 		{PodIdentifier: "nginx@default", MapKey: ebpf.POD_STATE_MAP_KEY}:                ebpf.DEFAULT_ALLOW,
 		{PodIdentifier: "nginx@default", MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}: ebpf.POLICIES_APPLIED,
 	}, mockBpfClient.PodStateByIdentifier)
+}
+
+// newProxy returns a DNS proxy that never starts: the fake client has no kube-dns Service.
+func newProxy(t *testing.T, ebpfClient ebpf.BpfClient) *dnsproxy.Proxy {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return dnsproxy.New(ctx, fake.NewClientBuilder().Build(), ebpfClient)
+}
+
+func domainRule(name string, port int32) fwrp.EbpfFirewallRules {
+	tcp := corev1.ProtocolTCP
+	return fwrp.EbpfFirewallRules{DomainName: name, Priority: utils.PE_PRIORITY, Action: policyk8sawsv1.ClusterNetworkPolicyRuleActionAccept,
+		L4Info: []policyk8sawsv1.Port{{Protocol: &tcp, Port: &port}}}
+}
+
+// pruned counts the IP cache prunes, which show which domain rules the proxy had: removing rules prunes them.
+func pruned(m *ebpf.MockBpfClient) int {
+	n := 0
+	for _, call := range m.CallLog {
+		if call == "PruneIPCache" {
+			n++
+		}
+	}
+	return n
+}
+
+// The CNI ADD of the first pod of a pod identifier on the node sets its domain rules from the cached
+// policies before the pod starts, replacing the rules an earlier pod of the pod identifier left.
+func TestEnforceNpToPod_FirstPodSetsTheDomainRules(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		firstPod   bool
+		wantPruned int
+	}{
+		{name: "first pod of the identifier", firstPod: true, wantPruned: 2},
+		{name: "later pod of the identifier", firstPod: false, wantPruned: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mockBpfClient := &ebpf.MockBpfClient{}
+			port := int32(443)
+			tcp := corev1.ProtocolTCP
+			reconciler := reconcilerWithCachedPolicy(t, mockBpfClient,
+				policyk8sawsv1.EndpointInfo{DomainName: "example.com", Ports: []policyk8sawsv1.Port{{Protocol: &tcp, Port: &port}}})
+			proxy := newProxy(t, mockBpfClient)
+			require.NoError(t, proxy.SetRules("nginx@default", dnsproxy.PolicyEndpoints, []fwrp.EbpfFirewallRules{domainRule("stale.example.com", 22)}))
+			mockBpfClient.Reset()
+			mockBpfClient.AttachFirstPodInPodIdentifier = tt.firstPod
+			s := &server{
+				policyReconciler:        reconciler,
+				clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, nil),
+				dnsProxy:                proxy,
+			}
+
+			resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+				K8S_POD_NAME:        "nginx-new456",
+				K8S_POD_NAMESPACE:   "default",
+				NETWORK_POLICY_MODE: "standard",
+				InterfaceCount:      1,
+			})
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			assert.Equal(t, tt.wantPruned-1, pruned(mockBpfClient), "the first pod replaces the rule left on port 22")
+
+			require.NoError(t, proxy.SetRules("nginx@default", dnsproxy.PolicyEndpoints, nil))
+			assert.Equal(t, tt.wantPruned, pruned(mockBpfClient), "and the proxy has a rule, the cached one or the one left")
+		})
+	}
+}
+
+func TestDeletePodNp_DomainRulesGoWithThePrograms(t *testing.T) {
+	for _, programsLeft := range []bool{true, false} {
+		mockBpfClient := &ebpf.MockBpfClient{PodIdentifiersWithoutBPFContext: map[string]bool{"nginx@default": !programsLeft}}
+		proxy := newProxy(t, mockBpfClient)
+		require.NoError(t, proxy.SetRules("nginx@default", dnsproxy.PolicyEndpoints, []fwrp.EbpfFirewallRules{domainRule("example.com", 443)}))
+		s := &server{policyReconciler: controllers.NewPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient, false, nil), dnsProxy: proxy}
+
+		_, err := s.DeletePodNp(context.Background(), &rpc.DeleteNpRequest{K8S_POD_NAME: "nginx-old123", K8S_POD_NAMESPACE: "default"})
+		require.NoError(t, err)
+		require.NoError(t, proxy.SetRules("nginx@default", dnsproxy.PolicyEndpoints, nil))
+		assert.Equal(t, programsLeft, pruned(mockBpfClient) == 1, "the rules stay while other pods share the programs: %v", programsLeft)
+	}
 }

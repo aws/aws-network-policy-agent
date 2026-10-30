@@ -951,3 +951,12 @@ func TestComputeMapEntries_SameFamilyExceptRetained(t *testing.T) {
 	_, ok := got[wantKey]
 	assert.Truef(t, ok, "same-family except 10.10.0.0/16 was not added to the map")
 }
+
+func TestSegregateDomainAndIPRules(t *testing.T) {
+	ipRule := EbpfFirewallRules{IPCidr: "192.0.2.0/24"}
+	domainRule := EbpfFirewallRules{DomainName: "example.com"}
+	both := EbpfFirewallRules{IPCidr: "198.51.100.0/24", DomainName: "example.org"}
+	domainRules, ipRules := SegregateDomainAndIPRules([]EbpfFirewallRules{ipRule, domainRule, both})
+	assert.Equal(t, []EbpfFirewallRules{domainRule}, domainRules)
+	assert.Equal(t, []EbpfFirewallRules{ipRule, both}, ipRules, "a rule with a CIDR is an IP rule")
+}

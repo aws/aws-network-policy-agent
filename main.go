@@ -25,6 +25,7 @@ import (
 	"time"
 
 	cnirpc "github.com/aws/amazon-vpc-cni-k8s/rpc"
+	"github.com/aws/aws-network-policy-agent/pkg/dnsproxy"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpcclient"
@@ -76,6 +77,9 @@ func main() {
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
 	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
+	// Before anything that can fail or wait: a DNS redirect an earlier run left sends pods' queries to
+	// a proxy that does not run yet, or at all when network policy is now disabled.
+	dnsproxy.RemoveRedirect()
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
 	if ctrlConfig.EnableProfiling {
@@ -106,6 +110,7 @@ func main() {
 
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
 	var clusterPolicyEndpointController *controllers.ClusterPolicyEndpointsReconciler
+	var dnsProxy *dnsproxy.Proxy
 	if ctrlConfig.EnableNetworkPolicy {
 		log.Info("Network Policy is enabled, registering controllers...")
 
@@ -122,14 +127,19 @@ func main() {
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
 		ebpfClient.ReAttachEbpfProbes()
 
-		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
+		// shortcut: domain rules are IPv4 only; IPv6 clusters keep ignoring them until the IPv6 egress program has an IP cache.
+		if !ctrlConfig.EnableIPv6 {
+			dnsProxy = dnsproxy.New(ctx, mgr.GetAPIReader(), ebpfClient)
+		}
+
+		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6, dnsProxy)
 
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
 			os.Exit(1)
 		}
 
-		clusterPolicyEndpointController = controllers.NewClusterPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
+		clusterPolicyEndpointController = controllers.NewClusterPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, dnsProxy)
 		if err = clusterPolicyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
 			os.Exit(1)
@@ -174,7 +184,7 @@ func main() {
 	// CNI makes rpc calls to NP agent regardless NP is enabled or not
 	// need to start rpc always
 	// todo: add a liveness probe to this gRPC server and remove closing based on this errCh, liveness probe will check and re-start this container
-	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, npaSocketPath)
+	errCh, err := rpc.RunRPCHandler(policyEndpointController, clusterPolicyEndpointController, dnsProxy, npaSocketPath)
 	if err != nil {
 		log.Errorf("Failed to set up gRPC Handler %v", err)
 		os.Exit(1)
@@ -187,7 +197,10 @@ func main() {
 	}()
 
 	log.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
+	err = mgr.Start(ctx)
+	// Pods with domain rules go back to querying the cluster DNS directly while the agent is down.
+	dnsProxy.Stop()
+	if err != nil {
 		log.Errorf("problem running manager %v", err)
 		os.Exit(1)
 	}

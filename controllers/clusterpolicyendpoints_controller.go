@@ -26,6 +26,7 @@ import (
 	"time"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/dnsproxy"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
@@ -64,11 +65,12 @@ func clusterPolicyPrometheusRegister() {
 }
 
 // NewClusterPolicyEndpointsReconciler constructs new ClusterPolicyEndpointReconciler
-func NewClusterPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient) *ClusterPolicyEndpointsReconciler {
+func NewClusterPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, dnsProxy *dnsproxy.Proxy) *ClusterPolicyEndpointsReconciler {
 	r := &ClusterPolicyEndpointsReconciler{
 		k8sClient:        k8sClient,
 		nodeIP:           nodeIP,
 		ebpfClient:       ebpfClient,
+		dnsProxy:         dnsProxy,
 		trackerStartTime: time.Now(),
 	}
 	clusterPolicyPrometheusRegister()
@@ -100,6 +102,7 @@ type ClusterPolicyEndpointsReconciler struct {
 	clusterNetworkPolicyToPodIdentifierMap sync.Map
 
 	ebpfClient ebpf.BpfClient
+	dnsProxy   *dnsproxy.Proxy
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=clusterpolicyendpoints,verbs=get;list;watch
@@ -295,6 +298,10 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 			return err
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
+		if err := r.dnsProxy.AddRunningPod(pod.NamespacedName, podIdentifier); err != nil {
+			// Not fatal: updateClusterPolicyBPFMaps syncs the redirects of the pod identifier again and reports the error.
+			log().Errorf("DNS redirect failed for pod %s namespace %s: %v", pod.Name, pod.Namespace, err)
+		}
 	}
 
 	// AttacheBPFProbes skips pods already deleted from the node, so the CPE can still list a
@@ -316,6 +323,9 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentifier string, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
 
 	state := ebpf.POLICIES_APPLIED
+	hasRules := len(ingressRules) > 0 || len(egressRules) > 0
+
+	domainRules, egressRules := fwrp.SegregateDomainAndIPRules(egressRules)
 
 	err := r.ebpfClient.UpdateClusterPolicyEbpfMaps(podIdentifier, ingressRules, egressRules)
 	if err != nil {
@@ -323,7 +333,7 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 		return err
 	}
 
-	if len(ingressRules) == 0 && len(egressRules) == 0 {
+	if !hasRules {
 		// Default state for cluster network policies when no rules are applied
 		state = ebpf.DEFAULT_ALLOW
 	}
@@ -344,7 +354,8 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 		log().Errorf("Pod-state seed failed for podIdentifier %s: %v", podIdentifier, err)
 		return err
 	}
-	return nil
+	// After the IP rules, so a DNS redirect failure only affects the domain rules.
+	return r.dnsProxy.SetRules(podIdentifier, dnsproxy.ClusterPolicyEndpoints, domainRules)
 }
 
 func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFirewallRules(ctx context.Context, podIdentifier string, resourceName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, error) {
@@ -396,11 +407,6 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 
 				if endPointInfo.CIDR == "" && endPointInfo.DomainName == "" {
 					log().Warnf("both CIDR and DomainName are empty in PE name %s", currentCPE.Name)
-					continue
-				}
-
-				if endPointInfo.CIDR == "" {
-					log().Infof("CIDR is empty, skipping the egress rule %s", currentCPE.Name)
 					continue
 				}
 
