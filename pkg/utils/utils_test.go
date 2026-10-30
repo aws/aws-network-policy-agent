@@ -845,6 +845,47 @@ func TestGetHostVethName(t *testing.T) {
 	}
 }
 
+func TestGetHostVethName_PrefixMatches(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	defer func() { getLinkByNameFunc = originalFunc }()
+
+	tests := []struct {
+		name    string
+		index   int
+		links   []string
+		want    string
+		wantErr string
+	}{
+		{name: "only eni", links: []string{"eni9cfdfc6963c"}, want: "eni9cfdfc6963c"},
+		{name: "only vlan", links: []string{"vlan9cfdfc6963c"}, want: "vlan9cfdfc6963c"},
+		{name: "eni and vlan", links: []string{"eni9cfdfc6963c", "vlan9cfdfc6963c"}, wantErr: "multiple host interfaces"},
+		{name: "index 1", index: 1, links: []string{"eni47df875468f"}, want: "eni47df875468f"},
+		{name: "index 1 legacy name", index: 1, links: []string{"enic3aa0f3d7be"}, want: "enic3aa0f3d7be"},
+		{name: "index 1 prefers current name", index: 1, links: []string{"eni47df875468f", "enic3aa0f3d7be"}, want: "eni47df875468f"},
+		{name: "index 1 eni and vlan", index: 1, links: []string{"eni47df875468f", "vlan47df875468f"}, wantErr: "multiple host interfaces"},
+		{name: "index 0 ignores index names", links: []string{"eni47df875468f", "enic3aa0f3d7be"}, wantErr: "failed to find link"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				for _, l := range tt.links {
+					if l == name {
+						return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+					}
+				}
+				return nil, netlink.LinkNotFoundError{}
+			}
+			got, err := GetHostVethName("foo", "bar", tt.index, []string{"eni", "vlan"})
+			assert.Equal(t, tt.want, got)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestIsFileExistsError(t *testing.T) {
 	type args struct {
 		error string
