@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net"
 	"slices"
@@ -148,6 +149,11 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 	// prunes names only for identifiers that went stale, i.e. ones the parent no longer
 	// selects anywhere, so an identifier still selected via a sibling CPE keeps this name.
 	// Later reconciles read these entries, so the departing name has to be scrubbed here.
+	//
+	// The full prior set is only what the first pass sees. A pass retrying a failed cleanup
+	// finds just the pods still owed one, since that is all the entry holds by then -- a
+	// subset the first pass already scrubbed, and DeletePolicyEndpointFromPodIdentifierMap
+	// is idempotent.
 	if existingPods, ok := r.ClusterPolicyEndpointSelectorMap.Load(resourceName); ok {
 		for _, pod := range existingPods.([]npatypes.Pod) {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
@@ -179,7 +185,9 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 	// or it is the parent's last CPE), the commit above has already written its entry.
 	err = errors.Join(updateErr, cleanupErr)
 	if !slices.Contains(parentCPEList, resourceName) {
-		if err != nil {
+		// Gate on the failures themselves, not on err: updateErr can be set with nothing owed
+		// a cleanup, and storing an empty set would leave an entry keyed by a deleted CPE.
+		if len(failedCleanups) > 0 {
 			r.ClusterPolicyEndpointSelectorMap.Store(resourceName, failedCleanups)
 		} else {
 			r.ClusterPolicyEndpointSelectorMap.Delete(resourceName)
@@ -281,7 +289,7 @@ func (r *ClusterPolicyEndpointsReconciler) observeClusterPolicyProgrammingLatenc
 }
 
 func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podIdentifier string, targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
-
+	var configureProbesErr error
 	for _, pod := range targetPods {
 		currentPodIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 		if currentPodIdentifier != podIdentifier {
@@ -291,8 +299,13 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 		// podConfirmedLive=false: PolicyEndpoints can still list pods already deleted from this node.
 		_, err := r.ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier, ebpf.INTERFACE_COUNT_UNKNOWN, false)
 		if err != nil {
-			log().Errorf("Failed to attach eBPF probes for pod %s namespace %s : %v", pod.Name, pod.Namespace, err)
-			return err
+			// Record and continue: GetPodIdentifier strips the last name segment, so replicas
+			// of one workload share this identifier and the maps behind it. Returning here
+			// would leave the co-located replicas unattached and skip the map write below,
+			// stranding them on the rules from before this change -- and on the cluster path
+			// those rules can be missing a Deny.
+			configureProbesErr = errors.Join(configureProbesErr, fmt.Errorf("failed to attach eBPF probes for pod %s namespace %s : %w", pod.Name, pod.Namespace, err))
+			continue
 		}
 		log().Infof("Successfully attached required eBPF probes for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
@@ -301,16 +314,15 @@ func (r *ClusterPolicyEndpointsReconciler) configureClusterPolicyBPFProbes(podId
 	// pod that has no programs here. There is nothing to program until a new pod attaches.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping cluster policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return nil
+		return configureProbesErr
 	}
 
-	err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules)
-	if err != nil {
-		log().Errorf("cluster policy Map updates failed for podIdentifier %s: %v", podIdentifier, err)
-		return err
+	// Program whatever did attach. updateClusterPolicyBPFMaps logs its own failure, and the
+	// returned error is logged again by the caller, so it is not logged a third time here.
+	if err := r.updateClusterPolicyBPFMaps(podIdentifier, ingressRules, egressRules); err != nil {
+		return errors.Join(configureProbesErr, fmt.Errorf("cluster policy map updates failed for podIdentifier %s: %w", podIdentifier, err))
 	}
-
-	return nil
+	return configureProbesErr
 }
 
 func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentifier string, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
@@ -471,7 +483,13 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 			currentPods = append(currentPods, existingPods.([]npatypes.Pod)...)
 		}
 	}
-	currentPods = lo.Uniq(currentPods)
+	// Dedupe on identity, not on the whole struct: the same pod can be recorded under two
+	// slices with different PodIPs (a StatefulSet pod keeps its name across recreation but
+	// not its address), and GetPodListToBeCleanedUp matches on NamespacedName, so both copies
+	// would land in podsToBeCleanedUp and the pod would be cleaned up twice.
+	currentPods = lo.UniqBy(currentPods, func(pod npatypes.Pod) types.NamespacedName {
+		return pod.NamespacedName
+	})
 
 	// Prune by exact ClusterPolicyEndpoint name rather than by derived parent CNP name.
 	// GetParentNPNameFromPEName is lossy under GenerateName truncation, so a parent-wide
