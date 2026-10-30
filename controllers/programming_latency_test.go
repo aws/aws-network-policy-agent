@@ -12,8 +12,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 )
 
 // histSampleCount reads the cumulative sample count of a package-level
@@ -172,9 +170,7 @@ func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
 	assert.Equal(t, uint64(1), histSampleCount(t, policyProgrammingLatency)-before)
 
 	// the real cleanup path must delete the tracking entry
-	err := r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: "pe-1", Namespace: "ns"},
-	})
+	err := r.cleanUpPolicyEndpoint(context.TODO(), peRequestOf(pe))
 	assert.NoError(t, err)
 
 	// a recreated PE with a fresh annotation is observed again

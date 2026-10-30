@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -15,9 +16,9 @@ import (
 )
 
 // Randomized model check of the cluster policy reconciler. Each seed runs a random sequence
-// of slice changes, map-write and API failures, pods leaving the node and duplicate events,
-// reconciling the slices that changed and retrying the ones that errored, as the workqueue
-// does. Once failures stop the queue must drain, and every identifier that still has
+// of slice changes, slice names reused under another parent, map-write and API failures, pods
+// leaving the node and duplicate events, reconciling the (slice, parent) requests the event
+// handler would queue and retrying the ones that errored, as the workqueue does. Once failures stop the queue must drain, and every identifier that still has
 // programs on the node must hold exactly the rules of the parents that select it.
 //
 // CPE_RANDOM_SEEDS and CPE_RANDOM_START widen or move the seed range for deeper runs.
@@ -50,6 +51,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 	type sliceState struct {
 		present bool
 		gen     int
+		alias   string // a name taken over from another parent's deleted slice
 		members map[string]bool
 		rule    int // version of the slice's rules
 		deny    bool
@@ -58,7 +60,12 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 	for _, s := range slices {
 		st[s] = &sliceState{members: map[string]bool{}, deny: true}
 	}
-	apiName := func(s string) string { return fmt.Sprintf("%s-%s%d", parentOf(s), s[6:], st[s].gen) }
+	apiName := func(s string) string {
+		if st[s].alias != "" {
+			return st[s].alias
+		}
+		return fmt.Sprintf("%s-%s%d", parentOf(s), s[6:], st[s].gen)
+	}
 	ruleOf := func(s string, egress bool) ruleRef {
 		i := map[string]int{"cnp-1/a": 1, "cnp-1/b": 2, "cnp-1/c": 3, "cnp-2/a": 4, "cnp-2/b": 5, "cnp-3/a": 6}[s]
 		dir := 0
@@ -114,30 +121,32 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 		}
 	})
 
-	dirty := map[string]bool{}
-	pendingDelete := map[string]bool{}
+	// queue holds the requests endpointEventHandler would add for each change
+	queue := map[EndpointRequest]bool{}
 	apply := func() {
 		before := fx.store
 		fx.setSlices(specs()...)
 		for name, cpe := range fx.store {
 			if old, ok := before[name]; !ok || !reflect.DeepEqual(old.Spec, cpe.Spec) {
-				dirty[name] = true
+				queue[cpeRequest(name, cpe.Spec.PolicyRef.Name)] = true
+				if ok {
+					queue[cpeRequest(name, old.Spec.PolicyRef.Name)] = true
+				}
 			}
 		}
-		for name := range before {
+		for name, old := range before {
 			if _, ok := fx.store[name]; !ok {
-				pendingDelete[name] = true
-				delete(dirty, name)
+				queue[cpeRequest(name, old.Spec.PolicyRef.Name)] = true
 			}
 		}
 	}
 
 	var failing map[string]bool
 	injected := func() bool { return len(failing) > 0 || len(fx.getErr) > 0 }
-	reconcile := func(c string) error {
-		name := c[2:]
+	reconcile := func(req EndpointRequest) error {
+		name := req.Endpoint.Name
 		var err error
-		if c[0] == 'R' {
+		if cpe, live := fx.store[name]; live && cpe.Spec.PolicyRef.Name == req.Parent {
 			// Every identifier the parent selects on this node must be programmed in this
 			// pass, whatever else fails: that is what keeps one failure from stalling the
 			// node. Drop its last write so the check sees only what this pass wrote.
@@ -165,35 +174,34 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 					}
 				}
 			}
-			if err = fx.reconcile(name); err == nil {
-				delete(dirty, name)
+			if err = fx.reconcileUnder(name, req.Parent); err == nil {
+				delete(queue, req)
 			}
 			for _, id := range mustProgram {
 				if _, ok := fx.bpf.ClusterPolicyIngressByIdentifier[id]; !ok {
-					t.Errorf("%s did not program %s (err %v, failing %v)", c, id, err, failing)
+					t.Errorf("%v did not program %s (err %v, failing %v)", req, id, err, failing)
 					if r, had := saved[id]; had {
 						fx.bpf.ClusterPolicyIngressByIdentifier[id] = r
 					}
 				}
 			}
-		} else if err = fx.reconcileDeleted(name); err == nil {
-			delete(pendingDelete, name)
+		} else if err = fx.reconcileUnder(name, req.Parent); err == nil {
+			delete(queue, req)
 		}
 		if err != nil && !injected() {
-			t.Errorf("%s failed with no failure injected: %v", c, err)
+			t.Errorf("%v failed with no failure injected: %v", req, err)
 		}
-		logf("%s -> %v", c, err)
+		logf("%v -> %v", req, err)
 		return err
 	}
-	queued := func() []string {
-		var cands []string
-		for n := range dirty {
-			cands = append(cands, "R:"+n)
+	queued := func() []EndpointRequest {
+		cands := make([]EndpointRequest, 0, len(queue))
+		for req := range queue {
+			cands = append(cands, req)
 		}
-		for n := range pendingDelete {
-			cands = append(cands, "D:"+n)
-		}
-		sort.Strings(cands)
+		sort.Slice(cands, func(i, j int) bool {
+			return cands[i].Endpoint.Name+"/"+cands[i].Parent < cands[j].Endpoint.Name+"/"+cands[j].Parent
+		})
 		return cands
 	}
 
@@ -217,7 +225,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 	fx.getErr = map[string]error{}
 
 	for step := 0; step < 120; step++ {
-		switch op := rng.Intn(15); {
+		switch op := rng.Intn(16); {
 		case op < 5:
 			if q := queued(); len(q) > 0 {
 				_ = reconcile(q[rng.Intn(len(q))])
@@ -235,7 +243,11 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 			if !st[s].present {
 				continue
 			}
-			_ = reconcile("D:" + apiName(s))
+			err := fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(apiName(s), parentOf(s)))
+			if err != nil && !injected() {
+				t.Errorf("cleanup of %s in progress failed with no failure injected: %v", apiName(s), err)
+			}
+			logf("cleanup of %s in progress -> %v", apiName(s), err)
 			st[s].present = false
 			logf("present %s=false after deletion in progress (%s)", s, apiName(s))
 			apply()
@@ -244,6 +256,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 			st[s].present = !st[s].present
 			if st[s].present {
 				st[s].gen++
+				st[s].alias = ""
 			}
 			logf("present %s=%v (%s)", s, st[s].present, apiName(s))
 			apply()
@@ -313,7 +326,20 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 				continue
 			}
 			sort.Strings(names)
-			_ = reconcile("R:" + names[rng.Intn(len(names))])
+			n := names[rng.Intn(len(names))]
+			_ = reconcile(cpeRequest(n, fx.store[n].Spec.PolicyRef.Name))
+		case op == 14:
+			// NPC deletes one parent's slice and creates another parent's under the same
+			// truncated GenerateName; the agent sees one update that changes the parent.
+			from, to := slices[rng.Intn(len(slices))], slices[rng.Intn(len(slices))]
+			if !st[from].present || st[to].present || parentOf(from) == parentOf(to) {
+				continue
+			}
+			name := apiName(from)
+			st[from].present = false
+			st[to].present, st[to].gen, st[to].alias = true, st[to].gen+1, name
+			logf("reuse %s: %s -> %s", name, from, to)
+			apply()
 		default:
 			continue
 		}
@@ -378,7 +404,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 
 	// Nothing is tracked for CPEs or parents that no longer exist.
 	fx.r.ClusterPolicyEndpointSelectorMap.Range(func(k, _ interface{}) bool {
-		if _, ok := fx.store[k.(string)]; !ok {
+		if cpe, ok := fx.store[k.(EndpointRequest).Endpoint.Name]; !ok || cpe.Spec.PolicyRef.Name != k.(EndpointRequest).Parent {
 			t.Errorf("selector map still tracks deleted CPE %s", k)
 		}
 		return true
@@ -396,7 +422,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 
 	// Reconciling everything again, as a resync would, changes nothing and does not error.
 	for _, n := range fx.sliceNames() {
-		if err := fx.reconcile(n); err != nil {
+		if err := fx.reconcileUnder(n, fx.store[n].Spec.PolicyRef.Name); err != nil {
 			t.Errorf("resync of %s: %v", n, err)
 		}
 	}

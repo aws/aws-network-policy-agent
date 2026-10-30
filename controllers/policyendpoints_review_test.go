@@ -66,7 +66,7 @@ func TestPolicySlices_SiblingSelectorEntriesAreUnioned(t *testing.T) {
 func TestPolicySlices_DepartingSliceEntryHoldsOnlyFailedCleanups(t *testing.T) {
 	writeFailed := errors.New("map write failed")
 	stuck, other := identifierOf("stuck-aaa"), identifierOf("other-aaa")
-	departing := utils.GetPolicyEndpointIdentifier("np-1-aaaaa", fixtureNamespace)
+	departing := EndpointRequest{Endpoint: types.NamespacedName{Name: "np-1-aaaaa", Namespace: fixtureNamespace}, Parent: "np-1"}
 
 	fx := newPEFixture(t)
 	fx.setSlices(
@@ -212,10 +212,10 @@ func TestPolicySlices_TeardownLatencyOnlyForRealTeardowns(t *testing.T) {
 }
 
 // selectorEntry reads one PolicyEndpoint's recorded pods, failing if it has none.
-func selectorEntry(t *testing.T, fx *peFixture, policyEndpointIdentifier string) []npatypes.Pod {
+func selectorEntry(t *testing.T, fx *peFixture, key EndpointRequest) []npatypes.Pod {
 	t.Helper()
-	v, ok := fx.r.policyEndpointSelectorMap.Load(policyEndpointIdentifier)
-	require.True(t, ok, "expected a selector entry for %s", policyEndpointIdentifier)
+	v, ok := fx.r.policyEndpointSelectorMap.Load(key)
+	require.True(t, ok, "expected a selector entry for %v", key)
 	return v.([]npatypes.Pod)
 }
 

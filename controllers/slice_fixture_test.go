@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -112,6 +111,23 @@ func (s sliceSpec) podEndpoints() []policyk8sawsv1.PodEndpoint {
 	return eps
 }
 
+// generatedSliceName models GenerateName for "<policy>-": the base is cut to 58 characters
+// before the 5-character suffix is appended.
+func generatedSliceName(policy, suffix string) string {
+	base := policy + "-"
+	if len(base) > 58 {
+		base = base[:58]
+	}
+	return base + suffix
+}
+
+// longPolicyNames returns two distinct 58-character policy names that differ only in their
+// last character, so their slice names differ only right before the generated suffix.
+func longPolicyNames() (string, string) {
+	return "payments-api-allow-ingress-from-frontend-and-monitoring-v2",
+		"payments-api-allow-ingress-from-frontend-and-monitoring-v3"
+}
+
 func identifierOf(podName string) string {
 	return utils.GetPodIdentifier(podName, fixtureNamespace)
 }
@@ -147,10 +163,13 @@ func prioritiesOf(rules []fwrp.EbpfFirewallRules) []int {
 // ---------------------------------------------------------------------------
 
 type cpeFixture struct {
-	t     *testing.T
-	r     *ClusterPolicyEndpointsReconciler
-	bpf   *ebpf.MockBpfClient
-	store map[string]policyk8sawsv1.ClusterPolicyEndpoint
+	t      *testing.T
+	r      *ClusterPolicyEndpointsReconciler
+	client client.Client
+	bpf    *ebpf.MockBpfClient
+	store  map[string]policyk8sawsv1.ClusterPolicyEndpoint
+	// sliceParents outlives store so a deleted slice's last parent is still known
+	sliceParents map[string]string
 	// getErr makes Get fail for the named CPEs, modelling an API error while deriving rules.
 	getErr map[string]error
 }
@@ -162,10 +181,12 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	fx := &cpeFixture{
-		t:     t,
-		bpf:   &ebpf.MockBpfClient{},
-		store: map[string]policyk8sawsv1.ClusterPolicyEndpoint{},
+		t:            t,
+		bpf:          &ebpf.MockBpfClient{},
+		store:        map[string]policyk8sawsv1.ClusterPolicyEndpoint{},
+		sliceParents: map[string]string{},
 	}
+	fx.client = mockClient
 	fx.r = NewClusterPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf)
 
 	mockClient.EXPECT().
@@ -199,6 +220,7 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 func (fx *cpeFixture) setSlices(specs ...sliceSpec) {
 	fx.store = map[string]policyk8sawsv1.ClusterPolicyEndpoint{}
 	for _, s := range specs {
+		fx.sliceParents[s.name] = s.parent
 		ingress := make([]policyk8sawsv1.ClusterEndpointInfo, 0, len(s.ingress))
 		for _, r := range s.ingress {
 			ingress = append(ingress, policyk8sawsv1.ClusterEndpointInfo{
@@ -253,11 +275,15 @@ func (fx *cpeFixture) sliceNames() []string {
 }
 
 func (fx *cpeFixture) identifierSlices(podIdentifier string) []string {
+	return refNames(fx.identifierRefs(podIdentifier))
+}
+
+func (fx *cpeFixture) identifierRefs(podIdentifier string) []utils.PolicyEndpointRef {
 	v, ok := fx.r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
 	if !ok {
 		return nil
 	}
-	return v.([]string)
+	return v.([]utils.PolicyEndpointRef)
 }
 
 // parentIdentifiers reports the identifiers the reconciler believes the parent policy
@@ -276,12 +302,20 @@ func (fx *cpeFixture) reconcile(name string) error {
 	return fx.r.reconcileClusterPolicyEndpoint(context.TODO(), &cpe)
 }
 
-// reconcileDeleted drives the cleanup path the agent takes when a slice is gone from the
-// API server.
-func (fx *cpeFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: name},
-	})
+// reconcileDeleted reconciles a slice that is gone from the API server.
+func (fx *cpeFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
+
+// reconcileEvent reconciles a slice under its last parent through the entry point a watch event uses.
+func (fx *cpeFixture) reconcileEvent(name string) error {
+	return fx.reconcileUnder(name, fx.sliceParents[name])
+}
+
+func (fx *cpeFixture) reconcileUnder(name, parent string) error {
+	return fx.r.reconcile(context.TODO(), cpeRequest(name, parent))
+}
+
+func cpeRequest(name, parent string) EndpointRequest {
+	return EndpointRequest{Endpoint: types.NamespacedName{Name: name}, Parent: parent}
 }
 
 // detachContext models the identifier's last local pod leaving the node: DeleteBPFProbes
@@ -351,15 +385,17 @@ func (fx *cpeFixture) assertIdentifierAbsent(podIdentifier string) {
 // ---------------------------------------------------------------------------
 
 type peFixture struct {
-	t   *testing.T
-	r   *PolicyEndpointsReconciler
-	bpf *ebpf.MockBpfClient
+	t      *testing.T
+	r      *PolicyEndpointsReconciler
+	client client.Client
+	bpf    *ebpf.MockBpfClient
 	// store is the API server's contents; sliceNamespaces outlives it so a slice's
 	// namespace is still resolvable after deleteSlice removes the object.
 	store           map[string]policyk8sawsv1.PolicyEndpoint
 	sliceNamespaces map[string]string
 	// getErr makes Get fail for the named PEs, modelling an API error while deriving rules.
-	getErr map[string]error
+	getErr       map[string]error
+	sliceParents map[string]string
 }
 
 func newPEFixture(t *testing.T) *peFixture {
@@ -373,7 +409,9 @@ func newPEFixture(t *testing.T) *peFixture {
 		bpf:             &ebpf.MockBpfClient{},
 		store:           map[string]policyk8sawsv1.PolicyEndpoint{},
 		sliceNamespaces: map[string]string{},
+		sliceParents:    map[string]string{},
 	}
+	fx.client = mockClient
 	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
 
 	mockClient.EXPECT().
@@ -415,6 +453,7 @@ func (fx *peFixture) setSlices(specs ...sliceSpec) {
 	fx.store = map[string]policyk8sawsv1.PolicyEndpoint{}
 	for _, s := range specs {
 		fx.sliceNamespaces[s.name] = s.namespaceOrDefault()
+		fx.sliceParents[s.name] = s.parent
 		ingress := make([]policyk8sawsv1.EndpointInfo, 0, len(s.ingress))
 		for _, r := range s.ingress {
 			ingress = append(ingress, policyk8sawsv1.EndpointInfo{CIDR: policyk8sawsv1.NetworkAddress(r.cidr)})
@@ -456,11 +495,15 @@ func (fx *peFixture) sliceNames() []string {
 }
 
 func (fx *peFixture) identifierSlices(podIdentifier string) []string {
+	return refNames(fx.identifierRefs(podIdentifier))
+}
+
+func (fx *peFixture) identifierRefs(podIdentifier string) []utils.PolicyEndpointRef {
 	v, ok := fx.r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
 	if !ok {
 		return nil
 	}
-	return v.([]string)
+	return v.([]utils.PolicyEndpointRef)
 }
 
 // assertRulesCleared requires an actual map write with an empty rule set, since an absent
@@ -477,10 +520,19 @@ func (fx *peFixture) reconcile(name string) error {
 	return fx.r.reconcilePolicyEndpoint(context.TODO(), &pe)
 }
 
-func (fx *peFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: fx.sliceNamespaces[name]},
-	})
+func (fx *peFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
+
+// reconcileEvent reconciles a slice under its last parent through the entry point a watch event uses.
+func (fx *peFixture) reconcileEvent(name string) error {
+	return fx.reconcileUnder(name, fx.sliceParents[name])
+}
+
+func (fx *peFixture) reconcileUnder(name, parent string) error {
+	return fx.r.reconcile(context.TODO(), fx.request(name, parent))
+}
+
+func (fx *peFixture) request(name, parent string) EndpointRequest {
+	return EndpointRequest{Endpoint: types.NamespacedName{Name: name, Namespace: fx.sliceNamespaces[name]}, Parent: parent}
 }
 
 // identifierIn is the identifier for a pod in a namespace other than the fixture default.
@@ -498,6 +550,30 @@ func (fx *peFixture) detachContext(podIdentifiers ...string) {
 }
 
 func (fx *peFixture) reset() { fx.bpf.Reset() }
+
+func peRequestOf(pe *policyk8sawsv1.PolicyEndpoint) EndpointRequest {
+	return EndpointRequest{Endpoint: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}, Parent: pe.Spec.PolicyRef.Name}
+}
+
+func refNames(refs []utils.PolicyEndpointRef) []string {
+	if refs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	return names
+}
+
+// refsOf builds the sorted entries a reconcile of parent records for the given slice names
+func refsOf(parent string, names ...string) []utils.PolicyEndpointRef {
+	refs := make([]utils.PolicyEndpointRef, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, utils.PolicyEndpointRef{Name: name, Parent: parent})
+	}
+	return refs
+}
 
 func (fx *peFixture) ingressCIDRs(podIdentifier string) []string {
 	return cidrsOf(fx.bpf.IngressByIdentifier[podIdentifier])
