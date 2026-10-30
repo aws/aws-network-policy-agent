@@ -3,6 +3,7 @@ package logger
 import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	"go.uber.org/zap"
 )
 
 var log Logger
@@ -58,4 +59,18 @@ func GetControllerRuntimeLogger() logr.Logger {
 		LogFileMaxBackups: DEFAULT_LOG_FILE_MAX_BACKUPS,
 	}
 	return zapr.NewLogger(inputLogConfig.newZapLoggerForControllerRuntime())
+}
+
+// GetFlowLogger returns a plain zap logger that shares the default logger's
+// core (same file writer, rotation and level) but with caller annotation
+// disabled. Intended for hot paths emitting preformatted lines at high rates
+// (e.g. policy flow events), where caller capture is comparatively expensive
+// and records the logging wrapper rather than the call site.
+func GetFlowLogger() *zap.Logger {
+	if sl, ok := Get().(*structuredLogger); ok {
+		return sl.zapLogger.Desugar().WithOptions(zap.WithCaller(false))
+	}
+	// Only structuredLogger implements Logger today; fall back to a nop
+	// logger for any other implementation.
+	return zap.NewNop()
 }
