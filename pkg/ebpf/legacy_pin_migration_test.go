@@ -212,6 +212,11 @@ func TestLegacyGetPodIdentifier(t *testing.T) {
 		{"aws-node-xyz", "kube-system", "aws-node-kube-system"},
 		{"my.pod-x", "ns1", "my_pod-ns1"},
 		{"foo", "bar", "foo-bar"},
+		// Legacy algorithm always drops the last '-' token. Truncated CronJob
+		// names therefore still map to the pre-#671 shared identifier so
+		// v1.3 pin migration can find the existing family.
+		{"example-app-backend-worker-queue-notification-sender-29808n7p4d", "team-a", "example-app-backend-worker-queue-notification-sender-team-a"},
+		{"example-app-backend-worker-queue-cache-evictions-29808480-xkxxh", "team-a", "example-app-backend-worker-queue-cache-evictions-29808480-team-a"},
 	}
 	for _, c := range cases {
 		got := utils.LegacyGetPodIdentifier(c.name, c.ns)
