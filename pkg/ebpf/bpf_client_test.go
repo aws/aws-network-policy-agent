@@ -1,8 +1,10 @@
 package ebpf
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -20,7 +22,9 @@ import (
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/golang/mock/gomock"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -1764,5 +1768,241 @@ func TestBpfClient_AttacheBPFProbes_DeletedPodSkipsWithoutWaitingForLock(t *test
 		assert.True(t, ok)
 	case <-time.After(time.Second):
 		t.Fatal("reconciler attach of a deleted pod waited for the identifier lock")
+	}
+}
+
+// probeErrorCount returns the LoadBpfFile-CtDenyProbe error count.
+func probeErrorCount(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	assert.NoError(t, sdkAPIErr.WithLabelValues("LoadBpfFile-CtDenyProbe").Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+// recordClosedFDs replaces closeFD for the test and returns the closed FDs.
+func recordClosedFDs(t *testing.T) *[]int {
+	t.Helper()
+	var closed []int
+	saved := closeFD
+	closeFD = func(fd int) error {
+		closed = append(closed, fd)
+		return nil
+	}
+	t.Cleanup(func() { closeFD = saved })
+	return &closed
+}
+
+func TestChooseIngressBinary(t *testing.T) {
+	globalMaps := map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:     {MapFD: 50},
+		POLICY_EVENTS_MAP_PIN_PATH: {MapFD: 51},
+	}
+	probeLoaded := map[string]goelf.BpfData{
+		"/sys/fs/bpf/globals/aws/programs/CTDENYPROBE_handle_ingress": {
+			Program: goebpfprogs.BpfProgram{ProgFD: 60},
+			Maps:    map[string]goebpfmaps.BpfMap{utils.TC_INGRESS_MAP: {MapFD: 61}},
+		},
+	}
+	probeMaps := map[string]goebpfmaps.BpfMap{utils.TC_INGRESS_MAP: {MapFD: 61}, utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 62}}
+
+	tests := []struct {
+		name           string
+		enableIPv6     bool
+		eventsChanged  bool
+		kfuncErr       error
+		globalMaps     map[string]goebpfmaps.BpfMap
+		probeErr       error
+		wantBinary     string
+		wantProbeLater bool
+		wantProbe      bool
+		wantClosed     []int
+		wantProbeError float64
+	}{
+		{
+			name:       "kfuncs missing: regular, no probe",
+			kfuncErr:   errors.New(`kfunc "bpf_skb_ct_lookup" not found in kernel BTF`),
+			wantBinary: TC_INGRESS_BINARY,
+		},
+		{
+			name:       "probe loads: ct-deny",
+			globalMaps: globalMaps,
+			wantBinary: TC_INGRESS_CT_DENY_BINARY,
+			wantProbe:  true,
+			wantClosed: []int{60, 61, 62},
+		},
+		{
+			name:       "probe loads, IPv6: ct-deny",
+			enableIPv6: true,
+			globalMaps: globalMaps,
+			wantBinary: TC_V6_INGRESS_CT_DENY_BINARY,
+			wantProbe:  true,
+			wantClosed: []int{60, 61, 62},
+		},
+		{
+			name:           "probe fails: regular, counted",
+			globalMaps:     globalMaps,
+			probeErr:       errors.New("failed to Load the prog: permission denied"),
+			wantBinary:     TC_INGRESS_BINARY,
+			wantProbe:      true,
+			wantClosed:     nil,
+			wantProbeError: 1,
+		},
+		{
+			name:           "no global maps yet: probe later",
+			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
+			wantProbeLater: true,
+		},
+		{
+			// The events binary replaces the global maps, so the current ones
+			// aren't recovered or probed against.
+			name:           "events binary changed: probe later",
+			eventsChanged:  true,
+			globalMaps:     nil,
+			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
+			wantProbeLater: true,
+		},
+		{
+			name:          "events binary changed, kfuncs missing: regular",
+			eventsChanged: true,
+			kfuncErr:      errors.New(`kfunc "bpf_skb_ct_lookup" not found in kernel BTF`),
+			wantBinary:    TC_INGRESS_BINARY,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			saved := checkKfuncs
+			defer func() { checkKfuncs = saved }()
+			checkKfuncs = func([]string) error { return tt.kfuncErr }
+			closed := recordClosedFDs(t)
+			errsBefore := probeErrorCount(t)
+
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			if tt.kfuncErr == nil && !tt.eventsChanged {
+				mockBpfClient.EXPECT().RecoverGlobalMaps().Return(tt.globalMaps, nil).Times(1)
+			}
+			_, ctDenyBinary := ingressBinaries(tt.enableIPv6)
+			if tt.wantProbe {
+				if tt.probeErr != nil {
+					mockBpfClient.EXPECT().LoadBpfFile(ctDenyBinary, ctDenyProbePinPrefix).Return(nil, nil, tt.probeErr).Times(1)
+				} else {
+					mockBpfClient.EXPECT().LoadBpfFile(ctDenyBinary, ctDenyProbePinPrefix).Return(probeLoaded, probeMaps, nil).Times(1)
+				}
+			}
+
+			c := &bpfClient{bpfSDKClient: mockBpfClient}
+			binary, probeLater := c.chooseIngressBinary(tt.enableIPv6, tt.eventsChanged)
+			assert.Equal(t, tt.wantBinary, binary)
+			assert.Equal(t, tt.wantProbeLater, probeLater)
+			// The probe closes the FDs its own load opened, once each. The recovered
+			// global maps stay open and are kept for recoverBPFState, since their
+			// FDs are in the SDK's map cache.
+			assert.ElementsMatch(t, tt.wantClosed, *closed)
+			assert.Equal(t, tt.globalMaps, c.probeGlobalMaps)
+			assert.Equal(t, tt.wantProbeError, probeErrorCount(t)-errsBefore)
+		})
+	}
+}
+
+// recoverBPFState reuses the global maps the ct-deny probe recovered instead
+// of recovering them again, so the FDs in the SDK's map cache stay the ones
+// the agent uses.
+func TestRecoverBPFState_ReusesProbeGlobalMaps(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Times(0)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	c := NewMockBpfClient()
+	c.probeGlobalMaps = map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:     {MapFD: 50},
+		POLICY_EVENTS_MAP_PIN_PATH: {MapFD: 51},
+	}
+	globalMaps := new(sync.Map)
+	conntrackPresent, eventsPresent, eventsFD, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), globalMaps, false, false, false)
+	assert.NoError(t, err)
+	assert.True(t, conntrackPresent)
+	assert.True(t, eventsPresent)
+	assert.Equal(t, 51, eventsFD)
+	conntrackMap, ok := globalMaps.Load(CONNTRACK_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, uint32(50), conntrackMap.(goebpfmaps.BpfMap).MapFD)
+}
+
+// The probe that runs after the events binary created the global maps.
+func TestCtDenyBinaryLoads(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	closed := recordClosedFDs(t)
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockBpfClient.EXPECT().LoadBpfFile(TC_INGRESS_CT_DENY_BINARY, ctDenyProbePinPrefix).Return(nil, nil, errors.New("boom")).Times(1)
+	c := &bpfClient{bpfSDKClient: mockBpfClient}
+	assert.False(t, c.ctDenyBinaryLoads(TC_INGRESS_CT_DENY_BINARY))
+	assert.Empty(t, *closed)
+}
+
+// The probe prefix must not be a possible pod identifier prefix, so removing
+// its pins can't touch a pod's. Pod names and namespaces are lowercase.
+func TestCtDenyProbePinPrefixIsNotAPodIdentifier(t *testing.T) {
+	id := utils.GetPodIdentifier("ctdeny.probe.x-abc", "default")
+	assert.False(t, strings.HasPrefix(id, ctDenyProbePinPrefix), id)
+	assert.NotEqual(t, strings.ToLower(ctDenyProbePinPrefix), ctDenyProbePinPrefix)
+	// The SDK splits a pin name at its first "_" to find the prefix, and treats
+	// maps under a prefix it doesn't recognize as global.
+	assert.NotContains(t, ctDenyProbePinPrefix, "_")
+}
+
+// The ct-deny ingress binaries must be installed under the regular ingress
+// binary's name. cp keeps its own copy of the names, so check they agree.
+func TestCtDenyIngressHostBinaryName(t *testing.T) {
+	for _, enableIPv6 := range []bool{false, true} {
+		regular, ctDeny := ingressBinaries(enableIPv6)
+		assert.Equal(t, regular, cp.HostBinaryName(ctDeny))
+		assert.Equal(t, regular, cp.HostBinaryName(regular))
+	}
+}
+
+// TestCheckAndUpdateBPFBinaries_CtDenyIngress checks that the selected ingress
+// binary is compared with the host copy under the regular ingress binary's
+// name, so switching between the regular and ct-deny variants, in either
+// direction, marks the ingress probes for reload.
+func TestCheckAndUpdateBPFBinaries_CtDenyIngress(t *testing.T) {
+	tests := []struct {
+		name       string
+		binary     string
+		hostCopy   []byte // installed under the regular ingress binary's name; nil: none
+		wantUpdate bool
+	}{
+		{name: "v4 regular to ct-deny", binary: TC_INGRESS_CT_DENY_BINARY, hostCopy: []byte("regular"), wantUpdate: true},
+		{name: "v4 ct-deny to regular", binary: TC_INGRESS_BINARY, hostCopy: []byte("ct-deny"), wantUpdate: true},
+		{name: "v4 ct-deny, no host copy", binary: TC_INGRESS_CT_DENY_BINARY, wantUpdate: true},
+		{name: "v4 ct-deny, unchanged", binary: TC_INGRESS_CT_DENY_BINARY, hostCopy: []byte("ct-deny"), wantUpdate: false},
+		{name: "v6 regular to ct-deny", binary: TC_V6_INGRESS_CT_DENY_BINARY, hostCopy: []byte("regular"), wantUpdate: true},
+		{name: "v6 ct-deny, unchanged", binary: TC_V6_INGRESS_CT_DENY_BINARY, hostCopy: []byte("ct-deny"), wantUpdate: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// checkAndUpdateBPFBinaries reads the new binaries from the
+			// working directory and their host copies from hostBinaryPath.
+			t.Chdir(t.TempDir())
+			hostDir := t.TempDir() + "/"
+			content := "regular"
+			if tt.binary == TC_INGRESS_CT_DENY_BINARY || tt.binary == TC_V6_INGRESS_CT_DENY_BINARY {
+				content = "ct-deny"
+			}
+			assert.NoError(t, os.WriteFile(tt.binary, []byte(content), 0644))
+			if tt.hostCopy != nil {
+				regular, _ := ingressBinaries(tt.binary == TC_V6_INGRESS_BINARY || tt.binary == TC_V6_INGRESS_CT_DENY_BINARY)
+				assert.NoError(t, os.WriteFile(hostDir+regular, tt.hostCopy, 0644))
+			}
+			ingress, egress, events, err := checkAndUpdateBPFBinaries(nil, []string{tt.binary}, hostDir)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantUpdate, ingress)
+			assert.False(t, egress)
+			assert.False(t, events)
+		})
 	}
 }

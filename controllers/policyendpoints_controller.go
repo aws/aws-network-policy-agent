@@ -120,6 +120,8 @@ func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfCl
 
 // PolicyEndpointsReconciler reconciles a PolicyEndpoints object
 type PolicyEndpointsReconciler struct {
+	// k8sClient reads PolicyEndpoints with client.UnsafeDisableDeepCopy: returned objects are
+	// shared with the informer cache and must not be mutated.
 	k8sClient client.Client
 	scheme    *runtime.Scheme
 	//Primary IP of EC2 instance
@@ -159,7 +161,7 @@ func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
 	policyEndpoint := &policyk8sawsv1.PolicyEndpoint{}
-	if err := r.k8sClient.Get(ctx, req.NamespacedName, policyEndpoint); err != nil {
+	if err := r.k8sClient.Get(ctx, req.NamespacedName, policyEndpoint, client.UnsafeDisableDeepCopy); err != nil {
 		if apierrors.IsNotFound(err) {
 			return r.cleanUpPolicyEndpoint(ctx, req)
 		}
@@ -563,19 +565,24 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				}
 			}
 
-			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
+			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE, client.UnsafeDisableDeepCopy); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
 				}
 				return nil, nil, isIngressIsolated, isEgressIsolated, err
 			}
 
+			// currentPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
+			// makes appends to Except/L4Info reallocate, but their existing elements, and the
+			// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
+			// processing must treat them as read-only. Guarded by
+			// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
 			for _, endPointInfo := range currentPE.Spec.Ingress {
 				ingressRules = append(ingressRules,
 					fwrp.EbpfFirewallRules{
 						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
+						Except: slices.Clip(endPointInfo.Except),
+						L4Info: slices.Clip(endPointInfo.Ports),
 					})
 			}
 
@@ -592,8 +599,8 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 				egressRules = append(egressRules,
 					fwrp.EbpfFirewallRules{
 						IPCidr: endPointInfo.CIDR,
-						Except: endPointInfo.Except,
-						L4Info: endPointInfo.Ports,
+						Except: slices.Clip(endPointInfo.Except),
+						L4Info: slices.Clip(endPointInfo.Ports),
 					})
 			}
 			log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
@@ -677,7 +684,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 				Name:      policyEndpointResourceName,
 				Namespace: resourceNamespace,
 			}
-			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
+			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE, client.UnsafeDisableDeepCopy); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -824,7 +831,7 @@ func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.
 	policyEndpointList := &policyk8sawsv1.PolicyEndpointList{}
 	if err := r.k8sClient.List(ctx, policyEndpointList, &client.ListOptions{
 		Namespace: resourceNamespace,
-	}); err != nil {
+	}, client.UnsafeDisableDeepCopy); err != nil {
 		// A List failure is propagated, never reported as an empty list. Callers read an empty
 		// parent PE list as "this NetworkPolicy is fully deleted" and tear down enforcement, so
 		// collapsing a transient API/cache error into that case would open traffic.

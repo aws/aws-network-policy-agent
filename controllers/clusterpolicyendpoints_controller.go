@@ -77,6 +77,8 @@ func NewClusterPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string,
 
 // ClusterPolicyEndpointsReconciler reconciles an ClusterPolicyEndpoint object
 type ClusterPolicyEndpointsReconciler struct {
+	// k8sClient reads ClusterPolicyEndpoints with client.UnsafeDisableDeepCopy: returned objects
+	// are shared with the informer cache and must not be mutated.
 	k8sClient client.Client
 	scheme    *runtime.Scheme
 	nodeIP    string
@@ -115,7 +117,7 @@ func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ct
 func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
 	ClusterPolicyEndpoint := &policyk8sawsv1.ClusterPolicyEndpoint{}
 	// Cluster-scoped: use only name, no namespace
-	if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: req.Name}, ClusterPolicyEndpoint); err != nil {
+	if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: req.Name}, ClusterPolicyEndpoint, client.UnsafeDisableDeepCopy); err != nil {
 		if apierrors.IsNotFound(err) {
 			return r.cleanUpClusterPolicyEndpoint(ctx, req)
 		}
@@ -374,13 +376,18 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 				}
 			}
 
-			if err := r.k8sClient.Get(ctx, cpeNamespacedName, currentCPE); err != nil {
+			if err := r.k8sClient.Get(ctx, cpeNamespacedName, currentCPE, client.UnsafeDisableDeepCopy); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
 				}
 				return nil, nil, err
 			}
 
+			// currentCPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
+			// makes appends to L4Info reallocate, but its existing elements, and the
+			// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
+			// processing must treat them as read-only. Guarded by
+			// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
 			for _, endPointInfo := range currentCPE.Spec.Ingress {
 				priority := int(currentCPE.Spec.Priority)
 				if currentCPE.Spec.Tier == policyk8sawsv1.BaselineTier {
@@ -390,7 +397,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 					Priority: priority,
 					Action:   endPointInfo.Action,
 					IPCidr:   endPointInfo.CIDR,
-					L4Info:   endPointInfo.Ports,
+					L4Info:   slices.Clip(endPointInfo.Ports),
 				})
 			}
 
@@ -415,7 +422,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 					Action:     endPointInfo.Action,
 					DomainName: string(endPointInfo.DomainName),
 					IPCidr:     endPointInfo.CIDR,
-					L4Info:     endPointInfo.Ports,
+					L4Info:     slices.Clip(endPointInfo.Ports),
 				})
 			}
 			log().Infof("Total no.of clusterPolicy ingressRules %d egressRules %d", len(clusterPolicyIngressRules), len(clusterPolicyEgressRules))
@@ -606,7 +613,7 @@ func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(
 func (r *ClusterPolicyEndpointsReconciler) getClusterPolicyEndpointsOfParentCNP(ctx context.Context, parentCNP string) ([]policyk8sawsv1.ClusterPolicyEndpoint, error) {
 	ClusterPolicyEndpointList := &policyk8sawsv1.ClusterPolicyEndpointList{}
 	// Cluster-scoped: no namespace filter
-	if err := r.k8sClient.List(ctx, ClusterPolicyEndpointList, &client.ListOptions{}); err != nil {
+	if err := r.k8sClient.List(ctx, ClusterPolicyEndpointList, &client.ListOptions{}, client.UnsafeDisableDeepCopy); err != nil {
 		log().Errorf("Unable to list ClusterPolicyEndpoints err: %v", err)
 		return nil, err
 	}
