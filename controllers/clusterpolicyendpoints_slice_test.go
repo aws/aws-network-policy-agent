@@ -1,8 +1,10 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -10,10 +12,11 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	controllerruntime "sigs.k8s.io/controller-runtime"
 )
 
 // Programming path: a parent CNP split across several ClusterPolicyEndpoints must be
@@ -721,7 +724,7 @@ func TestClusterPolicySlices_RestartReconstruction(t *testing.T) {
 // ANY node, keyed by the parent CNP name. It is the diff source for stale-identifier pruning:
 // an identifier it recorded last reconcile but no longer selects is scrubbed from
 // podIdentifierToClusterPolicyEndpointMap (Map1). These tests pin that cluster-wide tracking,
-// the remote-only prune path, key consistency under GenerateName truncation, and the
+// the remote-only prune path, keying by the exact parent name for long names, and the
 // full-parent teardown.
 func TestClusterPolicySlices_ClusterWideTracking(t *testing.T) {
 	localID := identifierOf("local-aaa")
@@ -814,23 +817,10 @@ func TestClusterPolicySlices_ClusterWideTracking(t *testing.T) {
 		assert.Contains(t, cnp2, remoteID, "cnp-2 still selects the identifier, so it stays tracked")
 	})
 
-	// (4) Map3's read (stale diff), prune, and write keys are all GetParentNPNameFromPEName(
-	// resourceName) — a function of the CPE (slice) NAME, never of the full PolicyRef.Name.
-	// GenerateName caps a generated name at 63 chars, so for a long CNP the "<cnp>-<suffix>"
-	// slice name is truncated and GetParentNPNameFromPEName(sliceName) no longer reconstructs
-	// PolicyRef.Name. Keying the read by PolicyRef.Name (as an earlier version did) would read a
-	// key the writer never wrote and the stale identifier would leak. Both sides deriving from
-	// the slice name keep them in agreement.
-	t.Run("a long CNP name whose CPE base is truncated still prunes stale identifiers", func(t *testing.T) {
-		// Parent (PolicyRef.Name) is the full, long name.
+	// (4) For a long CNP name, Map3 is keyed by the exact PolicyRef.Name and stale pruning works.
+	t.Run("a long CNP name still prunes stale identifiers", func(t *testing.T) {
 		parent := "cnp-" + strings.Repeat("x", 56) // 60 chars
-		// The slice name is the GenerateName result: parent truncated to fit "<=63 - suffix",
-		// then the random suffix. Here the base is deliberately SHORTER than parent, so
-		// GetParentNPNameFromPEName(sliceName) != parent — exactly the truncation case.
-		sliceName := parent[:50] + "-aaaaa"
-		writerKey := utils.GetParentNPNameFromPEName(sliceName) // what commit writes Map3 under
-		require.NotEqual(t, parent, writerKey,
-			"test must model truncation: the slice base must differ from PolicyRef.Name")
+		sliceName := generatedSliceName(parent, "aaaaa")
 
 		fx := newCPEFixture(t)
 		fx.setSlices(sliceSpec{name: sliceName, parent: parent,
@@ -840,11 +830,8 @@ func TestClusterPolicySlices_ClusterWideTracking(t *testing.T) {
 		fx.reconcileAll()
 		require.NotEmpty(t, fx.identifierSlices(remoteID), "remote id starts tracked")
 
-		// Map3 is keyed by the truncated writer key, NOT by the full PolicyRef.Name.
-		_, ok := fx.parentIdentifiers(writerKey)
-		require.True(t, ok, "Map3 must be keyed by GetParentNPNameFromPEName(sliceName)")
-		_, okFull := fx.parentIdentifiers(parent)
-		require.False(t, okFull, "Map3 must NOT be keyed by the full PolicyRef.Name")
+		_, ok := fx.parentIdentifiers(parent)
+		require.True(t, ok, "Map3 must be keyed by the full PolicyRef.Name")
 		fx.reset()
 
 		// Deselect the remote id; pruning only works if the read key matches the write key.
@@ -854,7 +841,7 @@ func TestClusterPolicySlices_ClusterWideTracking(t *testing.T) {
 		require.NoError(t, fx.reconcile(sliceName))
 
 		assert.Empty(t, fx.identifierSlices(remoteID),
-			"stale pruning must work even when the CNP name is truncated into the CPE name")
+			"stale pruning must work for a long CNP name")
 	})
 
 	// (5) When the parent stops selecting anything anywhere, its Map3 entry is removed entirely
@@ -1382,8 +1369,8 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 
 		fx.reset()
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
-		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, stuck)
-		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(resident))
+		assert.Empty(t, fx.bpf.CallLog, "the repeat must not touch the dataplane at all")
+		assert.Equal(t, []string{"cnp-1-bbbbb"}, fx.identifierSlices(resident))
 	})
 
 	t.Run("a programming failure is retried and recovers", func(t *testing.T) {
@@ -1513,11 +1500,10 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 			"a late delete event for a replaced slice must not clear the Deny rule")
 	})
 
-	// Accepted residual, mirroring the namespaced case. The purge prunes by EXACT CPE name
-	// because matching on the derived parent name is unsafe under GenerateName truncation --
-	// and for cluster policies an over-delete drops Deny rules, i.e. opens traffic. The cost
-	// is this case: a re-slice that simultaneously deselects an identifier, observed only
-	// through the surviving slice's reconcile, retains the departed slice's name.
+	// Accepted residual, mirroring the namespaced case. The purge prunes by EXACT CPE name, never
+	// parent-wide -- for cluster policies an over-delete drops Deny rules, i.e. opens traffic. The
+	// cost is this case: a re-slice that simultaneously deselects an identifier, observed only through
+	// the surviving slice's reconcile, retains the departed slice's name.
 	//
 	// Inert rather than harmful: deriveClusterPolicyIngressAndEgressFirewallRules does a Get
 	// per tracked name and skips NotFound, so a name whose object is gone contributes no
@@ -1641,4 +1627,333 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 		assert.Equal(t, ebpf.POLICIES_APPLIED, state,
 			"the namespaced verdict must survive a cluster policy seeding its default")
 	})
+}
+
+// Cluster-policy counterpart of TestPolicyEndpointSlices_LongPolicyNamesDoNotCollide, where
+// mixing the two policies up drops Deny rules.
+func TestClusterPolicyEndpointSlices_LongPolicyNamesDoNotCollide(t *testing.T) {
+	first, second := longPolicyNames()
+	firstSlice, secondSlice := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+
+	t.Run("each policy keeps its own selected-identifier snapshot", func(t *testing.T) {
+		firstLocal, firstRemote := identifierOf("first-aaa"), identifierOf("first-remote-aaa")
+		secondLocal, secondRemote := identifierOf("second-aaa"), identifierOf("second-remote-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("first-aaa", "10.1.1.1"), remotePod("first-remote-aaa", "10.1.2.1")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("second-aaa", "10.1.1.2"), remotePod("second-remote-aaa", "10.1.2.2")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+
+		got, ok := fx.parentIdentifiers(first)
+		require.True(t, ok)
+		assert.ElementsMatch(t, []string{firstLocal, firstRemote}, got)
+		got, ok = fx.parentIdentifiers(second)
+		require.True(t, ok)
+		assert.ElementsMatch(t, []string{secondLocal, secondRemote}, got)
+
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("first-aaa", "10.1.1.1")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("second-aaa", "10.1.1.2"), remotePod("second-remote-aaa", "10.1.2.2")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		require.NoError(t, fx.reconcile(firstSlice))
+
+		assert.Empty(t, fx.identifierSlices(firstRemote), "the deselected identifier must be pruned")
+		assert.Equal(t, []string{secondSlice}, fx.identifierSlices(secondRemote),
+			"the other policy's identifiers must be untouched")
+	})
+
+	t.Run("deleting one policy keeps the other policy's Deny on a shared pod", func(t *testing.T) {
+		shared := identifierOf("shared-aaa")
+		fx := newCPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+				ingress: []ruleRef{deny("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+				ingress: []ruleRef{deny("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+		fx.reset()
+
+		fx.deleteSlice(firstSlice)
+		require.NoError(t, fx.reconcileDeleted(firstSlice))
+
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(shared),
+			"the surviving policy's slice must not be skipped as a sibling of the deleted one")
+	})
+
+	t.Run("the recorded parent is dropped once its ClusterPolicyEndpoint is deleted", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(sliceSpec{name: firstSlice, parent: first,
+			pods:    []podRef{localPod("first-aaa", "10.1.1.1")},
+			ingress: []ruleRef{deny("192.168.90.1/32")}})
+		req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: firstSlice}}
+		_, err := fx.r.Reconcile(context.TODO(), req)
+		require.NoError(t, err)
+		recorded, ok := fx.r.clusterPolicyEndpointToParentCNPMap.Load(firstSlice)
+		require.True(t, ok, "the parent must be recorded from Spec.PolicyRef")
+		assert.Equal(t, first, recorded)
+
+		fx.deleteSlice(firstSlice)
+		_, err = fx.r.Reconcile(context.TODO(), req)
+		require.NoError(t, err)
+		assert.Equal(t, 0, sizeOfSyncMap(&fx.r.clusterPolicyEndpointToParentCNPMap), "recorded parents must not leak")
+	})
+}
+
+// Cluster-policy counterpart of TestPolicyEndpointSlices_DeleteOfUnseenSliceIsNoop.
+func TestClusterPolicyEndpointSlices_DeleteOfUnseenSliceIsNoop(t *testing.T) {
+	first, second := longPolicyNames()
+	firstSlice, secondSlice := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+	shared := identifierOf("shared-aaa")
+	fx := newCPEFixture(t)
+	fx.setSlices(sliceSpec{name: secondSlice, parent: second,
+		pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+		ingress: []ruleRef{deny("192.168.90.2/32")}})
+	fx.reconcileAll()
+	fx.reset()
+
+	require.NoError(t, fx.reconcileDeleted(firstSlice))
+
+	assert.Empty(t, fx.bpf.CallLog, "an unseen slice's delete must not touch the dataplane")
+	assert.Equal(t, []string{secondSlice}, fx.identifierSlices(shared))
+	got, ok := fx.parentIdentifiers(second)
+	require.True(t, ok)
+	assert.Equal(t, []string{shared}, got)
+}
+
+// Cluster-policy counterpart of TestPolicyEndpointSlices_EveryLiveSliceHasRecordedParent.
+func TestClusterPolicyEndpointSlices_EveryLiveSliceHasRecordedParent(t *testing.T) {
+	first, second := longPolicyNames()
+	parents := []string{first, second, "short-policy"}
+	pods := []podRef{localPod("web-aaa", "10.1.1.1"), localPod("api-aaa", "10.1.1.2"),
+		remotePod("db-aaa", "10.1.2.1"), remotePod("cache-aaa", "10.1.2.2")}
+
+	for seed := int64(0); seed < 25; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		fx := newCPEFixture(t)
+		live := map[string]sliceSpec{}
+		// Like GenerateName, a slice keeps its name while it lives and a recreated one gets a new name
+		names, created := map[string]string{}, 0
+		for step := 0; step < 30; step++ {
+			next := map[string]sliceSpec{}
+			nextNames := map[string]string{}
+			for _, parent := range parents {
+				for i := 0; i < rng.Intn(3); i++ {
+					slot := fmt.Sprintf("%s#%d", parent, i)
+					name, ok := names[slot]
+					if !ok {
+						created++
+						name = generatedSliceName(parent, fmt.Sprintf("%05d", created))
+					}
+					nextNames[slot] = name
+					var selected []podRef
+					for _, p := range pods {
+						if rng.Intn(2) == 0 {
+							selected = append(selected, p)
+						}
+					}
+					next[name] = sliceSpec{name: name, parent: parent, pods: selected,
+						ingress: []ruleRef{deny(fmt.Sprintf("192.168.90.%d/32", i+1))}}
+				}
+			}
+			specs := make([]sliceSpec, 0, len(next))
+			for _, s := range next {
+				specs = append(specs, s)
+			}
+			fx.setSlices(specs...)
+			// Leave some slices unreconciled: their names must then appear nowhere in state
+			for _, name := range fx.sliceNames() {
+				if rng.Intn(3) > 0 {
+					require.NoError(t, fx.reconcile(name))
+				}
+			}
+			for name := range live {
+				if _, ok := next[name]; !ok {
+					require.NoError(t, fx.reconcileDeleted(name))
+				}
+			}
+			live, names = next, nextNames
+			assertEveryClusterSliceRecorded(t, fx, seed, step)
+		}
+
+		fx.setSlices()
+		for name := range live {
+			require.NoError(t, fx.reconcileDeleted(name))
+		}
+		assert.Equal(t, 0, sizeOfSyncMap(&fx.r.clusterPolicyEndpointToParentCNPMap), "seed %d: records must not outlive their slices", seed)
+	}
+}
+
+// assertEveryClusterSliceRecorded checks the property the delete path relies on: a slice that still
+// exists, and so can still get a delete event, has a recorded parent if any state names it. Names
+// of deleted slices can linger (inserts are append-only) but their cleanup already ran.
+func assertEveryClusterSliceRecorded(t *testing.T, fx *cpeFixture, seed int64, step int) {
+	t.Helper()
+	check := func(name, where string) {
+		if _, live := fx.store[name]; !live {
+			return
+		}
+		_, ok := fx.r.clusterPolicyEndpointToParentCNPMap.Load(name)
+		assert.True(t, ok, "seed %d step %d: live slice %s in %s has no recorded parent", seed, step, name, where)
+	}
+	fx.r.podIdentifierToClusterPolicyEndpointMap.Range(func(id, names any) bool {
+		for _, name := range names.([]string) {
+			check(name, id.(string))
+		}
+		return true
+	})
+	fx.r.ClusterPolicyEndpointSelectorMap.Range(func(key, _ any) bool {
+		check(key.(string), "the selector map")
+		return true
+	})
+}
+
+// Cluster-policy counterpart of TestPolicyEndpointSlices_ReusedNameUnderNewParentCleansUpOldParent.
+func TestClusterPolicyEndpointSlices_ReusedNameUnderNewParentCleansUpOldParent(t *testing.T) {
+	first, second := longPolicyNames()
+	reused, sibling := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+	oldPod, newPod, siblingPod := identifierOf("old-aaa"), identifierOf("new-aaa"), identifierOf("sib-aaa")
+
+	for _, order := range [][]string{{reused, sibling}, {sibling, reused}} {
+		t.Run("reconcile "+order[0][len(order[0])-5:]+" first", func(t *testing.T) {
+			fx := newCPEFixture(t)
+			fx.setSlices(
+				sliceSpec{name: reused, parent: first,
+					pods: []podRef{localPod("old-aaa", "10.1.1.1")}, ingress: []ruleRef{deny("192.168.90.1/32")}},
+				sliceSpec{name: sibling, parent: second,
+					pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{deny("192.168.90.3/32")}},
+			)
+			require.NoError(t, fx.reconcileEvent(reused))
+			require.NoError(t, fx.reconcileEvent(sibling))
+			fx.reset()
+
+			fx.setSlices(
+				sliceSpec{name: reused, parent: second,
+					pods: []podRef{localPod("new-aaa", "10.1.1.2")}, ingress: []ruleRef{deny("192.168.90.2/32")}},
+				sliceSpec{name: sibling, parent: second,
+					pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{deny("192.168.90.3/32")}},
+			)
+			for _, name := range order {
+				require.NoError(t, fx.reconcileEvent(name))
+			}
+
+			recorded, _ := fx.r.clusterPolicyEndpointToParentCNPMap.Load(reused)
+			assert.Equal(t, second, recorded)
+			_, ok := fx.parentIdentifiers(first)
+			assert.False(t, ok, "the old parent must no longer track the reused slice's pods")
+			fx.assertClusterPolicyRulesCleared(oldPod)
+			assert.Empty(t, fx.identifierSlices(oldPod))
+			got, ok := fx.parentIdentifiers(second)
+			require.True(t, ok)
+			assert.ElementsMatch(t, []string{newPod, siblingPod}, got)
+			assert.ElementsMatch(t, []string{"Deny 192.168.90.2/32", "Deny 192.168.90.3/32"}, fx.clusterPolicyRules(newPod))
+
+			fx.deleteSlice(reused)
+			require.NoError(t, fx.reconcileDeleted(reused))
+			got, ok = fx.parentIdentifiers(second)
+			require.True(t, ok)
+			assert.Equal(t, []string{siblingPod}, got)
+			assert.Equal(t, []string{"Deny 192.168.90.3/32"}, fx.clusterPolicyRules(siblingPod))
+			assert.Equal(t, 1, sizeOfSyncMap(&fx.r.clusterPolicyEndpointToParentCNPMap))
+		})
+	}
+}
+
+// Cluster-policy counterpart of TestPolicyEndpointSlices_ReusedNamesSwappingParentsSettle.
+func TestClusterPolicyEndpointSlices_ReusedNamesSwappingParentsSettle(t *testing.T) {
+	first, second := longPolicyNames()
+	x, y := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+
+	for _, order := range [][]string{{x, y}, {y, x}} {
+		t.Run("reconcile "+order[0][len(order[0])-5:]+" first", func(t *testing.T) {
+			fx := newCPEFixture(t)
+			fx.setSlices(
+				sliceSpec{name: x, parent: first,
+					pods: []podRef{localPod("xa-aaa", "10.1.1.1")}, ingress: []ruleRef{deny("192.168.90.1/32")}},
+				sliceSpec{name: y, parent: second,
+					pods: []podRef{localPod("yb-aaa", "10.1.1.2")}, ingress: []ruleRef{deny("192.168.90.2/32")}},
+			)
+			require.NoError(t, fx.reconcileEvent(x))
+			require.NoError(t, fx.reconcileEvent(y))
+			fx.reset()
+
+			fx.setSlices(
+				sliceSpec{name: x, parent: second,
+					pods: []podRef{localPod("xb-aaa", "10.1.1.3")}, ingress: []ruleRef{deny("192.168.90.3/32")}},
+				sliceSpec{name: y, parent: first,
+					pods: []podRef{localPod("ya-aaa", "10.1.1.4")}, ingress: []ruleRef{deny("192.168.90.4/32")}},
+			)
+			for _, name := range order {
+				require.NoError(t, fx.reconcileEvent(name))
+			}
+
+			for name, parent := range map[string]string{x: second, y: first} {
+				recorded, _ := fx.r.clusterPolicyEndpointToParentCNPMap.Load(name)
+				assert.Equal(t, parent, recorded)
+			}
+			got, ok := fx.parentIdentifiers(first)
+			require.True(t, ok)
+			assert.Equal(t, []string{identifierOf("ya-aaa")}, got)
+			got, ok = fx.parentIdentifiers(second)
+			require.True(t, ok)
+			assert.Equal(t, []string{identifierOf("xb-aaa")}, got)
+			fx.assertClusterPolicyRulesCleared(identifierOf("xa-aaa"))
+			fx.assertClusterPolicyRulesCleared(identifierOf("yb-aaa"))
+			assert.Equal(t, []string{"Deny 192.168.90.4/32"}, fx.clusterPolicyRules(identifierOf("ya-aaa")))
+			assert.Equal(t, []string{"Deny 192.168.90.3/32"}, fx.clusterPolicyRules(identifierOf("xb-aaa")))
+		})
+	}
+}
+
+// A transition whose cleanup fails stays queued with the old parent and the pods it saved, since
+// the new parent's sibling has already rewritten the reused slice's selector entry.
+func TestClusterPolicyEndpointSlices_FailedParentTransitionRetriesWithSavedPods(t *testing.T) {
+	first, second := longPolicyNames()
+	reused, sibling := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+	oldPod, newPod := identifierOf("old-aaa"), identifierOf("new-aaa")
+	writeFailed := errors.New("write failed")
+
+	fx := newCPEFixture(t)
+	fx.setSlices(
+		sliceSpec{name: reused, parent: first,
+			pods: []podRef{localPod("old-aaa", "10.1.1.1")}, ingress: []ruleRef{deny("192.168.90.1/32")}},
+		sliceSpec{name: sibling, parent: second,
+			pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{deny("192.168.90.3/32")}},
+	)
+	require.NoError(t, fx.reconcileEvent(reused))
+	require.NoError(t, fx.reconcileEvent(sibling))
+
+	fx.setSlices(
+		sliceSpec{name: reused, parent: second,
+			pods: []podRef{localPod("new-aaa", "10.1.1.2")}, ingress: []ruleRef{deny("192.168.90.2/32")}},
+		sliceSpec{name: sibling, parent: second,
+			pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{deny("192.168.90.3/32")}},
+	)
+	fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{oldPod: writeFailed}
+	require.ErrorIs(t, fx.reconcileEvent(sibling), writeFailed, "the sibling's reconcile settles the transition it found")
+	require.Len(t, fx.r.parentTransitions[reused], 1, "the failed transition stays queued")
+	assert.Equal(t, first, fx.r.parentTransitions[reused][0].oldParent)
+	assert.Equal(t, []npatypes.Pod{{NamespacedName: types.NamespacedName{Name: "old-aaa", Namespace: fixtureNamespace}, PodIP: "10.1.1.1"}},
+		fx.r.parentTransitions[reused][0].oldPods, "with the pods the old parent programmed")
+
+	fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+	fx.reset()
+	require.NoError(t, fx.reconcileEvent(reused))
+
+	assert.Empty(t, fx.r.parentTransitions)
+	fx.assertClusterPolicyRulesCleared(oldPod)
+	_, ok := fx.parentIdentifiers(first)
+	assert.False(t, ok)
+	assert.ElementsMatch(t, []string{"Deny 192.168.90.2/32", "Deny 192.168.90.3/32"}, fx.clusterPolicyRules(newPod))
 }

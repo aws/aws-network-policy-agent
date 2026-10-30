@@ -434,6 +434,7 @@ func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T)
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPE.Name})
 	r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(deletedPolicy, namespace), []string{podIdentifier})
 	r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+	r.policyEndpointToParentNPMap.Store(types.NamespacedName{Name: deletedPEName, Namespace: namespace}, deletedPolicy)
 
 	_, err := r.Reconcile(context.Background(), controllerruntime.Request{
 		NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
@@ -524,6 +525,7 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPEName})
 			r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(policyName, namespace), []string{podIdentifier})
 			r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+			r.policyEndpointToParentNPMap.Store(types.NamespacedName{Name: deletedPEName, Namespace: namespace}, policyName)
 
 			_, err := r.Reconcile(context.Background(), controllerruntime.Request{
 				NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
