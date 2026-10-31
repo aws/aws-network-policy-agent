@@ -112,6 +112,23 @@ func (s sliceSpec) podEndpoints() []policyk8sawsv1.PodEndpoint {
 	return eps
 }
 
+// generatedSliceName models GenerateName for "<policy>-": the base is cut to 58 characters
+// before the 5-character suffix is appended.
+func generatedSliceName(policy, suffix string) string {
+	base := policy + "-"
+	if len(base) > 58 {
+		base = base[:58]
+	}
+	return base + suffix
+}
+
+// longPolicyNames returns two distinct 58-character policy names that differ only in their
+// last character, so their slice names differ only right before the generated suffix.
+func longPolicyNames() (string, string) {
+	return "payments-api-allow-ingress-from-frontend-and-monitoring-v2",
+		"payments-api-allow-ingress-from-frontend-and-monitoring-v3"
+}
+
 func identifierOf(podName string) string {
 	return utils.GetPodIdentifier(podName, fixtureNamespace)
 }
@@ -276,10 +293,12 @@ func (fx *cpeFixture) reconcile(name string) error {
 	return fx.r.reconcileClusterPolicyEndpoint(context.TODO(), &cpe)
 }
 
-// reconcileDeleted drives the cleanup path the agent takes when a slice is gone from the
-// API server.
-func (fx *cpeFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
+// reconcileDeleted reconciles a slice that is gone from the API server.
+func (fx *cpeFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
+
+// reconcileEvent reconciles a slice through the entry point a watch event uses.
+func (fx *cpeFixture) reconcileEvent(name string) error {
+	return fx.r.reconcile(context.TODO(), controllerruntime.Request{
 		NamespacedName: types.NamespacedName{Name: name},
 	})
 }
@@ -472,8 +491,11 @@ func (fx *peFixture) reconcile(name string) error {
 	return fx.r.reconcilePolicyEndpoint(context.TODO(), &pe)
 }
 
-func (fx *peFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
+func (fx *peFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
+
+// reconcileEvent reconciles a slice through the entry point a watch event uses.
+func (fx *peFixture) reconcileEvent(name string) error {
+	return fx.r.reconcile(context.TODO(), controllerruntime.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: fx.sliceNamespaces[name]},
 	})
 }

@@ -74,18 +74,16 @@ func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *
 // RPC path) load it without the mutex.
 //
 // Append-only is deliberate. Replacing a parent's names would reclaim the names of
-// re-sliced PolicyEndpoints, but deciding which stored names belong to this parent means
-// deriving it with GetParentNPNameFromPEName, which is lossy above 58 chars -- so it can
-// evict another policy's names and stop its rules being assembled, dropping a Deny on the
-// cluster path. Mis-tracking costs enforcement; under-tracking costs memory.
+// re-sliced PolicyEndpoints, but the stored names carry no parent, so it could evict another
+// policy's names and stop its rules being assembled, dropping a Deny on the cluster path.
+// Mis-tracking costs enforcement; under-tracking costs memory.
 //
 // The cost: a name that leaves the live slice set while the identifier is still selected is
 // never pruned, so the key survives. Bounded by resharding, not pod churn. See the skipped
 // subtests in controllers/{cluster,}policyendpoints_slice_test.go.
 //
 // Fix: store the parent per entry (podIdentifier -> []struct{ParentNP, Name string}) so both
-// eviction and pruning compare a recorded Spec.PolicyRef.Name. Needs the parent on the
-// delete path too, where the object is gone.
+// eviction and pruning compare a recorded Spec.PolicyRef.Name.
 func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpointList []string) {
 	mutex.Lock()
 	defer mutex.Unlock()

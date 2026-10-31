@@ -163,7 +163,7 @@ func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
 	// the real cleanup path must delete the tracking entry
 	err := r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
 		NamespacedName: types.NamespacedName{Name: "pe-1", Namespace: "ns"},
-	})
+	}, pe.Spec.PolicyRef.Name)
 	assert.NoError(t, err)
 
 	// a recreated PE with a fresh annotation is observed again

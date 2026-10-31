@@ -1,6 +1,10 @@
 package controllers
 
 import (
+	"context"
+	"fmt"
+	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
@@ -8,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	controllerruntime "sigs.k8s.io/controller-runtime"
 )
 
 // The namespaced path mirrors the cluster path: one NetworkPolicy is bin-packed across
@@ -561,13 +566,11 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	// parentPEList. The purge reclaims those by exact name, drawing from the parent's live
 	// slices plus the reconciled resource's own name.
 
-	// Accepted residual. The purge prunes by EXACT PolicyEndpoint name, because matching on
-	// the derived parent name is unsafe: GetParentNPNameFromPEName is lossy under
-	// GenerateName truncation, so a parent-wide match can drop a DIFFERENT policy's slices.
-	// The cost of that safety is this case -- a re-slice that simultaneously deselects an
-	// identifier, observed only through the SURVIVING slice's reconcile. There,
-	// resourceName is the surviving slice, so the departed slice's name is not in scope and
-	// the identifier retains it.
+	// Accepted residual. The purge prunes by EXACT PolicyEndpoint name, never parent-wide, so it
+	// cannot drop a DIFFERENT policy's slices. The cost of that safety is this case -- a re-slice that
+	// simultaneously deselects an identifier, observed only through the SURVIVING slice's reconcile.
+	// There, resourceName is the surviving slice, so the departed slice's name is not in scope and the
+	// identifier retains it.
 	//
 	// Scope of the cost, measured below rather than assumed:
 	//   - The retained name is a permanent Map1 entry if a sibling reconcile has already
@@ -742,4 +745,300 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 		assert.False(t, written,
 			"an identifier with no eBPF context must be skipped, not written and failed")
 	})
+}
+
+// Two long policy names that differ only in their last character must be tracked as separate
+// policies. Per-policy keys come from Spec.PolicyRef.
+func TestPolicyEndpointSlices_LongPolicyNamesDoNotCollide(t *testing.T) {
+	first, second := longPolicyNames()
+	firstSlice, secondSlice := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+
+	t.Run("each policy keeps its own selected-identifier snapshot", func(t *testing.T) {
+		firstLocal, firstRemote := identifierOf("first-aaa"), identifierOf("first-remote-aaa")
+		secondLocal, secondRemote := identifierOf("second-aaa"), identifierOf("second-remote-aaa")
+		fx := newPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("first-aaa", "10.1.1.1"), remotePod("first-remote-aaa", "10.1.2.1")},
+				ingress: []ruleRef{allow("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("second-aaa", "10.1.1.2"), remotePod("second-remote-aaa", "10.1.2.2")},
+				ingress: []ruleRef{allow("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+
+		got, ok := fx.parentIdentifiers(first, fixtureNamespace)
+		require.True(t, ok)
+		assert.ElementsMatch(t, []string{firstLocal, firstRemote}, got)
+		got, ok = fx.parentIdentifiers(second, fixtureNamespace)
+		require.True(t, ok)
+		assert.ElementsMatch(t, []string{secondLocal, secondRemote}, got)
+
+		// Deselect the first policy's remote pod. Its staleness is only detected if the first
+		// policy's snapshot was not overwritten by the second policy's reconcile.
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("first-aaa", "10.1.1.1")},
+				ingress: []ruleRef{allow("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("second-aaa", "10.1.1.2"), remotePod("second-remote-aaa", "10.1.2.2")},
+				ingress: []ruleRef{allow("192.168.90.2/32")}},
+		)
+		require.NoError(t, fx.reconcile(firstSlice))
+
+		assert.Empty(t, fx.identifierSlices(firstRemote), "the deselected identifier must be pruned")
+		assert.Equal(t, []string{secondSlice}, fx.identifierSlices(secondRemote),
+			"the other policy's identifiers must be untouched")
+	})
+
+	t.Run("deleting one policy keeps the other policy's rules on a shared pod", func(t *testing.T) {
+		shared := identifierOf("shared-aaa")
+		fx := newPEFixture(t)
+		fx.setSlices(
+			sliceSpec{name: firstSlice, parent: first,
+				pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+				ingress: []ruleRef{allow("192.168.90.1/32")}},
+			sliceSpec{name: secondSlice, parent: second,
+				pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+				ingress: []ruleRef{allow("192.168.90.2/32")}},
+		)
+		fx.reconcileAll()
+		fx.reset()
+
+		fx.deleteSlice(firstSlice)
+		require.NoError(t, fx.reconcileDeleted(firstSlice))
+
+		assert.Equal(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(shared),
+			"the surviving policy's slice must not be skipped as a sibling of the deleted one")
+		state, ok := fx.podState(shared)
+		require.True(t, ok)
+		assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	})
+
+	t.Run("the recorded parent is dropped once its PolicyEndpoint is deleted", func(t *testing.T) {
+		fx := newPEFixture(t)
+		fx.setSlices(sliceSpec{name: firstSlice, parent: first,
+			pods:    []podRef{localPod("first-aaa", "10.1.1.1")},
+			ingress: []ruleRef{allow("192.168.90.1/32")}})
+		req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: firstSlice, Namespace: fixtureNamespace}}
+		_, err := fx.r.Reconcile(context.TODO(), req)
+		require.NoError(t, err)
+		recorded, ok := fx.r.policyEndpointToParentNPMap.Load(req.NamespacedName)
+		require.True(t, ok, "the parent must be recorded from Spec.PolicyRef")
+		assert.Equal(t, first, recorded)
+
+		fx.deleteSlice(firstSlice)
+		_, err = fx.r.Reconcile(context.TODO(), req)
+		require.NoError(t, err)
+		assert.Equal(t, 0, sizeOfSyncMap(&fx.r.policyEndpointToParentNPMap), "recorded parents must not leak")
+	})
+}
+
+// Deleting a PolicyEndpoint this agent never reconciled must be a no-op.
+func TestPolicyEndpointSlices_DeleteOfUnseenSliceIsNoop(t *testing.T) {
+	first, second := longPolicyNames()
+	firstSlice, secondSlice := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+	shared := identifierOf("shared-aaa")
+	fx := newPEFixture(t)
+	fx.setSlices(sliceSpec{name: secondSlice, parent: second,
+		pods:    []podRef{localPod("shared-aaa", "10.1.1.1")},
+		ingress: []ruleRef{allow("192.168.90.2/32")}})
+	fx.reconcileAll()
+	fx.reset()
+
+	require.NoError(t, fx.reconcileDeleted(firstSlice))
+
+	assert.Empty(t, fx.bpf.CallLog, "an unseen slice's delete must not touch the dataplane")
+	assert.Equal(t, []string{secondSlice}, fx.identifierSlices(shared))
+	got, ok := fx.parentIdentifiers(second, fixtureNamespace)
+	require.True(t, ok)
+	assert.Equal(t, []string{shared}, got)
+}
+
+// Skipping the delete of an unrecorded slice is safe only if every slice that can still get a
+// delete event has a recorded parent. Checked under random churn; no record may outlive its slice.
+func TestPolicyEndpointSlices_EveryLiveSliceHasRecordedParent(t *testing.T) {
+	first, second := longPolicyNames()
+	parents := []string{first, second, "short-policy"}
+	pods := []podRef{localPod("web-aaa", "10.1.1.1"), localPod("api-aaa", "10.1.1.2"),
+		remotePod("db-aaa", "10.1.2.1"), remotePod("cache-aaa", "10.1.2.2")}
+
+	for seed := int64(0); seed < 25; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		fx := newPEFixture(t)
+		live := map[string]sliceSpec{}
+		// Like GenerateName, a slice keeps its name while it lives and a recreated one gets a new name
+		names, created := map[string]string{}, 0
+		for step := 0; step < 30; step++ {
+			next := map[string]sliceSpec{}
+			nextNames := map[string]string{}
+			for _, parent := range parents {
+				for i := 0; i < rng.Intn(3); i++ {
+					slot := fmt.Sprintf("%s#%d", parent, i)
+					name, ok := names[slot]
+					if !ok {
+						created++
+						name = generatedSliceName(parent, fmt.Sprintf("%05d", created))
+					}
+					nextNames[slot] = name
+					var selected []podRef
+					for _, p := range pods {
+						if rng.Intn(2) == 0 {
+							selected = append(selected, p)
+						}
+					}
+					next[name] = sliceSpec{name: name, parent: parent, pods: selected,
+						ingress: []ruleRef{allow(fmt.Sprintf("192.168.90.%d/32", i+1))}}
+				}
+			}
+			specs := make([]sliceSpec, 0, len(next))
+			for _, s := range next {
+				specs = append(specs, s)
+			}
+			fx.setSlices(specs...)
+			// Leave some slices unreconciled: their names must then appear nowhere in state
+			for _, name := range fx.sliceNames() {
+				if rng.Intn(3) > 0 {
+					require.NoError(t, fx.reconcile(name))
+				}
+			}
+			for name := range live {
+				if _, ok := next[name]; !ok {
+					require.NoError(t, fx.reconcileDeleted(name))
+				}
+			}
+			live, names = next, nextNames
+			assertEverySliceRecorded(t, fx, seed, step)
+		}
+
+		fx.setSlices()
+		for name := range live {
+			require.NoError(t, fx.reconcileDeleted(name))
+		}
+		assert.Equal(t, 0, sizeOfSyncMap(&fx.r.policyEndpointToParentNPMap), "seed %d: records must not outlive their slices", seed)
+	}
+}
+
+// assertEverySliceRecorded checks the property the delete path relies on: a slice that still
+// exists, and so can still get a delete event, has a recorded parent if any state names it. Names
+// of deleted slices can linger (inserts are append-only) but their cleanup already ran.
+func assertEverySliceRecorded(t *testing.T, fx *peFixture, seed int64, step int) {
+	t.Helper()
+	check := func(name, where string) {
+		if _, live := fx.store[name]; !live {
+			return
+		}
+		_, ok := fx.r.policyEndpointToParentNPMap.Load(types.NamespacedName{Name: name, Namespace: fixtureNamespace})
+		assert.True(t, ok, "seed %d step %d: live slice %s in %s has no recorded parent", seed, step, name, where)
+	}
+	fx.r.podIdentifierToPolicyEndpointMap.Range(func(id, names any) bool {
+		for _, name := range names.([]string) {
+			check(name, id.(string))
+		}
+		return true
+	})
+	fx.r.policyEndpointSelectorMap.Range(func(key, _ any) bool {
+		check(strings.TrimSuffix(key.(string), "/"+fixtureNamespace), "the selector map")
+		return true
+	})
+}
+
+// A slice deleted and recreated with the same name under another policy before the agent sees the
+// delete merges into one reconcile. The old slice's cleanup must still run under the old parent,
+// whichever of the new parent's slices is reconciled first.
+func TestPolicyEndpointSlices_ReusedNameUnderNewParentCleansUpOldParent(t *testing.T) {
+	first, second := longPolicyNames()
+	reused, sibling := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+	oldPod, newPod, siblingPod := identifierOf("old-aaa"), identifierOf("new-aaa"), identifierOf("sib-aaa")
+
+	for _, order := range [][]string{{reused, sibling}, {sibling, reused}} {
+		t.Run("reconcile "+order[0][len(order[0])-5:]+" first", func(t *testing.T) {
+			fx := newPEFixture(t)
+			fx.setSlices(
+				sliceSpec{name: reused, parent: first,
+					pods: []podRef{localPod("old-aaa", "10.1.1.1")}, ingress: []ruleRef{allow("192.168.90.1/32")}},
+				sliceSpec{name: sibling, parent: second,
+					pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{allow("192.168.90.3/32")}},
+			)
+			require.NoError(t, fx.reconcileEvent(reused))
+			require.NoError(t, fx.reconcileEvent(sibling))
+			fx.reset()
+
+			fx.setSlices(
+				sliceSpec{name: reused, parent: second,
+					pods: []podRef{localPod("new-aaa", "10.1.1.2")}, ingress: []ruleRef{allow("192.168.90.2/32")}},
+				sliceSpec{name: sibling, parent: second,
+					pods: []podRef{localPod("sib-aaa", "10.1.1.3")}, ingress: []ruleRef{allow("192.168.90.3/32")}},
+			)
+			for _, name := range order {
+				require.NoError(t, fx.reconcileEvent(name))
+			}
+
+			recorded, _ := fx.r.policyEndpointToParentNPMap.Load(types.NamespacedName{Name: reused, Namespace: fixtureNamespace})
+			assert.Equal(t, second, recorded)
+			_, ok := fx.parentIdentifiers(first, fixtureNamespace)
+			assert.False(t, ok, "the old parent must no longer track the reused slice's pods")
+			fx.assertRulesCleared(oldPod)
+			assert.Empty(t, fx.identifierSlices(oldPod))
+			got, ok := fx.parentIdentifiers(second, fixtureNamespace)
+			require.True(t, ok)
+			assert.ElementsMatch(t, []string{newPod, siblingPod}, got)
+			assert.ElementsMatch(t, []string{"192.168.90.2/32", "192.168.90.3/32"}, fx.ingressCIDRs(newPod))
+
+			fx.deleteSlice(reused)
+			require.NoError(t, fx.reconcileDeleted(reused))
+			got, ok = fx.parentIdentifiers(second, fixtureNamespace)
+			require.True(t, ok)
+			assert.Equal(t, []string{siblingPod}, got)
+			assert.Equal(t, []string{"192.168.90.3/32"}, fx.ingressCIDRs(siblingPod))
+			assert.Equal(t, 1, sizeOfSyncMap(&fx.r.policyEndpointToParentNPMap))
+		})
+	}
+}
+
+// Two slices that swap parents before either delete is processed: each old parent's cleanup
+// lists the other reused slice. Settling must terminate and leave both parents correct.
+func TestPolicyEndpointSlices_ReusedNamesSwappingParentsSettle(t *testing.T) {
+	first, second := longPolicyNames()
+	x, y := generatedSliceName(first, "aaaaa"), generatedSliceName(second, "bbbbb")
+
+	for _, order := range [][]string{{x, y}, {y, x}} {
+		t.Run("reconcile "+order[0][len(order[0])-5:]+" first", func(t *testing.T) {
+			fx := newPEFixture(t)
+			fx.setSlices(
+				sliceSpec{name: x, parent: first,
+					pods: []podRef{localPod("xa-aaa", "10.1.1.1")}, ingress: []ruleRef{allow("192.168.90.1/32")}},
+				sliceSpec{name: y, parent: second,
+					pods: []podRef{localPod("yb-aaa", "10.1.1.2")}, ingress: []ruleRef{allow("192.168.90.2/32")}},
+			)
+			require.NoError(t, fx.reconcileEvent(x))
+			require.NoError(t, fx.reconcileEvent(y))
+			fx.reset()
+
+			fx.setSlices(
+				sliceSpec{name: x, parent: second,
+					pods: []podRef{localPod("xb-aaa", "10.1.1.3")}, ingress: []ruleRef{allow("192.168.90.3/32")}},
+				sliceSpec{name: y, parent: first,
+					pods: []podRef{localPod("ya-aaa", "10.1.1.4")}, ingress: []ruleRef{allow("192.168.90.4/32")}},
+			)
+			for _, name := range order {
+				require.NoError(t, fx.reconcileEvent(name))
+			}
+
+			for name, parent := range map[string]string{x: second, y: first} {
+				recorded, _ := fx.r.policyEndpointToParentNPMap.Load(types.NamespacedName{Name: name, Namespace: fixtureNamespace})
+				assert.Equal(t, parent, recorded)
+			}
+			got, ok := fx.parentIdentifiers(first, fixtureNamespace)
+			require.True(t, ok)
+			assert.Equal(t, []string{identifierOf("ya-aaa")}, got)
+			got, ok = fx.parentIdentifiers(second, fixtureNamespace)
+			require.True(t, ok)
+			assert.Equal(t, []string{identifierOf("xb-aaa")}, got)
+			fx.assertRulesCleared(identifierOf("xa-aaa"))
+			fx.assertRulesCleared(identifierOf("yb-aaa"))
+			assert.Equal(t, []string{"192.168.90.4/32"}, fx.ingressCIDRs(identifierOf("ya-aaa")))
+			assert.Equal(t, []string{"192.168.90.3/32"}, fx.ingressCIDRs(identifierOf("xb-aaa")))
+		})
+	}
 }

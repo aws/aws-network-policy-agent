@@ -9,7 +9,6 @@ import (
 	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -214,10 +213,9 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			"sibling CPE must not re-supply Deny rules for a stale identifier")
 	})
 
-	t.Run("truncated CPE name still triggers stale cleanup", func(t *testing.T) {
-		// For CNP names >= 58 chars GenerateName truncates the CPE base, so the write
-		// key must be derived from the CPE name (same as the reader) rather than
-		// Spec.PolicyRef.Name — else stale cleanup silently re-derives Deny rules.
+	t.Run("long CNP name still triggers stale cleanup", func(t *testing.T) {
+		// The snapshot is keyed by Spec.PolicyRef.Name, so a CPE whose name does not start
+		// with the full CNP name must still prune and clear its Deny rules.
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
 
@@ -287,7 +285,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		assert.Nil(t, err)
 
 		_, ok := reconciler.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
-		assert.False(t, ok, "stale identifier should be removed even when the CPE name is truncated")
+		assert.False(t, ok, "stale identifier should be removed for a long CNP name")
 
 		// Rule count is what distinguishes "clear" from "re-derive" — both branches call
 		// UpdateClusterPolicyEbpfMaps.
@@ -295,7 +293,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		assert.Empty(t, mockBpf.LastClusterPolicyIngressRules,
 			"Deny rules must be cleared, not re-derived")
 
-		_, ok = reconciler.clusterNetworkPolicyToPodIdentifierMap.Load(utils.GetParentNPNameFromPEName(cpeName))
+		_, ok = reconciler.clusterNetworkPolicyToPodIdentifierMap.Load(parentCNP)
 		assert.False(t, ok)
 	})
 
@@ -406,7 +404,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 
 		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
 			NamespacedName: types.NamespacedName{Name: cpeName},
-		})
+		}, parentCNP)
 		assert.Nil(t, err)
 
 		// Verify cleanup
@@ -464,7 +462,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 
 		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
 			NamespacedName: types.NamespacedName{Name: deletedCPE},
-		})
+		}, parentCNP)
 		assert.Nil(t, err)
 
 		// deletedCPE must be gone from the identifier's list.
