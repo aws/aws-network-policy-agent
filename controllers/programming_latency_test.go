@@ -112,9 +112,9 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 0,
 		},
 		{
-			name: "programming failure is retried and the successful retry is observed",
-			// the failure must not consume the trigger time, or every retried -
-			// i.e. every slow - programming would be missing from the histogram
+			name: "programming failure leaves trigger time unconsumed for the pass that lands it",
+			// The retry that finally programs the change reports the full time, retry delay
+			// included; dropping it would hide exactly the slow recover-after-failure cases.
 			calls: []observeCall{
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
@@ -122,7 +122,7 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 1,
 		},
 		{
-			name: "repeated failures observe nothing, and the eventual success counts once",
+			name: "repeated failures observe once, on the pass that lands",
 			calls: []observeCall{
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
 				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
@@ -202,10 +202,9 @@ func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
 	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = fresher
-	r.observeClusterPolicyProgrammingLatency(cpe, false) // failed: not consumed, not observed
-	r.observeClusterPolicyProgrammingLatency(cpe, true)  // successful retry: observed
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
-	r.observeClusterPolicyProgrammingLatency(cpe, true) // consumed on success: adds nothing
+	r.observeClusterPolicyProgrammingLatency(cpe, false) // not landed yet: left unconsumed
+	r.observeClusterPolicyProgrammingLatency(cpe, true)  // the pass that lands it observes
+	r.observeClusterPolicyProgrammingLatency(cpe, true)  // now consumed, so not re-observed
 	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest

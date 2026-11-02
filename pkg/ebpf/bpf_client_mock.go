@@ -65,11 +65,25 @@ type MockBpfClient struct {
 	// Empty means "standard".
 	NetworkPolicyMode string
 
-	// Per-identifier failures for the map writes, so a test can make one pod identifier's
-	// map writes fail every time while every other identifier succeeds. The call is
-	// logged in CallLog but its rules are not recorded.
+	// Per-identifier failures for UpdateClusterPolicyEbpfMaps, so a test can make one pod
+	// identifier's map writes fail every time while every other identifier succeeds. The
+	// call is logged in CallLog but its rules are not recorded.
 	UpdateClusterPolicyEbpfMapsErrFor map[string]error
-	UpdateEbpfMapsErrFor              map[string]error
+
+	// Per-identifier failures for UpdateEbpfMaps (the namespaced path), mirroring
+	// UpdateClusterPolicyEbpfMapsErrFor. Lets a test fail one identifier's namespaced map
+	// writes while every other identifier succeeds.
+	UpdateEbpfMapsErrFor map[string]error
+
+	// Per-pod failures for AttacheBPFProbes. Keyed by pod rather than by identifier,
+	// since GetPodIdentifier strips the last name segment: replicas of one workload share
+	// an identifier and its maps, so a test needs to fail a single replica's attach while
+	// its co-located siblings succeed.
+	AttacheBPFProbesErrFor map[types.NamespacedName]error
+
+	// Pods whose attach succeeded, so a test can assert the attach loop did not stop at
+	// the first failure.
+	AttachedPods map[types.NamespacedName]bool
 
 	// Per-identifier call records. The Last* fields above retain only the most recent
 	// call, which cannot distinguish outcomes when one reconcile programs several
@@ -99,6 +113,7 @@ type PodStateKey struct {
 func (m *MockBpfClient) Reset() {
 	m.CallLog = nil
 	m.LastAttachPodConfirmedLive = false
+	m.AttachedPods = nil
 	m.LastIngressRules = nil
 	m.LastEgressRules = nil
 	m.LastClusterPolicyIngressRules = nil
@@ -132,10 +147,17 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 	if m.DeletedPods[pod] {
 		return false, nil
 	}
+	if err := m.AttacheBPFProbesErrFor[pod]; err != nil {
+		return false, err
+	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.ForgetIdentifier(podIdentifier)
 	}
+	if m.AttachedPods == nil {
+		m.AttachedPods = map[types.NamespacedName]bool{}
+	}
+	m.AttachedPods[pod] = true
 	return m.AttachFirstPodInPodIdentifier, nil
 }
 
@@ -168,11 +190,11 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
-	if m.UpdateEbpfMapsErr != nil {
-		return m.UpdateEbpfMapsErr
-	}
 	if err := m.UpdateEbpfMapsErrFor[podIdentifier]; err != nil {
 		return err
+	}
+	if m.UpdateEbpfMapsErr != nil {
+		return m.UpdateEbpfMapsErr
 	}
 	m.LastIngressRules = ingressFirewallRules
 	m.LastEgressRules = egressFirewallRules
