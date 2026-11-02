@@ -117,7 +117,8 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 		if policiesAvailableInLocalCache {
 			//Derive Ingress and Egress Firewall Rules and Update the relevant eBPF maps
 			ingressRules, egressRules, _ :=
-				s.policyReconciler.DeriveFireWallRulesPerPodIdentifier(podIdentifier, in.K8S_POD_NAMESPACE)
+				s.policyReconciler.DeriveFireWallRulesForNewPod(podIdentifier,
+					types.NamespacedName{Name: in.K8S_POD_NAME, Namespace: in.K8S_POD_NAMESPACE})
 
 			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
 			if err != nil {
