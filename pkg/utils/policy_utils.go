@@ -7,14 +7,25 @@ import (
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 )
 
-// GetPodListToBeCleanedUp compares old and new pod sets to determine which pods need cleanup
+// GetPodListToBeCleanedUp compares old and new pod sets to determine which pods need cleanup.
+//
+// A pod is matched on NamespacedName, not on the whole struct: identity is the name, and
+// npatypes.Pod also carries PodIP, which the same pod can legitimately change (a StatefulSet
+// pod keeps its name across recreation but not its address). Comparing the whole struct would
+// treat a re-addressed pod as absent from the new set, which reads as "no longer selected"
+// when it still is. The podIdentifiers guard below happens to mask that today -- a pod in the
+// new set always has its identifier there too -- so this is a clarification rather than a
+// behaviour change, and it keeps the comparison from depending on that coincidence.
 func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod, podIdentifiers map[string]bool) []npatypes.Pod {
 	var podsToBeCleanedUp []npatypes.Pod
 
 	for _, oldPod := range oldPodSet {
 		oldPodIdentifier := GetPodIdentifier(oldPod.Name, oldPod.Namespace)
 
-		if !slices.Contains(newPodSet, oldPod) && !podIdentifiers[oldPodIdentifier] {
+		stillSelected := slices.ContainsFunc(newPodSet, func(newPod npatypes.Pod) bool {
+			return newPod.NamespacedName == oldPod.NamespacedName
+		})
+		if !stillSelected && !podIdentifiers[oldPodIdentifier] {
 			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
 		}
 	}
