@@ -13,6 +13,26 @@ var (
 	EKS_V6_CLI_BINARY = "aws-eks-na-cli-v6"
 )
 
+// hostBinaryNames maps binaries to the name they are installed under on the
+// host, where it differs. The CLI is always aws-eks-na-cli. The ingress
+// binaries that also shorten the conntrack entry of denied connections take
+// the regular ingress binary's name, so an agent compares the host copy with
+// whichever variant it selected, and an agent without them (after a
+// rollback) sees a changed binary and reloads the pods' ingress programs.
+var hostBinaryNames = map[string]string{
+	EKS_V6_CLI_BINARY:           EKS_CLI_BINARY,
+	"tc.v4ingress.ctdeny.bpf.o": "tc.v4ingress.bpf.o",
+	"tc.v6ingress.ctdeny.bpf.o": "tc.v6ingress.bpf.o",
+}
+
+// HostBinaryName returns the name binary is installed under on the host.
+func HostBinaryName(binary string) string {
+	if name, ok := hostBinaryNames[binary]; ok {
+		return name
+	}
+	return binary
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -68,14 +88,7 @@ func CopyFile(src, dst string) (err error) {
 func InstallBPFBinaries(pluginBins []string, hostCNIBinPath string) error {
 	log().Info("Let's install BPF Binaries on to the host path.....")
 	for _, plugin := range pluginBins {
-		targetPlugin := plugin
-
-		// CLI binary should always refer to aws-eks-na-cli
-		if plugin == EKS_V6_CLI_BINARY {
-			targetPlugin = EKS_CLI_BINARY
-		}
-
-		target := fmt.Sprintf("%s%s", hostCNIBinPath, targetPlugin)
+		target := fmt.Sprintf("%s%s", hostCNIBinPath, HostBinaryName(plugin))
 		source := fmt.Sprintf("%s", plugin)
 		log().Infof("Installing BPF Binary..target %s source %s", target, source)
 

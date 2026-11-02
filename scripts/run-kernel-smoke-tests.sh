@@ -4,6 +4,8 @@
 # suites run identically on IPv4 and IPv6 clusters, so every kernel line in
 # the nightly matrix gets the same coverage:
 #   policy.test - network policy enforcement through the agent's TC programs
+#   ebpf.test   - eBPF program behavior, including the conntrack shortening of
+#                 denied connections on kernels with the nf_conntrack kfuncs
 #   strict.test - strict enforcement mode (mutates aws-node, so it runs last)
 #
 # Parameters:
@@ -33,6 +35,8 @@ echo "Making ginkgo test binaries"
 (cd $DIR/.. && make build-test-binaries)
 
 run_ginkgo_suite policy.test 15m
+
+run_ginkgo_suite ebpf.test 15m
 
 enable_strict_mode
 

@@ -1,6 +1,7 @@
 .idea/
 coverage.txt
 *.h
+!pkg/ebpf/c/ct_deny.h
 *.o
 aws-eks-na-cli
 aws-eks-na-cli-v6
