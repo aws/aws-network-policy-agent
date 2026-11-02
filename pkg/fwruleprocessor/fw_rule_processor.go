@@ -288,7 +288,7 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
 	firewallMap := make(map[string][]byte)
 	cidrL4Rules := make(map[string][]utils.L4Rule)
-	processedCIDRs := make([]string, 0)
+	processedCIDRs := newCIDRTrie()
 
 	// Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
 	// This ensures kubelet liveness/readiness probes are never blocked by cluster network policies.
@@ -340,7 +340,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 			}
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], l4Rule)
 		}
-		processedCIDRs = append(processedCIDRs, cidr)
+		processedCIDRs.insert(cidr)
 	}
 
 	// Step 4: Resolve conflicts and create final map entries
@@ -405,21 +405,15 @@ func (f *FirewallRuleProcessor) getPrefixLength(cidr string) int {
 	return prefixLen
 }
 
-func (f *FirewallRuleProcessor) findMostSpecificOverlap(currentCIDR string, processedCIDRs []string) string {
+// Rules are processed in ascending prefix length, so the last containing key
+// matches the previous reverse scan. Canonicalization makes equal-length matches identical.
+func (f *FirewallRuleProcessor) findMostSpecificOverlap(currentCIDR string, processedCIDRs *cidrTrie) string {
 	_, currentNet, _ := net.ParseCIDR(currentCIDR)
-
-	// Loop from end to start since CIDRs are sorted in ascending order
-	for i := len(processedCIDRs) - 1; i >= 0; i-- {
-		processedCIDR := processedCIDRs[i]
-		_, processedNet, _ := net.ParseCIDR(processedCIDR)
-
-		// Check if current CIDR is contained within processed CIDR
-		if processedNet.Contains(currentNet.IP) {
-			return processedCIDR
-		}
+	keys := processedCIDRs.findContainingKeys(currentNet.IP)
+	if len(keys) == 0 {
+		return ""
 	}
-
-	return ""
+	return keys[len(keys)-1]
 }
 
 func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) []utils.L4Rule {
