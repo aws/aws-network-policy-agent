@@ -13,7 +13,7 @@ The AWS Network Policy Agent enforces Kubernetes NetworkPolicy and ClusterNetwor
 
 ## Build and test
 
-- `make build-linux`: builds the agent and both CLIs with the host Go toolchain (version in `.go-version`).
+- `make build-linux`: builds the agent and both CLIs with the host Go toolchain (Go 1.26.9 or later, per `go.mod`; `.go-version` picks the Go image for docker builds).
 - `make build-bpf`: compiles the BPF objects with clang. It needs `pkg/ebpf/c/vmlinux.h`, which `make vmlinuxh` generates on a Linux host with `bpftool`. `make docker-build` builds the image, including the objects.
 - `make test`: unit tests, `go test ./pkg/... ./controllers/...` with coverage. `make docker-unit-tests` runs them in the test container. For one package: `go test ./pkg/ebpf/...`.
 - `make check-format` (needs `goimports`) and `make vet`: the code checks CI runs.
@@ -30,11 +30,11 @@ CI:
 
 - **v4/v6 parity.** A datapath change goes into both families: the C programs (including the `NPA_CT_SHORTEN_ON_DENY` blocks and `ct_deny.h`), conntrack GC, event decoding, CLI and tests. Run `python3 -I hack/v4v6-diff.py --all .` at the merge base and at the change; it diffs both ingress builds. The change should add no hunk unless it is family-specific by design.
 - **SDK naming.** The SDK splits pin names at the first `_`. A `LoadBpfFile*` prefix must not contain `_`. Every per-pod map must be listed in `utils.NamespacedBPFMaps`, or it is treated as a global map.
-- **Flags.** Treat a new agent flag as a one-way door. Prefer no flag. For a test-only code path, use a test-only mechanism such as the test agent image, not a product flag.
-- **BPF object bytes.** Any edit to a `pkg/ebpf/c` file changes the object's bytes, and every node reloads that object on upgrade. When both directions must reload, bump `NPA_FILE_VERSION` in all four tc programs.
+- **Flags.** Treat a new agent flag as a one-way door. Prefer no flag. For a test-only code path, use a test-only mechanism (for example a test binary or image under `test/`), not a product flag.
+- **BPF object bytes.** An edit to a `pkg/ebpf/c` file that changes code or shifts line numbers changes the bytes of every object built from it, even if it only adds a comment line: the objects are built with `-g`, so `.BTF.ext`, `.debug_info` and `.debug_line` change. Every node reloads a changed object on upgrade. A comment reworded in place, or appended at the end of a file, left the objects byte-identical (clang 15.0.7 on AL2023). Treat any edit as changing the bytes unless you have built both versions and compared them. When both directions must reload, bump `NPA_FILE_VERSION` in all four tc programs.
 - **Headers.** `.gitignore` ignores `*.h`. A new header in `pkg/ebpf/c/` needs an exception, as `ct_deny.h` has.
 - **Cached objects.** The reconcilers read with `client.UnsafeDisableDeepCopy`. Never write to those objects or to anything reachable from them.
-- **Locks.** `podIdentifierLocks` is not re-entrant. Helpers that expect it held end in `Locked`.
+- **Locks.** `podIdentifierLocks` is not re-entrant: never take it in a function called with it held. Some such helpers end in `Locked`, but the attach, load and delete helpers (`attachIngressBPFProbe`, `loadBPFProgram`, `deleteBPFProbes`) also run under it without the suffix.
 - **Logging.** Use the package's `log()` helper. The logger formats like `fmt.Sprintf`, so use `%v`, not `%w`.
 - **Comments.** Describe current behavior and why, not change history.
 

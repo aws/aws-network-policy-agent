@@ -25,8 +25,10 @@ does not resolve macros.
 
 The script strips comments and whitespace and rewrites address-family tokens
 to a common form (address types and field names, IP header type, L4 protocol
-field, EtherType, IP version, host prefix length, port width, and a _v4 / _v6
-suffix on any identifier). The trie key fill (four byte assignments in v4, a
+field, EtherType, IP version, host prefix length, port width, and the
+family's own suffix, _v4 in v4 files and _v6 in v6 files, on any identifier).
+A _v6 name in a v4 file, or a _v4 name in a v6 file, is left as is and shows as
+a hunk. The trie key fill (four byte assignments in v4, a
 16-byte loop in v6) collapses to one token only when it has exactly the
 expected shape; otherwise its lines are kept and compared like any other. No
 source line is dropped. It then diffs the two token streams. Each hunk prints
@@ -38,6 +40,19 @@ functions print nothing.
 
 Known noise: a reordered statement shows up as a paired insert and delete of
 the same text, and a lone "}" can be aligned into a neighboring hunk.
+
+What the rewrites hide, so check these by reading:
+  - ip->protocol (v4) and ip->nexthdr (v6) both become ip->L4PROTO. In v6 the
+    next header can be an extension header, not TCP or UDP. How the v6 code
+    handles extension headers behind nexthdr is not compared.
+  - __u16 and __u32 l4_src_port / l4_dst_port both become __uXX, so a change
+    of port width in either family does not show.
+  - --funcs finds a definition only when it starts in column 0 with the name
+    on the same line as the return type, for example
+    "static __always_inline void foo_v4(". A definition written with the name
+    on the next line is skipped. Each name is kept once per family, so a
+    second definition of the same name (for example in an #ifdef / #else
+    branch, which --funcs does not resolve) replaces the first.
 
 Diff the diff on a change (BASE = merge base checkout, HEAD = change checkout):
   diff <(python3 -I hack/v4v6-diff.py --all --no-lines "$BASE") \\
@@ -57,7 +72,6 @@ PRE = [  # applied to both families, before the family rules
 COMMON = [  # applied to both families, after the family rules
     (r'\(struct conntrack_value \*\)', ''),           # v6 casts the lookup result
     (r'__u(16|32) (l4_(src|dst)_port)', r'__uXX \2'),  # port local width differs
-    (r'\b(\w+)_v[46]\b', r'\1_vX'),                    # family-suffixed names
     (r'\s+', ' '),
 ]
 V4 = [
@@ -65,12 +79,15 @@ V4 = [
     (r'__u8 ip\[4\]', 'IPBYTES ip'),
     (r'__u32 ip;', 'IPBYTES ip;'),
     (r'evt\.(src|dest)_ip = flow_key\.(src|dest)_ip;',
-     lambda m: 'evt.%s_ip = ip->%saddr;' % (m.group(1), m.group(1)[0])),
+     lambda m: 'evt.%s_ip = ip->%saddr;' % (m.group(1), m.group(2)[0])),
     (r'prefix_len = 32', 'prefix_len = PLEN'),
     (r'0x08U', 'ETH_P'),
     (r'version != 4', 'version != VER'),
     (r'struct iphdr', 'struct IPHDR'),
     (r'ip->protocol', 'ip->L4PROTO'),
+    # Only this family's suffix is rewritten, so a call to the other family's
+    # helper (shorten_denied_syn_v6 in a v4 file) survives and shows as a hunk.
+    (r'\b(\w+)_v4\b', r'\1_vX'),
 ]
 V6 = [
     (r'struct\s+in6_addr\s+saddr', 'ADDR src_ip'),
@@ -87,6 +104,7 @@ V6 = [
     (r'version != 6', 'version != VER'),
     (r'struct ipv6hdr', 'struct IPHDR'),
     (r'ip->nexthdr', 'ip->L4PROTO'),
+    (r'\b(\w+)_v6\b', r'\1_vX'),
 ]
 
 # Trie key fill blocks. A block collapses to FILL_TRIE(<x>addr); only when

@@ -29,7 +29,7 @@ This repository has three files meant to be used while you write and review chan
    python3 -I hack/v4v6-diff.py --all --no-lines ../npa-base > /tmp/parity-base.txt
    python3 -I hack/v4v6-diff.py --all --no-lines . > /tmp/parity-change.txt
 
-   # Any output here is a hunk your change added or removed in one family only
+   # Any output here is a hunk your change added, removed or altered; check whether it is family-specific
    diff /tmp/parity-base.txt /tmp/parity-change.txt
    ```
 
@@ -39,7 +39,7 @@ This repository has three files meant to be used while you write and review chan
 
 ## Before you open the PR
 
-Go through the sections of `docs/review-guide.md` that the routing table names for your files, and check the items that apply to your change. A targeted lookup works better than handing the whole guide to an agent: in our evaluation (see the PR that added this guide), an agent that read the guide during review caught no more of the maintainers' concerns than one that didn't. The guide did help it rate severity correctly.
+Go through the sections of `docs/review-guide.md` that the routing table names for your files, and check the items that apply to your change. A targeted lookup works better than handing the whole guide to an agent: in our evaluation (results in the description of [#730](https://github.com/aws/aws-network-policy-agent/pull/730)), an agent that read the guide during review caught no more of the maintainers' concerns than one that didn't. The guide did help it rate severity correctly.
 
 If you ask an agent for a self-review, keep the guide out of its prompt and give it the severity bar instead:
 
@@ -79,5 +79,13 @@ Which tools load `AGENTS.md` without extra setup, per their documentation (check
 ## Keeping the guide current
 
 - **Citations** are `path:line` at a named commit. When main moves far enough that lines drift, re-pin: check every citation at the new commit and update the commit named in section 1. Find a moved line by the quoted symbol.
-- **New entries** follow the existing shape: **Rule.**, **Why.**, **Cites.**, a severity tag, and a one-line bullet in the section 2 checklist. Add an entry when a review finds a repository-specific problem a strong general reviewer would likely miss. General review hygiene goes in the single list in section 2, not in new entries.
+- **Checking citations.** `hack/check-guide-cites.py` checks every citation against checkouts of the pinned commits and reports each one as ok, moved, missing or out of range. With the NPA, SDK v1.0.19 and SDK main trees checked out next to this repository, run from the repository root:
+
+  ```bash
+  # Check every path:line citation in the guide against the pinned trees; exits 1 on missing or out-of-range cites
+  python3 -I hack/check-guide-cites.py --npa ../npa-main-4bf96cf --sdk ../sdk-v1.0.19 --sdk-main ../sdk-main-62628d3 docs/review-guide.md
+  ```
+
+  A `moved` or `missing` result can be a false positive when the quoted symbol is a map or kfunc name rather than code on that line; read the line before changing the cite.
+- **New entries.** New SDK-contract entries follow the section 3 shape (**Rule.**, **Why.**, **Cites.**); new precedents follow section 5. Each has a severity tag and a one-line bullet in the section 2 checklist. Add an entry when a review finds a repository-specific problem a strong general reviewer would likely miss. General review hygiene goes in the single list in section 2, not in new entries.
 - **Measuring it.** The guide was evaluated by having an agent review held-out PRs (PRs it was not built from) with and without it, and comparing what each raised with what the maintainers raised. Re-run that check after large changes, preferably on recent PRs that touch the areas the guide covers.
