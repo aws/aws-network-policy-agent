@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -44,7 +45,6 @@ var (
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
-	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
@@ -469,11 +469,12 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	return protocol
 }
 
-func IsFileExistsError(error string) bool {
-	if error == ErrFileExists {
-		return true
-	}
-	return false
+// IsFileExistsError reports whether err is EEXIST, as returned by netlink when a
+// tc filter or qdisc already exists. netlink appends the kernel's extended ack
+// message to the errno when error reporting is on, so compare the errno, not the
+// text.
+func IsFileExistsError(err error) bool {
+	return errors.Is(err, unix.EEXIST)
 }
 
 func IsInvalidFilterListError(error string) bool {
