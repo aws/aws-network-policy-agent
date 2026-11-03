@@ -2152,11 +2152,11 @@ func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T
 				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 			)
 			if direction == "ingress" {
-				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(syscall.EEXIST)
 				mockTCClient.EXPECT().TCEgressDetach("mockedveth0").Return(errors.New("detach failed"))
 			} else {
 				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(syscall.EEXIST)
 				mockTCClient.EXPECT().TCIngressDetach("mockedveth0").Return(errors.New("detach failed"))
 			}
 			wantUnpinned := concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress"))
