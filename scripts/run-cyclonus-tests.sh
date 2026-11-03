@@ -118,7 +118,7 @@ fi
 run_ginkgo_suite policy.test 15m
 
 if [[ $RUN_EBPF_TESTS == "true" ]]; then
-    # eBPF conntrack security suite auto-skips on IPv6 (AF_PACKET is IPv4-only)
+    # Specs that need one IP family skip on the other.
     run_ginkgo_suite ebpf.test 15m
 fi
 
