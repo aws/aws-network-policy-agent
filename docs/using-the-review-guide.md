@@ -39,7 +39,7 @@ This repository has three files meant to be used while you write and review chan
 
 ## Before you open the PR
 
-Go through the sections of `docs/review-guide.md` that the routing table names for your files, and check the items that apply to your change. A targeted lookup works better than handing the whole guide to an agent: in our evaluation (results in the description of [#730](https://github.com/aws/aws-network-policy-agent/pull/730)), an agent that read the guide during review caught no more of the maintainers' concerns than one that didn't. The guide did help it rate severity correctly.
+Go through the sections of `docs/review-guide.md` that the routing table names for your files, and check the items that apply to your change. Look up the relevant sections rather than handing the whole guide to an agent: it is long, and the essentials are already in `AGENTS.md`.
 
 If you ask an agent for a self-review, keep the guide out of its prompt and give it the severity bar instead:
 
@@ -88,4 +88,3 @@ Which tools load `AGENTS.md` without extra setup, per their documentation (check
 
   A `moved` or `missing` result can be a false positive when the quoted symbol is a map or kfunc name rather than code on that line; read the line before changing the cite.
 - **New entries.** New SDK-contract entries follow the section 3 shape (**Rule.**, **Why.**, **Cites.**); new precedents follow section 5. Each has a severity tag and a one-line bullet in the section 2 checklist. Add an entry when a review finds a repository-specific problem a strong general reviewer would likely miss. General review hygiene goes in the single list in section 2, not in new entries.
-- **Measuring it.** The guide was evaluated by having an agent review held-out PRs (PRs it was not built from) with and without it, and comparing what each raised with what the maintainers raised. Re-run that check after large changes, preferably on recent PRs that touch the areas the guide covers.
