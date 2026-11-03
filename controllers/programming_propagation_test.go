@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // The #686 fix: a failed eBPF map write must reach controller-runtime so the
@@ -28,7 +29,8 @@ func TestReconcilePolicyEndpoint_MapWriteFailurePropagates(t *testing.T) {
 
 	require.Error(t, err, "a failed map write must not be reported as a successful reconcile")
 	assert.ErrorIs(t, err, unix.ENOMEM, "the errno must survive to the reconciler")
-	assert.Contains(t, err.Error(), "podIdentifier", "the failing identifier must be named")
+	assert.Contains(t, err.Error(), identifierOf("nginx-aaa"),
+		"the failing identifier must be named by value, not just the word podIdentifier")
 }
 
 // A skip that no retry can resolve must not be reported as a failure, or the
@@ -48,8 +50,11 @@ func TestReconcilePolicyEndpoint_ProbeAttachSkipIsNotAFailure(t *testing.T) {
 // bad write cannot leave the rest of the node's policy unapplied.
 func TestReconcilePolicyEndpoint_OneFailingIdentifierDoesNotBlockTheRest(t *testing.T) {
 	fx := newPEFixture(t)
+	failing := identifierOf("web-aaa")
+	healthy := identifierOf("api-aaa")
+	require.NotEqual(t, failing, healthy, "the two pods must map to distinct identifiers")
 	fx.bpf.UpdateEbpfMapsErrFor = map[string]error{
-		identifierOf("web-aaa"): errors.New("unable to update map: cannot allocate memory"),
+		failing: errors.New("unable to update map: cannot allocate memory"),
 	}
 	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
 		pods: []podRef{
@@ -61,8 +66,86 @@ func TestReconcilePolicyEndpoint_OneFailingIdentifierDoesNotBlockTheRest(t *test
 	err := fx.reconcile("np-1-aaaaa")
 
 	require.Error(t, err)
-	assert.Contains(t, fx.bpf.IngressByIdentifier, identifierOf("api-aaa"),
+	assert.ErrorContains(t, err, failing, "the failing identifier must be named")
+	// Asserted both ways so map iteration order cannot decide the result: the healthy
+	// identifier is programmed and the failing one is not, whichever ran first.
+	assert.Contains(t, fx.bpf.IngressByIdentifier, healthy,
 		"the healthy identifier must still be programmed")
+	assert.NotContains(t, fx.bpf.IngressByIdentifier, failing,
+		"the failing identifier must not be recorded as programmed")
+}
+
+// A skipped pod must not hide a real failure. configureeBPFProbes joins the per-pod attach
+// errors with the map-write error, and errors.Is matches when any arm of a join carries
+// ErrProbeAttachSkipped, so before skips were tracked separately one skipped pod turned an
+// ENOMEM map write into a Warn and a nil return, and nothing retried it. That is the #686
+// bug reached through the skip path.
+func TestReconcilePolicyEndpoint_SkipDoesNotMaskMapWriteFailure(t *testing.T) {
+	fx := newPEFixture(t)
+	skipped := localPod("web-aaa", "10.1.1.1")
+	fx.bpf.AttacheBPFProbesErrFor = map[types.NamespacedName]error{
+		{Name: skipped.name, Namespace: fixtureNamespace}: fmt.Errorf(
+			"%w: multiNIC enabled and interface count is unknown", ebpf.ErrProbeAttachSkipped),
+	}
+	fx.bpf.UpdateEbpfMapsErr = fmt.Errorf("ingress map write: %w",
+		fmt.Errorf("unable to update map: %w", unix.ENOMEM))
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+		pods:    []podRef{skipped, localPod("api-aaa", "10.1.1.2")},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+
+	err := fx.reconcile("np-1-aaaaa")
+
+	require.Error(t, err, "a skipped pod must not absorb the map-write failure")
+	assert.ErrorIs(t, err, unix.ENOMEM, "the errno must still reach the reconciler")
+	assert.NotErrorIs(t, err, ebpf.ErrProbeAttachSkipped,
+		"the skip must not travel in the returned error, or errors.Is would mask the failure")
+}
+
+// The same masking on the cluster path, where a swallowed failure can leave a required
+// Deny rule unapplied.
+func TestReconcileClusterPolicyEndpoint_SkipDoesNotMaskMapWriteFailure(t *testing.T) {
+	fx := newCPEFixture(t)
+	skipped := localPod("web-aaa", "10.1.1.1")
+	fx.bpf.AttacheBPFProbesErrFor = map[types.NamespacedName]error{
+		{Name: skipped.name, Namespace: fixtureNamespace}: fmt.Errorf(
+			"%w: multiNIC enabled and interface count is unknown", ebpf.ErrProbeAttachSkipped),
+	}
+	fx.bpf.UpdateClusterPolicyEbpfMapsErr = fmt.Errorf("ingress map write: %w",
+		fmt.Errorf("unable to update map: %w", unix.ENOMEM))
+	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+		pods:    []podRef{skipped, localPod("api-aaa", "10.1.1.2")},
+		ingress: []ruleRef{deny("192.168.90.1/32")}})
+
+	err := fx.reconcile("cnp-1-aaaaa")
+
+	require.Error(t, err, "a skipped pod must not absorb the map-write failure")
+	assert.ErrorIs(t, err, unix.ENOMEM, "the errno must still reach the reconciler")
+	assert.NotErrorIs(t, err, ebpf.ErrProbeAttachSkipped,
+		"the skip must not travel in the returned error, or errors.Is would mask the failure")
+}
+
+// A PolicyEndpoint with no local pods implements nothing on this node, so the pass consumes
+// the trigger without a sample. Leaving it unconsumed lets a later resync, or a sibling slice
+// that later gains a local pod, report the age of the original annotation as programming
+// latency. This is the case the plain "programmed > 0" gate could not tell apart from a
+// skipped or failed pass.
+func TestReconcilePolicyEndpoint_NoLocalWorkConsumesTriggerWithoutSample(t *testing.T) {
+	fx := newPEFixture(t)
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+		pods:    []podRef{remotePod("nginx-aaa", "10.1.1.1")},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+	pe := fx.store["np-1-aaaaa"]
+	pe.Annotations = map[string]string{LastChangeTriggerTimeAnnotation: time.Now().Format(time.RFC3339Nano)}
+	fx.store["np-1-aaaaa"] = pe
+
+	before := histSampleCount(t, policyProgrammingLatency)
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+	assert.Equal(t, uint64(0), histSampleCount(t, policyProgrammingLatency)-before,
+		"nothing on this node implements the change, so there is no latency to report")
+
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+	assert.Equal(t, uint64(0), histSampleCount(t, policyProgrammingLatency)-before,
+		"the trigger was consumed, so a resync of the same annotation records nothing")
 }
 
 // A pass where every attach was skipped programmed nothing, so it must record no
@@ -71,6 +154,10 @@ func TestReconcilePolicyEndpoint_AllSkippedRecordsNoLatency(t *testing.T) {
 	fx := newPEFixture(t)
 	fx.bpf.AttacheBPFProbesErr = fmt.Errorf("%w: multiNIC enabled and interface count is unknown",
 		ebpf.ErrProbeAttachSkipped)
+	// Every attach was skipped, so no probes exist for the identifier. Without this the mock
+	// reports a context the skipped pod never created, the map write succeeds, and the pass
+	// looks like real programming.
+	fx.bpf.PodIdentifiersWithoutBPFContext = map[string]bool{identifierOf("nginx-aaa"): true}
 	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
 		pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
 		ingress: []ruleRef{allow("192.168.90.1/32")}})
@@ -93,6 +180,8 @@ func TestReconcileClusterPolicyEndpoint_AllSkippedRecordsNoLatency(t *testing.T)
 	fx := newCPEFixture(t)
 	fx.bpf.AttacheBPFProbesErr = fmt.Errorf("%w: multiNIC enabled and interface count is unknown",
 		ebpf.ErrProbeAttachSkipped)
+	// See the PolicyEndpoint case: a fully skipped identifier has no probes on the node.
+	fx.bpf.PodIdentifiersWithoutBPFContext = map[string]bool{identifierOf("nginx-aaa"): true}
 	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 		pods:    []podRef{localPod("nginx-aaa", "10.1.1.1")},
 		ingress: []ruleRef{deny("192.168.90.1/32")}})

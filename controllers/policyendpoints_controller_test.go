@@ -1943,7 +1943,7 @@ func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -1999,7 +1999,7 @@ func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -2060,7 +2060,7 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -2097,7 +2097,7 @@ func TestCleanupPod_PodAlreadyTornDownSkipsWrites(t *testing.T) {
 		PodIP:          "10.3.3.3",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	// No eBPF map writes should have been attempted.
@@ -2127,7 +2127,7 @@ func TestCleanupPod_DeselectedLivePodRestoresBaseline(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	// Baseline restore writes the maps (updateeBPFMaps -> UpdateEbpfMaps + UpdatePodStateEbpfMaps).
@@ -2155,7 +2155,7 @@ func TestCleanupPod_DeselectedLivePodRestoresStrictModeBaseline(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
@@ -2185,7 +2185,7 @@ func TestCleanupPod_BaselineRestoreFailureRequeues(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.Error(t, err, "a failed baseline restore must requeue so the restore is retried")
 
 	// The restore was genuinely attempted - this is not the already-torn-down skip path.

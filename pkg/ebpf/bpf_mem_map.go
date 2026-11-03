@@ -17,8 +17,10 @@ import (
 type InMemoryBpfMap struct {
 	// Underlying BPF map
 	bpfMap *maps.BpfMap
-	// Optional test hooks for the kernel mutations. Nil means "use bpfMap", so a
-	// zero-value InMemoryBpfMap works; see updateEntryOrSDK/deleteEntryOrSDK.
+	// Optional test hooks for the kernel mutations. Nil means "use bpfMap"; see
+	// updateEntryOrSDK/deleteEntryOrSDK. Leaving them nil is safe, but a literal still
+	// has to set bpfMap and contents, because a zero value panics on the first write.
+	// NewInMemoryBpfMap sets both.
 	updateEntry func(key, value []byte) error
 	deleteEntry func(key []byte) error
 	// In-memory representation of the map contents
@@ -104,8 +106,14 @@ func (m *InMemoryBpfMap) loadFromKernel() error {
 		value := make([]byte, m.bpfMap.MapMetaData.ValueSize)
 		valuePtr := uintptr(unsafe.Pointer(&value[0]))
 
-		if err := m.bpfMap.GetMapEntry(keyPtr, valuePtr); err != nil {
-			log().Errorf("Failed to get value for key %s: %v", key, err)
+		err := m.bpfMap.GetMapEntry(keyPtr, valuePtr)
+		// The uintptrs above are not pointers as far as the GC is concerned, so both
+		// backing arrays have to be held until the syscall has returned, matching
+		// updateEntryOrSDK/deleteEntryOrSDK.
+		runtime.KeepAlive(keyByte)
+		runtime.KeepAlive(value)
+		if err != nil {
+			log().Errorf("Failed to get value for key %x: %v", keyByte, err)
 			return err
 		}
 
@@ -165,7 +173,7 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		keyByte := []byte(k)
 
 		if err := m.deleteEntryOrSDK(keyByte); err != nil {
-			log().Errorf("Failed to delete from kernel map for key %s: %v", k, err)
+			log().Errorf("Failed to delete from kernel map for key %x: %v", keyByte, err)
 			// Continue with other deletions
 		} else {
 			// Remove from in-memory if kernel delete operation is successful
@@ -179,8 +187,10 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	if firstErr != nil {
 		// Log the full key list once here, and return a short error: this error is
 		// logged again at every layer on the way up to the reconciler.
-		log().Errorf("Failed to update kernel map %d during bulk refresh for keys %v: %v",
-			m.bpfMap.MapID, failedKeys, firstErr)
+		// Capped like the returned error: a full IPv6 map would otherwise put every
+		// failed key on one line, on every retry.
+		log().Errorf("Failed to update kernel map %d during bulk refresh for %d of %d keys (%s): %v",
+			m.bpfMap.MapID, len(failedKeys), len(toAdd), summarizeKeys(failedKeys), firstErr)
 		return fmt.Errorf("%d of %d map updates failed (%s): %w",
 			len(failedKeys), len(toAdd), summarizeKeys(failedKeys), firstErr)
 	}
@@ -190,11 +200,11 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 // summarizeKeys renders at most a few keys, so a systemic failure cannot put
 // one line per entry into the returned error.
 func summarizeKeys(keys []string) string {
-	const max = 3
-	if len(keys) <= max {
+	const maxShownKeys = 3
+	if len(keys) <= maxShownKeys {
 		return strings.Join(keys, ", ")
 	}
-	return fmt.Sprintf("%s and %d more", strings.Join(keys[:max], ", "), len(keys)-max)
+	return fmt.Sprintf("%s and %d more", strings.Join(keys[:maxShownKeys], ", "), len(keys)-maxShownKeys)
 }
 
 // GetUnderlyingMap returns the underlying BpfMap
