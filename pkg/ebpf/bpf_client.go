@@ -954,7 +954,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 
 	log().Infof("Attempting to do an Ingress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale ingress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCEgressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Ingress TC detach failed on %s: %v", hostVethName, detachErr)
@@ -978,7 +978,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 	log().Infof("Attempting to do an Egress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale egress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCIngressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Egress TC detach failed on %s: %v", hostVethName, detachErr)
