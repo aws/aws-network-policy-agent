@@ -2,13 +2,26 @@
 """Normalized v4/v6 diff for the eBPF C sources in pkg/ebpf/c.
 
 Usage:
-  v4v6-diff.py <v4 file> <v6 file>    diff one pair of files
+  v4v6-diff.py [-D<macro>] <v4 file> <v6 file>
+                                      diff one pair of files, as built with
+                                      the given variant macro (see below)
   v4v6-diff.py --funcs <file>         diff each foo_v4 / foo_v6 function pair
                                       defined in one file (shared headers)
-  v4v6-diff.py --all [<repo root>]    the three file pairs, then --funcs on
-                                      every pkg/ebpf/c/*.h except vmlinux.h
+  v4v6-diff.py --all [<repo root>]    every object pair the Makefile builds
+                                      (regular ingress, ct-deny ingress,
+                                      egress, events), then --funcs on every
+                                      pkg/ebpf/c/*.h except vmlinux.h
                                       (default root: .)
   add --no-lines to drop line numbers, so two runs can be diffed
+
+Variant macros: the ct-deny ingress objects (tc.v4ingress.ctdeny.bpf.o,
+tc.v6ingress.ctdeny.bpf.o) are built from the regular ingress sources with
+-DNPA_CT_SHORTEN_ON_DENY. For each file pair the script resolves
+#ifdef / #ifndef / #else / #endif on VARIANT_MACROS as that object's build
+does, so each pair is diffed as compiled. Lines a build drops are blanked, so
+line numbers still point at the source. Other preprocessor lines are kept and
+compared as text. Without -D, pair mode diffs the regular objects. --funcs
+does not resolve macros.
 
 The script strips comments and whitespace and rewrites address-family tokens
 to a common form (address types and field names, IP header type, L4 protocol
@@ -91,11 +104,21 @@ V6_BLOCKS = [[
     r'\}',
 ]]
 
+# Macros that select a build variant. Defined only on the command lines in
+# PAIRS; every other macro is left to the compiler.
+VARIANT_MACROS = {'NPA_CT_SHORTEN_ON_DENY'}
+
+# (v4 source, v6 source, macros defined for this object pair, label), one per
+# object pair the Makefile build-bpf target builds.
 PAIRS = [
-    ('tc.v4ingress.bpf.c', 'tc.v6ingress.bpf.c'),
-    ('tc.v4egress.bpf.c', 'tc.v6egress.bpf.c'),
-    ('v4events.bpf.c', 'v6events.bpf.c'),
+    ('tc.v4ingress.bpf.c', 'tc.v6ingress.bpf.c', set(), ''),
+    ('tc.v4ingress.bpf.c', 'tc.v6ingress.bpf.c', {'NPA_CT_SHORTEN_ON_DENY'},
+     ' -DNPA_CT_SHORTEN_ON_DENY (tc.v4ingress.ctdeny.bpf.o vs tc.v6ingress.ctdeny.bpf.o)'),
+    ('tc.v4egress.bpf.c', 'tc.v6egress.bpf.c', set(), ''),
+    ('v4events.bpf.c', 'v6events.bpf.c', set(), ''),
 ]
+
+COND = re.compile(r'^\s*#\s*(ifdef|ifndef|if|else|elif|endif)\b\s*(\w*)')
 
 # Start of a function definition whose name ends in _v4 or _v6.
 FUNC_START = re.compile(r'^[A-Za-z_][\w\s\*]*?\b(\w+)_v([46])\s*\(')
@@ -105,6 +128,35 @@ def strip_comments(text):
     # Keep newlines inside block comments so line numbers stay correct.
     text = re.sub(r'/\*.*?\*/', lambda m: '\n' * m.group(0).count('\n'), text, flags=re.S)
     return [re.sub(r'//.*', '', line) for line in text.split('\n')]
+
+
+def resolve_variants(lines, defined):
+    """Blank the lines a build with `defined` drops, and the directives on
+    VARIANT_MACROS. Conditionals on other macros are kept as text."""
+    out, stack = [], []  # stack entries: (tracked, keeping this branch)
+    for line in lines:
+        m = COND.match(line)
+        keep = all(k for _, k in stack)
+        if m:
+            kind, name = m.groups()
+            if kind in ('ifdef', 'ifndef', 'if'):
+                tracked = kind != 'if' and name in VARIANT_MACROS
+                taken = (name in defined) == (kind == 'ifdef') if tracked else True
+                stack.append((tracked, taken))
+                out.append('' if tracked or not keep else line)
+                continue
+            tracked = bool(stack) and stack[-1][0]
+            if kind == 'endif':
+                if stack:
+                    stack.pop()
+            elif tracked:
+                if kind == 'elif':
+                    sys.exit('#elif inside a variant conditional is not handled')
+                stack[-1] = (True, not stack[-1][1])
+            out.append('' if tracked or not keep else line)
+            continue
+        out.append(line if keep else '')
+    return out
 
 
 def collapse(items, blocks):
@@ -134,9 +186,9 @@ def norm_lines(numbered, rules, blocks):
     return collapse(out, blocks)
 
 
-def norm(path, rules, blocks):
+def norm(path, rules, blocks, defined=frozenset()):
     with open(path) as f:
-        lines = strip_comments(f.read())
+        lines = resolve_variants(strip_comments(f.read()), defined)
     return norm_lines(enumerate(lines, 1), rules, blocks)
 
 
@@ -163,8 +215,9 @@ def diff_items(v4, v6, lines):
             print('  + v6:%-4d %s' % (n, t) if lines else '  + %s' % t)
 
 
-def diff_pair(v4_path, v6_path, lines=True):
-    diff_items(norm(v4_path, V4, V4_BLOCKS), norm(v6_path, V6, V6_BLOCKS), lines)
+def diff_pair(v4_path, v6_path, lines=True, defined=frozenset()):
+    diff_items(norm(v4_path, V4, V4_BLOCKS, defined),
+               norm(v6_path, V6, V6_BLOCKS, defined), lines)
 
 
 def find_funcs(path):
@@ -217,13 +270,19 @@ def diff_funcs(path, lines=True):
 
 def main(argv):
     lines = '--no-lines' not in argv
-    args = [a for a in argv if a != '--no-lines']
+    defined = {a[2:] for a in argv if a.startswith('-D')}
+    unknown = defined - VARIANT_MACROS
+    if unknown:
+        print('not a variant macro: %s' % ', '.join(sorted(unknown)), file=sys.stderr)
+        return 2
+    args = [a for a in argv if a != '--no-lines' and not a.startswith('-D')]
     if args and args[0] == '--all':
         root = args[1] if len(args) > 1 else '.'
         cdir = os.path.join(root, 'pkg', 'ebpf', 'c')
-        for v4_name, v6_name in PAIRS:
-            print('#### %s vs %s' % (v4_name, v6_name))
-            diff_pair(os.path.join(cdir, v4_name), os.path.join(cdir, v6_name), lines)
+        for v4_name, v6_name, pair_defined, label in PAIRS:
+            print('#### %s vs %s%s' % (v4_name, v6_name, label))
+            diff_pair(os.path.join(cdir, v4_name), os.path.join(cdir, v6_name), lines,
+                      pair_defined)
         for header in sorted(glob.glob(os.path.join(cdir, '*.h'))):
             if os.path.basename(header) != 'vmlinux.h':
                 diff_funcs(header, lines)
@@ -234,7 +293,7 @@ def main(argv):
     if len(args) != 2:
         print(__doc__, file=sys.stderr)
         return 2
-    diff_pair(args[0], args[1], lines)
+    diff_pair(args[0], args[1], lines, defined)
     return 0
 
 
