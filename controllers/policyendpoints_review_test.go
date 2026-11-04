@@ -306,7 +306,8 @@ func TestAttachProbesForIdentifier(t *testing.T) {
 
 	t.Run("attaches every pod of the identifier and skips the rest", func(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
-		require.NoError(t, attachProbesForIdentifier(bpf, podIdentifier, pods))
+		_, attachErr := attachProbesForIdentifier(bpf, podIdentifier, pods)
+		require.NoError(t, attachErr)
 
 		assert.True(t, bpf.AttachedPods[nsName("web-aaa")])
 		assert.True(t, bpf.AttachedPods[nsName("web-bbb")])
@@ -320,7 +321,7 @@ func TestAttachProbesForIdentifier(t *testing.T) {
 			AttacheBPFProbesErrFor: map[types.NamespacedName]error{nsName("web-aaa"): attachFailed},
 		}
 
-		err := attachProbesForIdentifier(bpf, podIdentifier, pods)
+		_, err := attachProbesForIdentifier(bpf, podIdentifier, pods)
 		require.ErrorIs(t, err, attachFailed)
 		assert.True(t, bpf.AttachedPods[nsName("web-bbb")],
 			"the co-located replica shares the maps and must still be attached")
