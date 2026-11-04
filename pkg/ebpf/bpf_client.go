@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -160,6 +161,8 @@ type BpfClient interface {
 	ReAttachEbpfProbes() error
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
+	PodStateGeneration(podIdentifier string, key int) uint64
+	SetPodStateBaseline(podIdentifier string, key int, state int, since uint64) error
 	HasBPFContext(podIdentifier string) bool
 }
 
@@ -376,6 +379,8 @@ var _ BpfClient = (*bpfClient)(nil)
 type bpfClient struct {
 	// Stores eBPF Ingress and Egress context per policyEndpoint resource
 	policyEndpointeBPFContext *sync.Map
+	// Sequence number of the latest POLICIES_APPLIED write per podStateKey
+	podStatePAGenerations sync.Map
 	// Stores the Ingress eBPF Prog FD per pod
 	ingressPodToProgMap *sync.Map
 	// Stores the Egress eBPF Prog FD per pod
@@ -1048,6 +1053,7 @@ func (l *bpfClient) deleteBPFProbes(podIdentifier string) error {
 	l.clusterPolicyIngressInMemoryMap.Delete(podIdentifier)
 	l.clusterPolicyEgressInMemoryMap.Delete(podIdentifier)
 	l.policyEndpointeBPFContext.Delete(podIdentifier)
+	l.forgetPodStateGenerations(podIdentifier)
 	return nil
 }
 
@@ -1237,6 +1243,7 @@ func (l *bpfClient) unloadBPFProgram(podIdentifier string, direction string) {
 	}
 	if peBPFContext.ingressPgmInfo.Program.ProgFD == 0 && peBPFContext.egressPgmInfo.Program.ProgFD == 0 {
 		l.policyEndpointeBPFContext.Delete(podIdentifier)
+		l.forgetPodStateGenerations(podIdentifier)
 		return
 	}
 	l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
@@ -1469,6 +1476,11 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
 	l.podIdentifierLocks.Lock(podIdentifier)
 	defer l.podIdentifierLocks.Unlock(podIdentifier)
+	return l.createPodStateEntryLocked(podIdentifier, key, state)
+}
+
+// Caller must hold the podIdentifier lock.
+func (l *bpfClient) createPodStateEntryLocked(podIdentifier string, key int, state int) error {
 	keyval := uint32(key)
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if !ok {
@@ -1513,7 +1525,52 @@ func (l *bpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key
 func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	l.podIdentifierLocks.Lock(podIdentifier)
 	defer l.podIdentifierLocks.Unlock(podIdentifier)
+	return l.updatePodStateLocked(podIdentifier, key, state, updateIngress, updateEgress)
+}
 
+type podStateKey struct {
+	podIdentifier string
+	key           int
+}
+
+// Never reset, so a generation can't repeat after an identifier's maps are recreated.
+var podStatePASeq atomic.Uint64
+
+// PodStateGeneration returns the sequence number of the latest POLICIES_APPLIED write
+// for key, or 0 if there is none.
+func (l *bpfClient) PodStateGeneration(podIdentifier string, key int) uint64 {
+	if v, ok := l.podStatePAGenerations.Load(podStateKey{podIdentifier, key}); ok {
+		return v.(uint64)
+	}
+	return 0
+}
+
+func (l *bpfClient) forgetPodStateGenerations(podIdentifier string) {
+	l.podStatePAGenerations.Delete(podStateKey{podIdentifier, POD_STATE_MAP_KEY})
+	l.podStatePAGenerations.Delete(podStateKey{podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY})
+}
+
+// SetPodStateBaseline writes DEFAULT_ALLOW or DEFAULT_DENY for a new pod. It overwrites the
+// entry unless POLICIES_APPLIED was written after since was read; then a reconcile has already
+// programmed a policy for the pod, and the entry is only created if missing.
+func (l *bpfClient) SetPodStateBaseline(podIdentifier string, key int, state int, since uint64) error {
+	l.podIdentifierLocks.Lock(podIdentifier)
+	defer l.podIdentifierLocks.Unlock(podIdentifier)
+	if l.PodStateGeneration(podIdentifier, key) != since {
+		log().Infof("POLICIES_APPLIED was written for podIdentifier %s while adding a pod; seeding pod_state key %d only if unset", podIdentifier, key)
+		return seedPodStateLocked(l, podIdentifier, key, state)
+	}
+	return overwritePodStateLocked(l, podIdentifier, key, state, true, true)
+}
+
+// Overridden in tests.
+var (
+	seedPodStateLocked      = (*bpfClient).createPodStateEntryLocked
+	overwritePodStateLocked = (*bpfClient).updatePodStateLocked
+)
+
+// Caller must hold the podIdentifier lock.
+func (l *bpfClient) updatePodStateLocked(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
 	var ingressProgFD, egressProgFD int
 	var mapToUpdate goebpfmaps.BpfMap
 	var ingressErr, egressErr error
@@ -1527,6 +1584,10 @@ func (l *bpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state 
 	if !ok {
 		sdkAPIErr.WithLabelValues("updateEbpfMap-podstate-bad-context-type").Inc()
 		return fmt.Errorf("unexpected bpf context type %T for pod %s", value, podIdentifier)
+	}
+	if state == POLICIES_APPLIED {
+		// Recorded after the context check so no generation outlives the maps.
+		l.podStatePAGenerations.Store(podStateKey{podIdentifier, key}, podStatePASeq.Add(1))
 	}
 	ingressProgInfo := peBPFContext.ingressPgmInfo
 	egressProgInfo := peBPFContext.egressPgmInfo
