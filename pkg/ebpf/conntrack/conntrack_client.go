@@ -9,16 +9,13 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
 var (
 	CONNTRACK_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
 )
-
-// listConntrackFlows reads the kernel conntrack table. It is a variable so unit
-// tests can feed synthetic flows.
-var listConntrackFlows = netlink.ConntrackTableList
 
 // entryActiveFromRead reports whether an entry must be kept. An entry counts as
 // active if the datapath stamped it at or after gcStart, or if the re-read
@@ -58,6 +55,7 @@ var _ ConntrackClient = (*conntrackClient)(nil)
 
 type conntrackClient struct {
 	conntrackMap          goebpfmaps.BpfMap
+	kernelTable           conntrackTable
 	enableIPv6            bool
 	hydratelocalConntrack bool
 	localConntrackV4Cache map[utils.ConntrackKey]bool
@@ -67,6 +65,7 @@ type conntrackClient struct {
 func NewConntrackClient(conntrackMap goebpfmaps.BpfMap, enableIPv6 bool) *conntrackClient {
 	return &conntrackClient{
 		conntrackMap:          conntrackMap,
+		kernelTable:           netlinkConntrackTable{},
 		enableIPv6:            enableIPv6,
 		hydratelocalConntrack: true,
 	}
@@ -277,203 +276,387 @@ func (c *conntrackClient) deleteV6MapEntry(key utils.ConntrackKeyV6) {
 
 // removeStaleV4Entries deletes the entries in localConntrackV4Cache that no
 // kernel conntrack flow matches and that isActive does not report as touched
-// since gcStart, and returns how many it deleted. If the kernel table cannot be
-// read it deletes nothing and returns the error.
+// since gcStart, and returns how many it deleted. An entry is live if a flow
+// produces its key under the rule on v4FlowKeys. TCP and UDP entries are looked
+// up one at a time (entryHasFlow), and port-less entries such as ICMP are
+// matched against one dump per protocol (needsProtocolDump), so memory does
+// not grow with the kernel table. If a lookup fails other than with "no such
+// flow", or a dump fails or is interrupted, it deletes nothing and returns the
+// error.
 func (c *conntrackClient) removeStaleV4Entries(gcStart uint64, isActive func(key utils.ConntrackKey, gcStart uint64) bool,
 	deleteEntry func(key utils.ConntrackKey)) (int, error) {
-	conntrackFlows, err := listConntrackFlows(netlink.ConntrackTable, unix.AF_INET)
+	ctLookup, err := c.kernelTable.openLookup(unix.AF_INET)
 	if err != nil {
 		return 0, err
 	}
-	kernelConntrackV4Cache := make(map[utils.ConntrackKey]bool)
-	// Kernel conntrack (netlink) identifies flows by 5-tuple only. It has no
-	// concept of per-veth ifindex. For GC, a BPF entry is considered active if
-	// its 5-tuple + owner matches a live kernel flow, regardless of interface.
-	// Ifindex is only relevant for policy enforcement, not for stale entry cleanup.
-	for _, conntrackFlow := range conntrackFlows {
-		//Check fwd flow with SIP as owner
-		fwdFlowWithSIP := utils.ConntrackKey{}
-		fwdFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
-		fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
-		fwdFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
-		fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
-		fwdFlowWithSIP.Owner_ip = fwdFlowWithSIP.Source_ip
-		fwdFlowWithSIP.Ifindex = 0 // not available from netlink
+	defer ctLookup.close()
 
-		kernelConntrackV4Cache[fwdFlowWithSIP] = true
-
-		//Check fwd flow with DIP as owner
-		fwdFlowWithDIP := utils.ConntrackKey{}
-		fwdFlowWithDIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
-		fwdFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
-		fwdFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
-		fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
-		fwdFlowWithDIP.Owner_ip = fwdFlowWithDIP.Dest_ip
-		fwdFlowWithDIP.Ifindex = 0 // not available from netlink
-
-		kernelConntrackV4Cache[fwdFlowWithDIP] = true
-
-		//Dest can be VIP and pods can be on same node
-		destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
-		revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
-
-		if !destIP.Equal(revDestIP) {
-			//Check fwd flow with SIP as owner
-			revFlowWithSIP := utils.ConntrackKey{}
-			revFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
-			revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
-			revFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Reverse.SrcIP)
-			revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
-			revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
-			revFlowWithSIP.Owner_ip = revFlowWithSIP.Source_ip
-			revFlowWithSIP.Ifindex = 0 // not available from netlink
-
-			kernelConntrackV4Cache[revFlowWithSIP] = true
-
-			//Check fwd flow with DIP as owner
-			revFlowWithDIP := utils.ConntrackKey{}
-			revFlowWithDIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
-			revFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
-			revFlowWithDIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Reverse.SrcIP)
-			revFlowWithDIP.Dest_port = conntrackFlow.Reverse.SrcPort
-			revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
-			revFlowWithDIP.Owner_ip = revFlowWithDIP.Dest_ip
-			revFlowWithDIP.Ifindex = 0 // not available from netlink
-
-			kernelConntrackV4Cache[revFlowWithDIP] = true
+	var staleEntries []utils.ConntrackKey
+	// Port-less entries are checked against a dump of their protocol's flows.
+	// portlessKeyLive holds their keys per protocol, set to true once a dumped
+	// flow produces them.
+	var portlessEntries []utils.ConntrackKey
+	portlessKeyLive := make(map[uint8]map[utils.ConntrackKey]bool)
+	var conntrackFlow netlink.ConntrackFlow
+	lookups := 0
+	for localConntrackEntry := range c.localConntrackV4Cache {
+		key := v4LookupKey(localConntrackEntry)
+		if needsProtocolDump(key.Protocol, key.Source_port, key.Dest_port) {
+			if portlessKeyLive[key.Protocol] == nil {
+				portlessKeyLive[key.Protocol] = make(map[utils.ConntrackKey]bool)
+			}
+			portlessKeyLive[key.Protocol][key] = false
+			portlessEntries = append(portlessEntries, localConntrackEntry)
+			continue
+		}
+		live, n, err := v4EntryHasFlow(ctLookup, key, &conntrackFlow)
+		lookups += n
+		if err != nil {
+			return 0, err
+		}
+		if !live {
+			staleEntries = append(staleEntries, localConntrackEntry)
 		}
 	}
-	// Check if the local cache and kernel cache is in sync
-	deletedEntries := 0
-	for localConntrackEntry, _ := range c.localConntrackV4Cache {
-		newKey := utils.ConntrackKey{}
-		newKey.Source_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Source_ip))
-		newKey.Source_port = localConntrackEntry.Source_port
-		newKey.Dest_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Dest_ip))
-		newKey.Dest_port = localConntrackEntry.Dest_port
-		newKey.Protocol = localConntrackEntry.Protocol
-		newKey.Owner_ip = utils.ConvIPv4ToInt(utils.ConvIntToIPv4(localConntrackEntry.Owner_ip))
-		newKey.Ifindex = 0 // strip for 5-tuple comparison
-		_, ok := kernelConntrackV4Cache[newKey]
-		if !ok {
-			// Absent from the kernel snapshot, so a delete candidate. The
-			// snapshot is a point-in-time view, so re-read the live entry to
-			// confirm the flow has not been picked up again since.
-			expiredFlow := localConntrackEntry
-			if isActive(expiredFlow, gcStart) {
-				log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
-					utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
-					utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
-					expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-				continue
-			}
-			log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-			deleteEntry(expiredFlow)
-			deletedEntries++
+	// One dump per port-less protocol among the entries, matched with the same
+	// rule the full table dump used. No dump is sent if there are none.
+	for protocol, keys := range portlessKeyLive {
+		err := c.kernelTable.dumpFlows(unix.AF_INET, protocol, func(flow *netlink.ConntrackFlow) {
+			v4FlowKeys(flow, func(key utils.ConntrackKey) {
+				if _, ok := keys[key]; ok {
+					keys[key] = true
+				}
+			})
+		})
+		if err != nil {
+			return 0, err
 		}
+	}
+	for _, localConntrackEntry := range portlessEntries {
+		key := v4LookupKey(localConntrackEntry)
+		if !portlessKeyLive[key.Protocol][key] {
+			staleEntries = append(staleEntries, localConntrackEntry)
+		}
+	}
+	log().Debugf("Conntrack GC: %v kernel conntrack lookups and %v protocol dumps for %v tracked entries",
+		lookups, len(portlessKeyLive), len(c.localConntrackV4Cache))
+
+	deletedEntries := 0
+	for _, expiredFlow := range staleEntries {
+		// No kernel flow matched, so a delete candidate. The flow may have been
+		// picked up again since it was checked, so re-read the live entry first.
+		if isActive(expiredFlow, gcStart) {
+			log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+				utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
+				utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
+				expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+			continue
+		}
+		log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvIntToIPv4(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvIntToIPv4(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvIntToIPv4(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+		deleteEntry(expiredFlow)
+		deletedEntries++
 	}
 	return deletedEntries, nil
+}
+
+// v4LookupKey converts a BPF map key into the form v4FlowKeys produces: IPs in
+// the byte order utils.ConvIPv4ToInt produces, and Ifindex stripped for 5-tuple
+// comparison.
+func v4LookupKey(entry utils.ConntrackKey) utils.ConntrackKey {
+	return utils.ConntrackKey{
+		Source_ip:   utils.ConvIPv4ToInt(utils.ConvIntToIPv4(entry.Source_ip)),
+		Source_port: entry.Source_port,
+		Dest_ip:     utils.ConvIPv4ToInt(utils.ConvIntToIPv4(entry.Dest_ip)),
+		Dest_port:   entry.Dest_port,
+		Protocol:    entry.Protocol,
+		Owner_ip:    utils.ConvIPv4ToInt(utils.ConvIntToIPv4(entry.Owner_ip)),
+		// Ifindex left zero: stripped for 5-tuple comparison
+	}
+}
+
+// v4EntryHasFlow runs the GETs for key, a v4LookupKey of an entry that is not
+// matched by a dump, and reports whether a kernel flow matches it and how many
+// lookups it sent. An entry of a protocol other than TCP and UDP gets here only
+// with a non-zero port. Flows of those protocols have zero ports (see
+// v4FlowKeys), so it matches nothing and is stale without a lookup. flow is
+// scratch space for the lookups.
+func v4EntryHasFlow(ctLookup flowLookup, key utils.ConntrackKey, flow *netlink.ConntrackFlow) (live bool, lookups int, err error) {
+	if !isTCPOrUDP(key.Protocol) {
+		return false, lookups, nil
+	}
+	srcIP := utils.ConvIntToIPv4NetworkOrder(key.Source_ip)
+	dstIP := utils.ConvIntToIPv4NetworkOrder(key.Dest_ip)
+	return entryHasFlow(ctLookup, srcIP, key.Source_port, dstIP, key.Dest_port, key.Protocol, flow,
+		func(flow *netlink.ConntrackFlow) bool { return v4FlowHasKey(flow, key) })
+}
+
+// v4FlowHasKey reports whether conntrackFlow produces key under the rule on
+// v4FlowKeys.
+func v4FlowHasKey(conntrackFlow *netlink.ConntrackFlow, key utils.ConntrackKey) bool {
+	found := false
+	v4FlowKeys(conntrackFlow, func(flowKey utils.ConntrackKey) {
+		if flowKey == key {
+			found = true
+		}
+	})
+	return found
+}
+
+// v4FlowKeys calls onLiveKey with each key conntrackFlow produces. An entry is
+// live if some kernel flow produces its key. For a flow with original tuple
+// src:sport -> dst:dport and reply tuple rsrc:rsport -> rdst:rdport, the keys
+// are:
+//
+//   - src:sport -> dst:dport, owned by src or by dst.
+//   - If dst != rsrc (the destination was DNAT'd, for example a service VIP to a
+//     backend pod): src:sport -> rsrc:rsport, owned by src or by rsrc.
+//
+// The dst != rsrc test compares IPs only. Ifindex is ignored because kernel
+// conntrack has no per-veth ifindex. Ports are compared for TCP and UDP only,
+// because netlink reports them as zero for other protocols.
+func v4FlowKeys(conntrackFlow *netlink.ConntrackFlow, onLiveKey func(key utils.ConntrackKey)) {
+	//Check fwd flow with SIP as owner
+	fwdFlowWithSIP := utils.ConntrackKey{}
+	fwdFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+	fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+	fwdFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.DstIP)
+	fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
+	fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+	fwdFlowWithSIP.Owner_ip = fwdFlowWithSIP.Source_ip
+	fwdFlowWithSIP.Ifindex = 0 // not available from netlink
+	onLiveKey(fwdFlowWithSIP)
+
+	//Check fwd flow with DIP as owner
+	fwdFlowWithDIP := fwdFlowWithSIP
+	fwdFlowWithDIP.Owner_ip = fwdFlowWithDIP.Dest_ip
+	onLiveKey(fwdFlowWithDIP)
+
+	// Without DNAT, the reply comes from the original destination, and the
+	// keys below would repeat the ones above.
+	destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
+	revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
+	if destIP.Equal(revDestIP) {
+		return
+	}
+
+	//Check rev flow with SIP as owner
+	revFlowWithSIP := utils.ConntrackKey{}
+	revFlowWithSIP.Source_ip = utils.ConvIPv4ToInt(conntrackFlow.Forward.SrcIP)
+	revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+	revFlowWithSIP.Dest_ip = utils.ConvIPv4ToInt(conntrackFlow.Reverse.SrcIP)
+	revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
+	revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+	revFlowWithSIP.Owner_ip = revFlowWithSIP.Source_ip
+	revFlowWithSIP.Ifindex = 0 // not available from netlink
+	onLiveKey(revFlowWithSIP)
+
+	//Check rev flow with DIP as owner
+	revFlowWithDIP := revFlowWithSIP
+	revFlowWithDIP.Owner_ip = revFlowWithDIP.Dest_ip
+	onLiveKey(revFlowWithDIP)
 }
 
 // removeStaleV6Entries is the IPv6 counterpart of removeStaleV4Entries for
 // localConntrackV6Cache.
 func (c *conntrackClient) removeStaleV6Entries(gcStart uint64, isActive func(key utils.ConntrackKeyV6, gcStart uint64) bool,
 	deleteEntry func(key utils.ConntrackKeyV6)) (int, error) {
-	conntrackFlows, err := listConntrackFlows(netlink.ConntrackTable, unix.AF_INET6)
+	ctLookup, err := c.kernelTable.openLookup(unix.AF_INET6)
 	if err != nil {
 		return 0, err
 	}
+	defer ctLookup.close()
 
-	kernelConntrackV6Cache := make(map[utils.ConntrackKeyV6]bool)
-	// Kernel conntrack (netlink) identifies flows by 5-tuple only. It has no
-	// concept of per-veth ifindex. For GC, a BPF entry is considered active if
-	// its 5-tuple + owner matches a live kernel flow, regardless of interface.
-	// Ifindex is only relevant for policy enforcement, not for stale entry cleanup.
-	for _, conntrackFlow := range conntrackFlows {
-		//Check fwd flow with SIP as owner
-		fwdFlowWithSIP := utils.ConntrackKeyV6{}
-		sip := utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
-		copy(fwdFlowWithSIP.Source_ip[:], sip)
-		fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
-		dip := utils.ConvIPv6ToByte(conntrackFlow.Forward.DstIP)
-		copy(fwdFlowWithSIP.Dest_ip[:], dip)
-		fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
-		copy(fwdFlowWithSIP.Owner_ip[:], sip)
-
-		fwdFlowWithSIP.Ifindex = 0 // not available from netlink
-		kernelConntrackV6Cache[fwdFlowWithSIP] = true
-
-		//Check fwd flow with DIP as owner
-		fwdFlowWithDIP := utils.ConntrackKeyV6{}
-		sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
-		copy(fwdFlowWithDIP.Source_ip[:], sip)
-		fwdFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
-		dip = utils.ConvIPv6ToByte(conntrackFlow.Forward.DstIP)
-		copy(fwdFlowWithDIP.Dest_ip[:], dip)
-		fwdFlowWithDIP.Dest_port = conntrackFlow.Forward.DstPort
-		fwdFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
-		copy(fwdFlowWithDIP.Owner_ip[:], dip)
-
-		fwdFlowWithDIP.Ifindex = 0 // not available from netlink
-		kernelConntrackV6Cache[fwdFlowWithDIP] = true
-
-		//Dest can be VIP and pods can be on same node
-		destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
-		revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
-
-		if !destIP.Equal(revDestIP) {
-			//Check fwd flow with SIP as owner
-			revFlowWithSIP := utils.ConntrackKeyV6{}
-			sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
-			copy(revFlowWithSIP.Source_ip[:], sip)
-			revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
-			dip = utils.ConvIPv6ToByte(conntrackFlow.Reverse.SrcIP)
-			copy(revFlowWithSIP.Dest_ip[:], dip)
-			revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
-			revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
-			copy(revFlowWithSIP.Owner_ip[:], sip)
-
-			revFlowWithSIP.Ifindex = 0 // not available from netlink
-			kernelConntrackV6Cache[revFlowWithSIP] = true
-
-			//Check fwd flow with DIP as owner
-			revFlowWithDIP := utils.ConntrackKeyV6{}
-			sip = utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
-			copy(revFlowWithDIP.Source_ip[:], sip)
-			revFlowWithDIP.Source_port = conntrackFlow.Forward.SrcPort
-			dip = utils.ConvIPv6ToByte(conntrackFlow.Reverse.SrcIP)
-			copy(revFlowWithDIP.Dest_ip[:], dip)
-			revFlowWithDIP.Dest_port = conntrackFlow.Reverse.SrcPort
-			revFlowWithDIP.Protocol = conntrackFlow.Forward.Protocol
-			copy(revFlowWithDIP.Owner_ip[:], dip)
-
-			revFlowWithDIP.Ifindex = 0 // not available from netlink
-			kernelConntrackV6Cache[revFlowWithDIP] = true
-		}
-
-	}
-	// Check if the local cache and kernel cache is in sync
-	deletedEntries := 0
-	for localConntrackEntry, _ := range c.localConntrackV6Cache {
-		lookupKey := localConntrackEntry
-		lookupKey.Ifindex = 0 // strip for 5-tuple comparison
-		_, ok := kernelConntrackV6Cache[lookupKey]
-		if !ok {
-			expiredFlow := localConntrackEntry
-			if isActive(expiredFlow, gcStart) {
-				log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
-					utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
-					utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
-					expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-				continue
+	var staleEntries []utils.ConntrackKeyV6
+	var portlessEntries []utils.ConntrackKeyV6
+	portlessKeyLive := make(map[uint8]map[utils.ConntrackKeyV6]bool)
+	var conntrackFlow netlink.ConntrackFlow
+	lookups := 0
+	for localConntrackEntry := range c.localConntrackV6Cache {
+		key := v6LookupKey(localConntrackEntry)
+		if needsProtocolDump(key.Protocol, key.Source_port, key.Dest_port) {
+			if portlessKeyLive[key.Protocol] == nil {
+				portlessKeyLive[key.Protocol] = make(map[utils.ConntrackKeyV6]bool)
 			}
-			log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
-			deleteEntry(expiredFlow)
-			deletedEntries++
+			portlessKeyLive[key.Protocol][key] = false
+			portlessEntries = append(portlessEntries, localConntrackEntry)
+			continue
 		}
+		live, n, err := v6EntryHasFlow(ctLookup, key, &conntrackFlow)
+		lookups += n
+		if err != nil {
+			return 0, err
+		}
+		if !live {
+			staleEntries = append(staleEntries, localConntrackEntry)
+		}
+	}
+	for protocol, keys := range portlessKeyLive {
+		err := c.kernelTable.dumpFlows(unix.AF_INET6, protocol, func(flow *netlink.ConntrackFlow) {
+			v6FlowKeys(flow, func(key utils.ConntrackKeyV6) {
+				if _, ok := keys[key]; ok {
+					keys[key] = true
+				}
+			})
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	for _, localConntrackEntry := range portlessEntries {
+		key := v6LookupKey(localConntrackEntry)
+		if !portlessKeyLive[key.Protocol][key] {
+			staleEntries = append(staleEntries, localConntrackEntry)
+		}
+	}
+	log().Debugf("Conntrack GC: %v kernel conntrack lookups and %v protocol dumps for %v tracked entries",
+		lookups, len(portlessKeyLive), len(c.localConntrackV6Cache))
+
+	deletedEntries := 0
+	for _, expiredFlow := range staleEntries {
+		if isActive(expiredFlow, gcStart) {
+			log().Debugf("Conntrack cleanup Skip (in use) - Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d",
+				utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port,
+				utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port,
+				expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+			continue
+		}
+		log().Debugf("Conntrack cleanup Delete - Conntrack Key : Source IP - %s Source port - %d Dest IP - %s Dest port - %d Protocol - %d Owner IP - %s Ifindex - %d", utils.ConvByteToIPv6(expiredFlow.Source_ip).String(), expiredFlow.Source_port, utils.ConvByteToIPv6(expiredFlow.Dest_ip).String(), expiredFlow.Dest_port, expiredFlow.Protocol, utils.ConvByteToIPv6(expiredFlow.Owner_ip).String(), expiredFlow.Ifindex)
+		deleteEntry(expiredFlow)
+		deletedEntries++
 	}
 	return deletedEntries, nil
+}
+
+// v6LookupKey is the IPv6 counterpart of v4LookupKey. IPv6 keys need no byte
+// order conversion, only Ifindex stripped for 5-tuple comparison.
+func v6LookupKey(entry utils.ConntrackKeyV6) utils.ConntrackKeyV6 {
+	entry.Ifindex = 0
+	return entry
+}
+
+// v6EntryHasFlow is the IPv6 counterpart of v4EntryHasFlow. key has Ifindex
+// stripped.
+func v6EntryHasFlow(ctLookup flowLookup, key utils.ConntrackKeyV6, flow *netlink.ConntrackFlow) (live bool, lookups int, err error) {
+	if !isTCPOrUDP(key.Protocol) {
+		return false, lookups, nil
+	}
+	srcIP := utils.ConvByteToIPv6(key.Source_ip)
+	dstIP := utils.ConvByteToIPv6(key.Dest_ip)
+	return entryHasFlow(ctLookup, srcIP, key.Source_port, dstIP, key.Dest_port, key.Protocol, flow,
+		func(flow *netlink.ConntrackFlow) bool { return v6FlowHasKey(flow, key) })
+}
+
+// v6FlowHasKey is the IPv6 counterpart of v4FlowHasKey.
+func v6FlowHasKey(conntrackFlow *netlink.ConntrackFlow, key utils.ConntrackKeyV6) bool {
+	found := false
+	v6FlowKeys(conntrackFlow, func(flowKey utils.ConntrackKeyV6) {
+		if flowKey == key {
+			found = true
+		}
+	})
+	return found
+}
+
+// v6FlowKeys is the IPv6 counterpart of v4FlowKeys.
+func v6FlowKeys(conntrackFlow *netlink.ConntrackFlow, onLiveKey func(key utils.ConntrackKeyV6)) {
+	//Check fwd flow with SIP as owner
+	fwdFlowWithSIP := utils.ConntrackKeyV6{}
+	sip := utils.ConvIPv6ToByte(conntrackFlow.Forward.SrcIP)
+	copy(fwdFlowWithSIP.Source_ip[:], sip)
+	fwdFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+	dip := utils.ConvIPv6ToByte(conntrackFlow.Forward.DstIP)
+	copy(fwdFlowWithSIP.Dest_ip[:], dip)
+	fwdFlowWithSIP.Dest_port = conntrackFlow.Forward.DstPort
+	fwdFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+	copy(fwdFlowWithSIP.Owner_ip[:], sip)
+	fwdFlowWithSIP.Ifindex = 0 // not available from netlink
+	onLiveKey(fwdFlowWithSIP)
+
+	//Check fwd flow with DIP as owner
+	fwdFlowWithDIP := fwdFlowWithSIP
+	fwdFlowWithDIP.Owner_ip = [16]byte{}
+	copy(fwdFlowWithDIP.Owner_ip[:], dip)
+	onLiveKey(fwdFlowWithDIP)
+
+	// Without DNAT, the reply comes from the original destination, and the
+	// keys below would repeat the ones above.
+	destIP := net.ParseIP(conntrackFlow.Forward.DstIP.String())
+	revDestIP := net.ParseIP(conntrackFlow.Reverse.SrcIP.String())
+	if destIP.Equal(revDestIP) {
+		return
+	}
+
+	//Check rev flow with SIP as owner
+	revFlowWithSIP := utils.ConntrackKeyV6{}
+	copy(revFlowWithSIP.Source_ip[:], sip)
+	revFlowWithSIP.Source_port = conntrackFlow.Forward.SrcPort
+	revDip := utils.ConvIPv6ToByte(conntrackFlow.Reverse.SrcIP)
+	copy(revFlowWithSIP.Dest_ip[:], revDip)
+	revFlowWithSIP.Dest_port = conntrackFlow.Reverse.SrcPort
+	revFlowWithSIP.Protocol = conntrackFlow.Forward.Protocol
+	copy(revFlowWithSIP.Owner_ip[:], sip)
+	revFlowWithSIP.Ifindex = 0 // not available from netlink
+	onLiveKey(revFlowWithSIP)
+
+	//Check rev flow with DIP as owner
+	revFlowWithDIP := revFlowWithSIP
+	revFlowWithDIP.Owner_ip = [16]byte{}
+	copy(revFlowWithDIP.Owner_ip[:], revDip)
+	onLiveKey(revFlowWithDIP)
+}
+
+// isTCPOrUDP reports whether protocol is TCP or UDP. netlink reports ports
+// only for these, so the key rule compares ports only for them.
+func isTCPOrUDP(protocol uint8) bool {
+	return protocol == unix.IPPROTO_TCP || protocol == unix.IPPROTO_UDP
+}
+
+// needsProtocolDump reports whether an entry must be checked against a dump of
+// its protocol's flows (see streamProtocolFlows) rather than looked up: its
+// protocol is not TCP or UDP and both ports are zero, as the datapath stores
+// ICMP entries. Such an entry cannot be looked up, because a GET needs the
+// protocol's own tuple fields (the ICMP id, type and code) and the entry does
+// not carry them. An entry of such a protocol with a non-zero port matches no
+// flow and needs neither.
+func needsProtocolDump(protocol uint8, srcPort, dstPort uint16) bool {
+	return !isTCPOrUDP(protocol) && srcPort == 0 && dstPort == 0
+}
+
+// entryHasFlow looks up the kernel flows for the 5-tuple srcIP:srcPort ->
+// dstIP:dstPort and reports whether matches accepts a flow they return, and how
+// many lookups it sent. A GET finds the flow that has the requested tuple as its
+// original or its reply tuple, and a tuple belongs to at most one flow per zone:
+//
+//  1. GET src:sport -> dst:dport. This finds the flow whose original tuple is
+//     the entry's 5-tuple, which covers the first key on v4FlowKeys.
+//  2. If 1 did not match, GET the inverse, dst:dport -> src:sport. This finds a
+//     DNAT'd flow whose reply tuple is rsrc:rsport -> src:sport, which covers
+//     the second key.
+//
+// The GETs find no matching flow, where a full dump would, in two cases. The
+// entry is then deleted unless the datapath touched it during the cycle:
+//
+//   - The flow is DNAT'd and its source is also rewritten, so rdst:rdport is
+//     not src:sport (for example kube-proxy masquerading hairpin traffic). The
+//     second key is not the inverse of any kernel tuple, so GET 2 misses it.
+//   - The flow is in a conntrack zone other than the default one. A GET without
+//     CTA_ZONE searches the default zone only, while a dump returns every zone.
+func entryHasFlow(ctLookup flowLookup, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, protocol uint8,
+	flow *netlink.ConntrackFlow, matches func(flow *netlink.ConntrackFlow) bool) (found bool, lookups int, err error) {
+	fwd := netlink.IPTuple{SrcIP: srcIP, SrcPort: srcPort, DstIP: dstIP, DstPort: dstPort, Protocol: protocol}
+	lookups++
+	found, err = ctLookup.lookup(nl.CTA_TUPLE_ORIG, &fwd, flow)
+	if err != nil {
+		return false, lookups, err
+	}
+	if found && matches(flow) {
+		return true, lookups, nil
+	}
+	rev := netlink.IPTuple{SrcIP: dstIP, SrcPort: dstPort, DstIP: srcIP, DstPort: srcPort, Protocol: protocol}
+	lookups++
+	found, err = ctLookup.lookup(nl.CTA_TUPLE_REPLY, &rev, flow)
+	if err != nil {
+		return false, lookups, err
+	}
+	return found && matches(flow), lookups, nil
 }
