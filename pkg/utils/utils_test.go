@@ -848,6 +848,47 @@ func TestGetHostVethName(t *testing.T) {
 	}
 }
 
+func TestGetHostVethName_PrefixMatches(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	defer func() { getLinkByNameFunc = originalFunc }()
+
+	tests := []struct {
+		name    string
+		index   int
+		links   []string
+		want    string
+		wantErr string
+	}{
+		{name: "only eni", links: []string{"eni9cfdfc6963c"}, want: "eni9cfdfc6963c"},
+		{name: "only vlan", links: []string{"vlan9cfdfc6963c"}, want: "vlan9cfdfc6963c"},
+		{name: "eni and vlan", links: []string{"eni9cfdfc6963c", "vlan9cfdfc6963c"}, wantErr: "multiple host interfaces"},
+		{name: "index 1", index: 1, links: []string{"eni47df875468f"}, want: "eni47df875468f"},
+		{name: "index 1 legacy name", index: 1, links: []string{"enic3aa0f3d7be"}, want: "enic3aa0f3d7be"},
+		{name: "index 1 prefers current name", index: 1, links: []string{"eni47df875468f", "enic3aa0f3d7be"}, want: "eni47df875468f"},
+		{name: "index 1 eni and vlan", index: 1, links: []string{"eni47df875468f", "vlan47df875468f"}, wantErr: "multiple host interfaces"},
+		{name: "index 0 ignores index names", links: []string{"eni47df875468f", "enic3aa0f3d7be"}, wantErr: "failed to find link"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				for _, l := range tt.links {
+					if l == name {
+						return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+					}
+				}
+				return nil, netlink.LinkNotFoundError{}
+			}
+			got, err := GetHostVethName("foo", "bar", tt.index, []string{"eni", "vlan"})
+			assert.Equal(t, tt.want, got)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestIsFileExistsError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -965,6 +1006,40 @@ func TestConvByteArrayToIP(t *testing.T) {
 			if got := ConvByteArrayToIP(tt.ip); got != tt.want {
 				t.Errorf("ConvByteArrayToIP(%#08x) = %q, want %q", tt.ip, got, tt.want)
 			}
+		})
+	}
+}
+
+// Vectors from aws/amazon-vpc-cni-k8s#3924. If either repo changes how it hashes the name,
+// this fails instead of the lookup silently missing.
+func TestGetHostVethName_MatchesCNINaming(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	defer func() { getLinkByNameFunc = originalFunc }()
+
+	tests := []struct {
+		name      string
+		podName   string
+		namespace string
+		index     int
+		want      string
+	}{
+		{name: "slash separator for a secondary interface",
+			podName: "web", namespace: "prod", index: 1, want: "eni6803dcbd785"},
+		{name: "pod whose own name ends in .1",
+			podName: "web.1", namespace: "prod", index: 0, want: "enie12e7897172"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				if name == tt.want {
+					return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+				}
+				return nil, netlink.LinkNotFoundError{}
+			}
+			got, err := GetHostVethName(tt.podName, tt.namespace, tt.index, []string{"eni", "vlan"})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got,
+				"host-veth naming must stay in step with the VPC CNI")
 		})
 	}
 }
