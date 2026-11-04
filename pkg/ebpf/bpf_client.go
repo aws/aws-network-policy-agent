@@ -855,7 +855,8 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
 		hostVethNames[index], err = utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 		if err != nil {
-			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
+			// A multiple-prefix match is not a missing pod, so the error matters here.
+			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted: %v", pod.Name, pod.Namespace, err)
 			return false, err
 		}
 	}
