@@ -1,12 +1,15 @@
 package utils
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -887,34 +890,22 @@ func TestGetHostVethName_PrefixMatches(t *testing.T) {
 }
 
 func TestIsFileExistsError(t *testing.T) {
-	type args struct {
-		error string
-	}
-
 	tests := []struct {
 		name string
-		args args
+		err  error
 		want bool
 	}{
-		{
-			name: "file exists error string",
-			args: args{
-				error: "file exists",
-			},
-			want: true,
-		},
-		{
-			name: "Link Not Found error string",
-			args: args{
-				error: "link not found",
-			},
-			want: false,
-		},
+		{name: "bare EEXIST", err: unix.EEXIST, want: true},
+		// netlink appends the extended ack message when error reporting is on.
+		{name: "EEXIST with extended ack message", err: fmt.Errorf("%w: %s", unix.EEXIST, "Filter already exists"), want: true},
+		{name: "wrapped EEXIST", err: fmt.Errorf("attach ingress: %w", unix.EEXIST), want: true},
+		{name: "text without the errno", err: errors.New("file exists"), want: false},
+		{name: "other errno", err: unix.ENOENT, want: false},
+		{name: "nil", err: nil, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsFileExistsError(tt.args.error)
-			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.want, IsFileExistsError(tt.err))
 		})
 	}
 }

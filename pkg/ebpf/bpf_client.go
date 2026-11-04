@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"sync"
 	"time"
@@ -14,9 +15,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/ipamd/datastore"
+	goebpfbtf "github.com/aws/aws-ebpf-sdk-go/pkg/btf"
 	goelf "github.com/aws/aws-ebpf-sdk-go/pkg/elfparser"
 	goebpfmaps "github.com/aws/aws-ebpf-sdk-go/pkg/maps"
 	goebpfmetrics "github.com/aws/aws-ebpf-sdk-go/pkg/metrics"
+	goebpfprogs "github.com/aws/aws-ebpf-sdk-go/pkg/progs"
 	"github.com/aws/aws-ebpf-sdk-go/pkg/tc"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/conntrack"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf/events"
@@ -26,6 +29,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils/cp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -59,7 +63,26 @@ var (
 	INTERFACE_COUNT_DEFAULT                          = 1  // Default single interface
 	IPAM_JSON_PATH                                   = "/var/run/aws-node/ipam.json"
 	deletedPodsMinAge                                = 5 * time.Minute
+
+	// TC_INGRESS_CT_DENY_BINARY and TC_V6_INGRESS_CT_DENY_BINARY are ingress
+	// binaries that also shorten the kernel conntrack entry of denied TCP
+	// connections. They call nf_conntrack kfuncs, so need kernel 6.0+.
+	TC_INGRESS_CT_DENY_BINARY    = "tc.v4ingress.ctdeny.bpf.o"
+	TC_V6_INGRESS_CT_DENY_BINARY = "tc.v6ingress.ctdeny.bpf.o"
 )
+
+// ErrProbeAttachSkipped marks a probe attach that could not be performed yet
+// and will not succeed on retry without new input. Reconcilers log it and move
+// on; CNI ADD must keep failing on it, since there a skip means the pod comes
+// up with no policy.
+var ErrProbeAttachSkipped = errors.New("skipping probe attach")
+
+// ctDenyKfuncs are the kernel functions the ct-deny ingress binaries call.
+var ctDenyKfuncs = []string{"bpf_skb_ct_lookup", "bpf_ct_change_timeout", "bpf_ct_release"}
+
+// checkKfuncs reports whether the running kernel has the given kfuncs. Tests
+// replace it to fake the kernel.
+var checkKfuncs = goebpfbtf.CheckKfuncs
 
 func log() logger.Logger {
 	return logger.Get()
@@ -173,10 +196,6 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		ingressBinary, egressBinary, eventsBinary,
 			cliBinary, hostMask = TC_V6_INGRESS_BINARY, TC_V6_EGRESS_BINARY, EVENTS_V6_BINARY, EKS_V6_CLI_BINARY, IPv6_HOST_MASK
 	}
-	ebpfClient.ingressBinary, ebpfClient.egressBinary,
-		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
-
-	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
 	isConntrackMapPresent, isPolicyEventsMapPresent := false, false
 	var err error
 
@@ -192,12 +211,30 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		log().Errorf("Failed to increase RLIMIT on the node but moving forward %v", err)
 	}
 
-	//Compare BPF binaries
+	// Use the ingress binary that also shortens the kernel conntrack entry of
+	// denied connections if the kernel supports it and it loads here. The
+	// choice is made once, before the binaries are compared and the pods'
+	// programs recovered, so every pod runs the same variant. The probe load
+	// needs the global maps. On a node without them yet (first start), or when
+	// the events binary changed and replaces them below, possibly with another
+	// layout, the ct-deny binary is probed once the events binary has created them.
+	_, _, eventsBinaryChanged, _ := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient, []string{eventsBinary}, hostBinaryPath)
+	ingressBinary, probeCtDenyLater := ebpfClient.chooseIngressBinary(enableIPv6, eventsBinaryChanged)
+	ebpfClient.ingressBinary, ebpfClient.egressBinary,
+		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
+
+	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
+
+	//Compare BPF binaries. The events binary was compared above; its change
+	//reloads the ingress and egress probes too.
 	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
-		bpfBinaries, hostBinaryPath)
+		[]string{ingressBinary, egressBinary, cliBinary}, hostBinaryPath)
 	if err != nil {
 		//Log the error and move on
 		log().Errorf("Probe validation/update failed but will continue to load %v", err)
+	}
+	if eventsBinaryChanged {
+		ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired = true, true, true
 	}
 	log().Info("Probe validation Done")
 
@@ -249,6 +286,15 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			return nil, err
 		}
 		log().Info("Successfully loaded events probe")
+		// The events binary's maps replaced the ones the ct-deny probe recovered
+		// in the SDK's cache, so those FDs are no longer referenced. With the
+		// events binary unchanged, recoverBPFState used them as the agent's
+		// global map FDs instead of recovering the maps again, so they stay open.
+		if eventsUpdateRequired {
+			for _, m := range ebpfClient.probeGlobalMaps {
+				closeFD(int(m.MapFD))
+			}
+		}
 
 		for mapName, mapInfo := range globalMapInfo {
 			if mapName == AWS_CONNTRACK_MAP {
@@ -269,6 +315,18 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			log().Errorf("Unable to get conntrackMap post recovery..error: %v", err)
 			sdkAPIErr.WithLabelValues("RecoveryFailed").Inc()
 			return nil, err
+		}
+	}
+
+	// First start, or the events binary changed: no pod runs this run's ingress
+	// program yet (an events binary change reloads them all), so switching to the
+	// regular binary here still leaves every pod on one variant. Install it over
+	// the ct-deny binary's host copy so the next start compares the right binary.
+	if probeCtDenyLater && !ebpfClient.ctDenyBinaryLoads(ingressBinary) {
+		ingressBinary, _ = ingressBinaries(enableIPv6)
+		ebpfClient.ingressBinary = ingressBinary
+		if err := cp.InstallBPFBinaries([]string{ingressBinary}, hostBinaryPath); err != nil {
+			log().Errorf("Failed to copy %s to the host directory: %v", ingressBinary, err)
 		}
 	}
 
@@ -324,8 +382,14 @@ type bpfClient struct {
 	egressPodToProgMap *sync.Map
 	// Stores info on the global maps the agent creates
 	globalMaps *sync.Map
-	// Ingress eBPF probe binary
+	// Ingress eBPF probe binary: the ct-deny or the regular one, chosen once in
+	// NewBpfClient (see chooseIngressBinary) and not changed afterwards
 	ingressBinary string
+	// Global maps chooseIngressBinary recovered for the ct-deny probe. Their
+	// FDs are in the SDK's map cache, so recoverBPFState reuses them instead
+	// of recovering the maps again, and they are only closed once the events
+	// binary has replaced them in the cache. Only used during NewBpfClient.
+	probeGlobalMaps map[string]goebpfmaps.BpfMap
 	// Egress eBPF probe binary
 	egressBinary string
 	// host IP Mask - will be initialized based on the IP family
@@ -385,7 +449,9 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 			log().Errorf("error opening Probe: %s error: %v", bpfProbe, err)
 		}
 
-		existingProbePath = hostBinaryPath + bpfProbe
+		// The ct-deny ingress binaries are installed under the regular ingress
+		// binary's name, so a switch between the variants shows up as a change.
+		existingProbePath = hostBinaryPath + cp.HostBinaryName(bpfProbe)
 		existingProbe, err := os.ReadFile(existingProbePath)
 		if err != nil {
 			log().Errorf("error opening Probe: %s error: %v", existingProbePath, err)
@@ -402,7 +468,8 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 				log().Info("change detected in event probe binaries..")
 				break
 			}
-			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY {
+			if bpfProbe == TC_INGRESS_BINARY || bpfProbe == TC_V6_INGRESS_BINARY ||
+				bpfProbe == TC_INGRESS_CT_DENY_BINARY || bpfProbe == TC_V6_INGRESS_CT_DENY_BINARY {
 				log().Info("change detected in ingress probe binaries.. ")
 				updateIngressProbe = true
 			}
@@ -437,7 +504,10 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 	// Recover global maps (Conntrack and Events) if there is no need to update
 	// events binary
 	if !updateEventsProbe {
-		recoveredGlobalMaps, err := eBPFSDKClient.RecoverGlobalMaps()
+		recoveredGlobalMaps, err := l.probeGlobalMaps, error(nil)
+		if recoveredGlobalMaps == nil {
+			recoveredGlobalMaps, err = eBPFSDKClient.RecoverGlobalMaps()
+		}
 		if err != nil {
 			log().Errorf("failed to recover global maps %v", err)
 			sdkAPIErr.WithLabelValues("RecoverGlobalMaps").Inc()
@@ -608,10 +678,14 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
-		_, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
+		_, loaded, err := l.attachIngressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
 			log().Errorf("Failed to Attach Ingress TC probe for interface: %s podIdentifier: %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
+			if loaded {
+				l.unloadBPFProgram(podIdentifier, "ingress")
+				continue
+			}
 		}
 		log().Infof("Updating ingress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
 		err = l.UpdatePodStateEbpfMaps(podIdentifier, POD_STATE_MAP_KEY, state, true, false)
@@ -628,10 +702,14 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 	for interfaceName, pinPath := range l.interfaceNametoEgressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching egress for %s interface %s", podIdentifier, interfaceName)
-		_, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
+		_, loaded, err := l.attachEgressBPFProbe(interfaceName, podIdentifier)
 		if err != nil {
 			log().Errorf("Failed to Attach Egress TC probe for interface: %s podIdentifier %s error: %v", interfaceName, podIdentifier, err)
 			sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
+			if loaded {
+				l.unloadBPFProgram(podIdentifier, "egress")
+				continue
+			}
 		}
 
 		log().Infof("Updating egress_pod_state map for podIdentifier: %s, networkPolicyMode: %s", podIdentifier, l.networkPolicyMode)
@@ -713,10 +791,10 @@ func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentif
 	}
 
 	// No interface count available and multi-NIC enabled - skip attachment
-	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
+	return 0, fmt.Errorf("%w: multiNIC enabled and interface count is unknown", ErrProbeAttachSkipped)
 }
 
-func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
+func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (_ bool, err error) {
 	var ingressProgFD int
 	var egressProgFD int
 
@@ -747,6 +825,17 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	}
 	firstPodInPodIdentifier := l.isFirstPodInPodIdentifierLocked(podIdentifier)
 
+	// Unload the programs this call loaded if the attach fails, so their pins
+	// don't outlive the pod. Programs loaded earlier may be in use by other pods.
+	var loadedDirections []string
+	defer func() {
+		if err != nil {
+			for _, direction := range loadedDirections {
+				l.unloadBPFProgram(podIdentifier, direction)
+			}
+		}
+	}()
+
 	// Check if an eBPF probe is already attached on both ingress and egress direction(s) for this pod.
 	// If yes, then skip probe attach flow for this pod.
 	isIngressProbeAttached, isEgressProbeAttached := l.isEBPFProbeAttached(pod.Name, pod.Namespace)
@@ -760,22 +849,40 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		return false, err
 	}
 
-	numInterfaces = actualInterfaceCount
-
-	for index := 0; index < numInterfaces; index++ {
+	hostVethNames := make([]string, actualInterfaceCount)
+	for index := range hostVethNames {
 		// We attach the TC probes to the hostVeth interfaces of the pod. Derive the hostVeth name from the Name and Namespace of the Pod.
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
-		hostVethName, err := utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+		hostVethNames[index], err = utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 		if err != nil {
 			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
 			return false, err
 		}
+	}
 
+	// Load every program this pod still needs before attaching any, so a failed
+	// load leaves the pod's veths as they were.
+	for _, direction := range []string{"ingress", "egress"} {
+		if (direction == "ingress" && isIngressProbeAttached) || (direction == "egress" && isEgressProbeAttached) {
+			continue
+		}
+		var loaded bool
+		_, loaded, err = l.ensureBPFProgram(podIdentifier, direction)
+		if err != nil {
+			log().Errorf("Failed to load %s program for pod: %s in namespace %s error: %v", direction, pod.Name, pod.Namespace, err)
+			return false, err
+		}
+		if loaded {
+			loadedDirections = append(loadedDirections, direction)
+		}
+	}
+
+	for index, hostVethName := range hostVethNames {
 		log().Infof("AttacheBPFProbes for pod %s in namespace %s with hostVethName %s at interface %d", pod.Name, pod.Namespace, hostVethName, index)
 
 		if !isIngressProbeAttached {
 			start := time.Now()
-			ingressProgFD, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
+			ingressProgFD, _, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 			if err != nil {
@@ -788,7 +895,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 
 		if !isEgressProbeAttached {
 			start := time.Now()
-			egressProgFD, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
+			egressProgFD, _, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachEgressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
 			if err != nil {
@@ -813,95 +920,78 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 	return firstPodInPodIdentifier, nil
 }
 
-func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (int, error) {
-	// We will re-use the same eBPF program instance for pods belonging to same replicaset
-	// Check if we've already loaded an ELF file for this PolicyEndpoint resource and re-use
-	// if present, otherwise load a new instance and attach it
-
-	var progFD int
-	var err error
-	var ingressProgInfo map[string]goelf.BpfData
+// ensureBPFProgram loads podIdentifier's program for direction unless its context
+// already has one, which pods of the same identifier share. loaded reports
+// whether it did.
+func (l *bpfClient) ensureBPFProgram(podIdentifier string, direction string) (progFD int, loaded bool, err error) {
 	var peBPFContext BPFContext
-	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
-	if ok {
+	if value, ok := l.policyEndpointeBPFContext.Load(podIdentifier); ok {
 		peBPFContext = value.(BPFContext)
 	}
+	pgmInfo, binary := &peBPFContext.ingressPgmInfo, l.ingressBinary
+	if direction == "egress" {
+		pgmInfo, binary = &peBPFContext.egressPgmInfo, l.egressBinary
+	}
+	if pgmInfo.Program.ProgFD != 0 {
+		log().Debugf("Found an existing instance, let's derive the %s context..", direction)
+		return pgmInfo.Program.ProgFD, false, nil
+	}
+	progInfo, progFD, err := l.loadBPFProgram(binary, direction, podIdentifier)
+	if err != nil {
+		return 0, false, err
+	}
+	*pgmInfo = progInfo[utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)]
+	l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
+	return progFD, true, nil
+}
 
-	if peBPFContext.ingressPgmInfo.Program.ProgFD != 0 {
-		log().Info("Found an existing instance, let's derive the ingress context..")
-		ingressEbpfProgEntry := peBPFContext.ingressPgmInfo
-		progFD = ingressEbpfProgEntry.Program.ProgFD
-	} else {
-		ingressProgInfo, progFD, err = l.loadBPFProgram(l.ingressBinary, "ingress", podIdentifier)
-		if err != nil {
-			return 0, err
-		}
-		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
-		peBPFContext.ingressPgmInfo = ingressProgInfo[pinPath]
-		l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
+// loaded reports whether this call loaded the program, even if the attach then failed.
+func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier string) (progFD int, loaded bool, err error) {
+	progFD, loaded, err = l.ensureBPFProgram(podIdentifier, "ingress")
+	if err != nil {
+		return 0, false, err
 	}
 
 	log().Infof("Attempting to do an Ingress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale ingress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCEgressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Ingress TC detach failed on %s: %v", hostVethName, detachErr)
-			return 0, detachErr
+			return 0, loaded, detachErr
 		}
 		err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
 	}
 	if err != nil {
 		log().Errorf("Ingress Attach failed %v", err)
-		return 0, err
+		return 0, loaded, err
 	}
-	return progFD, nil
+	return progFD, loaded, nil
 }
 
-func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier string) (int, error) {
-	// We will re-use the same eBPF program instance for pods belonging to same replicaset
-	// Check if we've already loaded an ELF file for this PolicyEndpoint resource and re-use
-	// if present, otherwise load a new instance and attach it
-
-	var progFD int
-	var err error
-	var egressProgInfo map[string]goelf.BpfData
-	var peBPFContext BPFContext
-	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
-	if ok {
-		peBPFContext = value.(BPFContext)
-	}
-
-	if peBPFContext.egressPgmInfo.Program.ProgFD != 0 {
-		log().Info("Found an existing instance, let's derive the egress context..")
-		egressEbpfProgEntry := peBPFContext.egressPgmInfo
-		progFD = egressEbpfProgEntry.Program.ProgFD
-	} else {
-		egressProgInfo, progFD, err = l.loadBPFProgram(l.egressBinary, "egress", podIdentifier)
-		if err != nil {
-			return 0, err
-		}
-		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
-		peBPFContext.egressPgmInfo = egressProgInfo[pinPath]
-		l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
+// loaded reports whether this call loaded the program, even if the attach then failed.
+func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier string) (progFD int, loaded bool, err error) {
+	progFD, loaded, err = l.ensureBPFProgram(podIdentifier, "egress")
+	if err != nil {
+		return 0, false, err
 	}
 
 	log().Infof("Attempting to do an Egress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale egress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCIngressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Egress TC detach failed on %s: %v", hostVethName, detachErr)
-			return 0, detachErr
+			return 0, loaded, detachErr
 		}
 		err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
 	}
 	if err != nil {
 		log().Errorf("Egress Attach failed %v", err)
-		return 0, err
+		return 0, loaded, err
 	}
 
-	return progFD, nil
+	return progFD, loaded, nil
 }
 
 // HasBPFContext reports whether an eBPF context is currently registered for the given
@@ -983,26 +1073,193 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 		podStateMapToDelete = pgmInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
 	}
 
+	var errs []error
 	if pgmInfo.Program.ProgFD != 0 {
 		log().Infof("Found the Program and Map to delete - Program: %s Map: %s Map: %s", pgmPinPath, mapPinpath, podStateMapPinPath)
-		err = pgmInfo.Program.UnPinProg(pgmPinPath)
+		err = unpinProgram(&pgmInfo.Program, pgmPinPath)
 		if err != nil {
 			log().Errorf("Failed to delete the Program: %v", err)
+			errs = append(errs, err)
+			closeAfterFailedUnpin(pgmInfo.Program.ProgFD)
 		}
-		err = mapToDelete.UnPinMap(mapPinpath)
+		err = unpinMap(&mapToDelete, mapPinpath)
 		if err != nil {
 			log().Errorf("Failed to delete the Map: %v", err)
+			errs = append(errs, err)
+			closeAfterFailedUnpin(int(mapToDelete.MapFD))
 		}
-		err = podStateMapToDelete.UnPinMap(podStateMapPinPath)
+		err = unpinMap(&podStateMapToDelete, podStateMapPinPath)
 		if err != nil {
 			log().Errorf("Failed to delete PodState Map: %v", err)
+			errs = append(errs, err)
+			closeAfterFailedUnpin(int(podStateMapToDelete.MapFD))
 		}
-		err = clusterPolicyMap.UnPinMap(clusterPolicyMapPinpath)
+		err = unpinMap(&clusterPolicyMap, clusterPolicyMapPinpath)
 		if err != nil {
 			log().Errorf("Failed to delete the cluster policy Map: %v", err)
+			errs = append(errs, err)
+			closeAfterFailedUnpin(int(clusterPolicyMap.MapFD))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// ingressBinaries returns the regular and the ct-deny ingress binary for the
+// IP family.
+func ingressBinaries(enableIPv6 bool) (string, string) {
+	if enableIPv6 {
+		return TC_V6_INGRESS_BINARY, TC_V6_INGRESS_CT_DENY_BINARY
+	}
+	return TC_INGRESS_BINARY, TC_INGRESS_CT_DENY_BINARY
+}
+
+// ctDenyProbePinPrefix is the pin prefix the ct-deny probe loads under. It
+// can't match a pod's pins, including the "name-namespace" ones of agents
+// before v1.4.0: pod names and namespaces are lowercase (RFC 1123), and pod
+// identifiers only add "-", "@" and "_" (utils.GetPodIdentifier). It has no
+// "_": the SDK takes a pin name's prefix to be everything before the first "_",
+// and would treat the probe's per-pod maps as global ones otherwise.
+const ctDenyProbePinPrefix = "CTDENYPROBE"
+
+// closeFD closes a file descriptor the agent opened through a load. A variable
+// so that tests don't close real descriptors.
+var closeFD = unix.Close
+
+// chooseIngressBinary returns the ingress binary to use for this run. It is
+// the ct-deny binary if the kernel has the nf_conntrack kfuncs it calls and a
+// probe load of it succeeds, and the regular binary otherwise (kernels before
+// 6.0, such as AL2's 5.10, or no BTF, or a verifier that rejects it).
+//
+// The probe needs the global maps the ingress programs reference. If they
+// can't be recovered (the agent's first start on the node), or eventsChanged
+// says the events binary will replace them, it returns the ct-deny binary with
+// probeLater set, and the caller probes it once the events binary has created
+// them. Probing against the old maps could fail on a layout the new events
+// binary changes, such as the conntrack value growing from 1 to 16 bytes.
+func (l *bpfClient) chooseIngressBinary(enableIPv6, eventsChanged bool) (binary string, probeLater bool) {
+	binary, ctDenyBinary := ingressBinaries(enableIPv6)
+	if err := checkKfuncs(ctDenyKfuncs); err != nil {
+		log().Warnf("Kernel lacks the conntrack kfuncs for shortening denied connections, using %s: %v", binary, err)
+		return binary, false
+	}
+	if eventsChanged {
+		log().Infof("Events binary changed, probing %s after the global maps are recreated", ctDenyBinary)
+		return ctDenyBinary, true
+	}
+	// Recovering the global maps puts their FDs in the SDK's map cache, which
+	// the probe load relocates against. They stay open: see probeGlobalMaps.
+	globalMaps, err := l.bpfSDKClient.RecoverGlobalMaps()
+	if err != nil || len(globalMaps) == 0 {
+		log().Infof("Global maps not present yet, probing %s after they are created", ctDenyBinary)
+		return ctDenyBinary, true
+	}
+	l.probeGlobalMaps = globalMaps
+	if !l.ctDenyBinaryLoads(ctDenyBinary) {
+		return binary, false
+	}
+	return ctDenyBinary, false
+}
+
+// ctDenyBinaryLoads loads ctDenyBinary once under ctDenyProbePinPrefix, then
+// removes everything the load created, and reports whether it loaded. It needs
+// the global maps in the SDK's cache.
+func (l *bpfClient) ctDenyBinaryLoads(ctDenyBinary string) bool {
+	// Pins left by an agent that stopped during an earlier probe.
+	removeCtDenyProbePins()
+	progs, maps, err := l.bpfSDKClient.LoadBpfFile(ctDenyBinary, ctDenyProbePinPrefix)
+	fds := map[int]struct{}{}
+	for _, p := range progs {
+		fds[p.Program.ProgFD] = struct{}{}
+	}
+	// Only the maps this load created: the global maps it references come
+	// from the SDK's cache and aren't returned here.
+	for _, m := range maps {
+		fds[int(m.MapFD)] = struct{}{}
+	}
+	for fd := range fds {
+		if fd > 0 {
+			closeFD(fd)
+		}
+	}
+	removeCtDenyProbePins()
+	if err != nil {
+		log().Errorf("%s failed to load, using the regular ingress binary: %v", ctDenyBinary, err)
+		sdkAPIErr.WithLabelValues("LoadBpfFile-CtDenyProbe").Inc()
+		return false
+	}
+	log().Infof("Denied TCP connections will have their kernel conntrack entries shortened, using %s", ctDenyBinary)
+	return true
+}
+
+// removeCtDenyProbePins removes the programs and maps pinned under
+// ctDenyProbePinPrefix.
+func removeCtDenyProbePins() {
+	for _, dir := range []string{utils.BPF_PROGRAMS_PIN_PATH_DIRECTORY, utils.BPF_MAPS_PIN_PATH_DIRECTORY} {
+		pins, _ := filepath.Glob(dir + ctDenyProbePinPrefix + "_*")
+		for _, pin := range pins {
+			if err := os.Remove(pin); err != nil && !os.IsNotExist(err) {
+				log().Errorf("Failed to remove probe pin %s: %v", pin, err)
+			}
+		}
+	}
+}
+
+// closeAfterFailedUnpin closes an FD the SDK left open because unpinning failed.
+// On success the SDK has already closed it and zeroed the field.
+func closeAfterFailedUnpin(fd int) {
+	if fd > 0 {
+		closeFD(fd)
+	}
+}
+
+// unloadBPFProgram unpins one direction's program and maps and removes them from
+// the context. It does not detach the TC filter.
+func (l *bpfClient) unloadBPFProgram(podIdentifier string, direction string) {
+	log().Infof("Unloading the %s program this attach loaded for podIdentifier %s", direction, podIdentifier)
+	sdkAPIErr.WithLabelValues("unloadBPFProgram").Inc()
+	if err := l.deleteBPFProgramAndMaps(podIdentifier, direction); err != nil {
+		sdkAPIErr.WithLabelValues("unloadBPFProgram-unpin").Inc()
+	}
+	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
+	if !ok {
+		return
+	}
+	peBPFContext := value.(BPFContext)
+	if direction == "ingress" {
+		peBPFContext.ingressPgmInfo = goelf.BpfData{}
+		l.ingressInMemoryMap.Delete(podIdentifier)
+		l.clusterPolicyIngressInMemoryMap.Delete(podIdentifier)
+	} else {
+		peBPFContext.egressPgmInfo = goelf.BpfData{}
+		l.egressInMemoryMap.Delete(podIdentifier)
+		l.clusterPolicyEgressInMemoryMap.Delete(podIdentifier)
+	}
+	if peBPFContext.ingressPgmInfo.Program.ProgFD == 0 && peBPFContext.egressPgmInfo.Program.ProgFD == 0 {
+		l.policyEndpointeBPFContext.Delete(podIdentifier)
+		return
+	}
+	l.policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
+}
+
+// Overridden in tests.
+var (
+	unpinProgram = (*goebpfprogs.BpfProgram).UnPinProg
+	unpinMap     = (*goebpfmaps.BpfMap).UnPinMap
+)
+
+// closeLoadedObjects closes the FDs of a discarded load. loadedMaps holds only
+// the maps the load created, not the global maps.
+func closeLoadedObjects(progInfo map[string]goelf.BpfData, loadedMaps map[string]goebpfmaps.BpfMap) {
+	for _, bpfData := range progInfo {
+		if bpfData.Program.ProgFD > 0 {
+			closeFD(bpfData.Program.ProgFD)
+		}
+	}
+	for _, bpfMap := range loadedMaps {
+		if bpfMap.MapFD > 0 {
+			closeFD(int(bpfMap.MapFD))
+		}
+	}
 }
 
 func (l *bpfClient) loadBPFProgram(fileName string, direction string,
@@ -1011,7 +1268,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	start := time.Now()
 	log().Info("Load the eBPF program")
 	// Load a new instance of the program
-	progInfo, _, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
+	progInfo, loadedMaps, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
 	if err != nil {
@@ -1026,17 +1283,20 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	bpfData, ok := progInfo[pinPath]
 	if !ok {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoPinPath").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
 		return nil, -1, fmt.Errorf("no program data found at pinPath %s for pod %s direction %s", pinPath, podIdentifier, direction)
 	}
 
 	progFD := bpfData.Program.ProgFD
 	if progFD == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-InvalidFD").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
 		return nil, -1, fmt.Errorf("program loaded with invalid FD 0 for pod %s direction %s", podIdentifier, direction)
 	}
 
 	if len(bpfData.Maps) == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoMaps").Inc()
+		closeLoadedObjects(progInfo, loadedMaps)
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
 	}
 

@@ -2,6 +2,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "ct_deny.h"
 
 #define BPF_F_NO_PREALLOC 1
 #define ETH_HLEN 14
@@ -425,6 +426,9 @@ int handle_ingress(struct __sk_buff *skb)
 			evt.verdict = 0;
 			evt.tier = ERROR_TIER;
 			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+#ifdef NPA_CT_SHORTEN_ON_DENY
+			shorten_denied_syn_v6(skb);
+#endif
 			return BPF_DROP;
 		}
 
@@ -451,6 +455,12 @@ int handle_ingress(struct __sk_buff *skb)
 				int ret = evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
 				if (ret == BPF_DROP) {
 					bpf_map_delete_elem(&aws_conntrack_map, &flow_key);
+#ifdef NPA_CT_SHORTEN_ON_DENY
+					// A SYN here, such as a retransmit of a flow the previous
+					// policy allowed, leaves the same unanswered entry as a new
+					// flow. Entries of established flows are left alone.
+					shorten_denied_syn_v6(skb);
+#endif
 					return BPF_DROP;
 				}
 				return BPF_OK;
@@ -475,10 +485,17 @@ int handle_ingress(struct __sk_buff *skb)
 		}
 
 		// If we reach here, it means it's a new flow or a non-matching response
-		return evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+		int verdict = evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+#ifdef NPA_CT_SHORTEN_ON_DENY
+		// A denied SYN leaves a kernel conntrack entry that is never answered.
+		if (verdict == BPF_DROP) {
+			shorten_denied_syn_v6(skb);
+		}
+#endif
+		return verdict;
 	}
 	return BPF_OK;
 }
 
-const volatile __u32 NPA_FILE_VERSION = 2;
+const volatile __u32 NPA_FILE_VERSION = 3;
 char _license[] SEC("license") = "GPL";

@@ -71,8 +71,8 @@ jobs:
     needs: [discover, build]
     if: github.repository == 'aws/aws-network-policy-agent'
     runs-on: ubuntu-latest
-    # Cluster create (~25m) + test binaries + two 15m suites + cleanup check.
-    timeout-minutes: 120
+    # Cluster create (~25m) + test binaries + three 15m suites + cleanup check.
+    timeout-minutes: 135
     strategy:
       fail-fast: false
       matrix:
