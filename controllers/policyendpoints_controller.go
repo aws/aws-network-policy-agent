@@ -221,11 +221,11 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 	// carries, so they are deliberately not added to failedCleanups -- that set feeds the
 	// departing PE's selector entry, and a pod that failed to PROGRAM must not be recorded
 	// there as one of its prior pods or the retry would treat it as needing cleanup.
-	_, updateErr := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods, podIdentifiers, false)
+	_, _, updateErr := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, targetPods, podIdentifiers, false)
 	if updateErr != nil {
 		updateErr = fmt.Errorf("update active pods for policyendpoint %s: %w", req.NamespacedName.Name, updateErr)
 	}
-	failedCleanups, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, podsToBeCleanedUp, podIdentifiers, true)
+	failedCleanups, _, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, req.NamespacedName.Name, podsToBeCleanedUp, podIdentifiers, true)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("clean up deselected pods for policyendpoint %s: %w", req.NamespacedName.Name, cleanupErr)
 	}
@@ -270,9 +270,10 @@ func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, r
 // the surviving rules and reprograms them, which is what drops the departing slice's
 // contribution while leaving the rest of the parent's policy in place.
 func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, policyEndpointName string,
-	targetPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, error) {
+	targetPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, int, error) {
 	var failed []npatypes.Pod
 	var err error
+	cleaned := 0
 	// 1. If the pods are already deleted, we move on.
 	// 2. If the pods have another policy or policies active against them, we update the maps to purge the entries
 	//    introduced by the current policy.
@@ -281,16 +282,20 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
 		log().Infof("Updating Pod: Name: %s Namespace: %s PodIdentifier: %s", targetPod.Name, targetPod.Namespace, podIdentifier)
 
-		cleanupErr := r.cleanupPod(ctx, targetPod, policyEndpointName, isDeleteFlow)
+		wrote, cleanupErr := r.cleanupPod(ctx, targetPod, policyEndpointName, isDeleteFlow)
 		if cleanupErr != nil {
 			failed = append(failed, targetPod)
 			err = errors.Join(err, fmt.Errorf("pod %s/%s: %w",
 				targetPod.Namespace, targetPod.Name, cleanupErr))
 			// we don't want to return an error right away but instead attempt to clean up all the pods
 			// in the list before returning
+			continue
+		}
+		if wrote {
+			cleaned++
 		}
 	}
-	return failed, err
+	return failed, cleaned, err
 }
 
 func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
@@ -314,7 +319,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	// Programming runs whether or not cleanup succeeded, so a failing cleanup does not hold
 	// back the other pods this policy selects. podIdentifiers has the pod identifiers of the
 	// targetPods from the derived PEs.
-	failedCleanups, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers, false)
+	failedCleanups, cleaned, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, policyEndpoint.Name, podsToBeCleanedUp, podIdentifiers, false)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("clean up deselected pods for policyendpoint %s: %w", policyEndpoint.Name, cleanupErr)
 	}
@@ -325,6 +330,8 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	r.commitPolicyEndpointState(resourceName, resourceNamespace, trackedPods, trackedPodIdentifiers, parentPEList)
 
 	// Program the podIdentifiers local to the node.
+	programmed := 0
+	skipped := 0
 	var programmingErr error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
@@ -351,23 +358,51 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 		}
 
 		// Setup/configure eBPF probes/maps for local pods
-		err = r.configureeBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
-		if err != nil {
-			// Record and continue so every other identifier is still programmed. The returned
-			// error requeues the request, so this pod is retried instead of left unprogrammed
-			// until the PE next changes.
+		result, err := r.configureeBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
+		switch {
+		case err != nil:
+			// Checked before the skip case: a skip travels in result, not in err, so a real
+			// failure here is never mistaken for one. Record and continue so every other
+			// identifier is still programmed. The returned error requeues the request, so this
+			// pod is retried instead of left unprogrammed until the PE next changes.
 			programmingErr = errors.Join(programmingErr, fmt.Errorf(
 				"configure eBPF probes for podIdentifier %s: %w", podIdentifier, err))
+		case result.programmed:
+			programmed++
+		case result.skipped > 0:
+			// Retrying cannot resolve this, so do not report it as a failure.
+			skipped += result.skipped
+			log().Warnf("Skipped eBPF programming for podIdentifier %s: %d pod(s) cannot attach yet",
+				podIdentifier, result.skipped)
+		default:
+			// No context on this node and nothing skipped, so this identifier had nothing to do.
+			log().Debugf("No eBPF programming needed for podIdentifier %s on this node", podIdentifier)
 		}
 		duration := msSince(start)
 		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
 	}
 
-	// Observed on the first pass where cleanup and programming both succeed. A failing pass
-	// leaves the trigger time unconsumed so the retry that finally lands the change records
+	// Three outcomes, because the trigger annotation has to be handled differently in each.
+	// A failing pass leaves it unconsumed so the retry that finally lands the change records
 	// it, retry delay included -- otherwise the histogram would drop exactly the slow
-	// recover-after-failure cases it most needs to show.
-	r.observePolicyProgrammingLatency(policyEndpoint, cleanupErr == nil && programmingErr == nil)
+	// recover-after-failure cases it most needs to show. A pass that wrote something records
+	// the sample. A pass with nothing to do on this node consumes the trigger without a
+	// sample: leaving it would let a later resync of the unchanged PE, or a sibling slice
+	// gaining a local pod, measure from the original change and report that staleness as
+	// programming latency. Cleanup writes count as work, so a cleanup-only pass that finally
+	// succeeds is still measured.
+	outcome := programmingNoWork
+	switch {
+	case cleanupErr != nil || programmingErr != nil:
+		outcome = programmingDeferred
+	case programmed > 0 || cleaned > 0:
+		outcome = programmingLanded
+	case skipped > 0:
+		// Deferred rather than consumed: these pods are local and a later pass can still
+		// attach and program them, and that latency is real. Consuming here would drop it.
+		outcome = programmingDeferred
+	}
+	r.observePolicyProgrammingLatency(policyEndpoint, outcome)
 
 	return errors.Join(cleanupErr, programmingErr)
 }
@@ -410,7 +445,22 @@ func (r *PolicyEndpointsReconciler) commitPolicyEndpointState(
 //
 // A pass that has not landed the change leaves the annotation unconsumed, so the
 // later pass that does land it reports the full time including any retry delay.
-func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, programmingSucceeded bool) {
+// policyProgrammingOutcome says what a reconcile pass did with the change its trigger
+// annotation refers to. A bool cannot express it, because consuming the trigger and recording
+// a sample are separate decisions: a pass with nothing to do on this node must consume without
+// measuring, or a later resync measures from a change that landed long ago.
+type policyProgrammingOutcome int
+
+const (
+	// programmingNoWork: the change does not apply to this node. Consume, no sample.
+	programmingNoWork policyProgrammingOutcome = iota
+	// programmingLanded: maps were written here. Consume and record the sample.
+	programmingLanded
+	// programmingDeferred: the pass failed. Neither, so the retry that lands it measures.
+	programmingDeferred
+)
+
+func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, outcome policyProgrammingOutcome) {
 	if pe.Annotations == nil {
 		return
 	}
@@ -430,7 +480,7 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	if prev, ok := r.lastObservedTriggerTimes.Load(peKey); ok && prev.(string) == triggerTimeStr {
 		return
 	}
-	if !programmingSucceeded {
+	if outcome == programmingDeferred {
 		// Left unconsumed on purpose: the pass that lands the change observes it.
 		log().Debugf("Deferring E2E policy programming latency for PE %s/%s: change has not landed yet", pe.Namespace, pe.Name)
 		return
@@ -439,6 +489,12 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	// clock-skew-suppressed observation must not be re-emitted (inflated) by a
 	// later resync of the same annotation.
 	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
+	if outcome == programmingNoWork {
+		// Consumed without measuring: nothing on this node implements this change, so any
+		// elapsed time here is the age of the annotation, not programming latency.
+		log().Debugf("No local work for PE %s/%s: consuming trigger without a latency sample", pe.Namespace, pe.Name)
+		return
+	}
 	latency := time.Since(triggerTime).Seconds()
 	if latency < 0 {
 		// Clock skew between NPC (control plane) and this node
@@ -449,26 +505,43 @@ func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8
 	log().Debugf("E2E policy programming latency: %.3fs for PE %s/%s", latency, pe.Namespace, pe.Name)
 }
 
+// probeConfigResult reports what configureeBPFProbes actually did. The caller needs the three
+// cases apart: maps written, nothing on this node to write, and pods that can never attach.
+// Returning only an error cannot express them, and treating "no error" as "programmed" counts
+// a pass that wrote nothing.
+type probeConfigResult struct {
+	// programmed is true when the identifier's maps were written on this pass.
+	programmed bool
+	// skipped is the number of pods whose probe attach cannot be retried into success.
+	skipped int
+}
+
 func (r *PolicyEndpointsReconciler) configureeBPFProbes(podIdentifier string,
-	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) error {
-	configureProbesErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier, targetPods)
+	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) (probeConfigResult, error) {
+	attached, configureProbesErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier, targetPods)
+	result := probeConfigResult{skipped: attached.skipped}
 
 	// AttacheBPFProbes skips pods already deleted from the node, so the PolicyEndpoint can
 	// still list a pod that has no programs here. There is nothing to program until a new
-	// pod attaches.
+	// pod attaches, so this returns without programmed set: counting it would consume the
+	// change's trigger time for work that never happened.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return configureProbesErr
+		return result, configureProbesErr
 	}
 
 	if err := r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED); err != nil {
-		return errors.Join(configureProbesErr, fmt.Errorf("map updates failed for podIdentifier %s: %w", podIdentifier, err))
+		return result, errors.Join(configureProbesErr, fmt.Errorf("map updates failed for podIdentifier %s: %w", podIdentifier, err))
 	}
-	return configureProbesErr
+	result.programmed = true
+	return result, configureProbesErr
 }
 
+// cleanupPod reconciles one pod's programming after its policy stopped selecting it. It
+// reports whether it wrote any map, so the caller can tell a cleanup that did real work from
+// one that found nothing on this node and count the former as programming.
 func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod npatypes.Pod,
-	policyEndpoint string, isDeleteFlow bool) error {
+	policyEndpoint string, isDeleteFlow bool) (bool, error) {
 
 	var err error
 	var ingressRules, egressRules []fwrp.EbpfFirewallRules
@@ -482,7 +555,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 	// and every write below needs it, so when it is gone there is nothing here to clean up.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return nil
+		return false, nil
 	}
 
 	// If the pod identifier is not in the PI→PE map, no policy tracks this pod anymore.
@@ -503,9 +576,9 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 			// requeues and retries the baseline restore. This matters because a pod with no
 			// active policies must land on its baseline state (DEFAULT_ALLOW, or DEFAULT_DENY
 			// in strict mode); leaving it unwritten could keep stale enforcement in place.
-			return fmt.Errorf("baseline restore failed for podIdentifier %s, requeueing for retry: %w", podIdentifier, err)
+			return false, fmt.Errorf("baseline restore failed for podIdentifier %s, requeueing for retry: %w", podIdentifier, err)
 		}
-		return nil
+		return true, nil
 	}
 
 	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
@@ -513,7 +586,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
 		policyEndpoint, isDeleteFlow)
 	if err != nil {
-		return fmt.Errorf("derive firewall rules for podIdentifier %s: %w", podIdentifier, err)
+		return false, fmt.Errorf("derive firewall rules for podIdentifier %s: %w", podIdentifier, err)
 	}
 
 	if len(ingressRules) == 0 && !isIngressIsolated {
@@ -532,7 +605,7 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 
 		log().Infof("No active policies. Updating pod_state map for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
 		if err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, state); err != nil {
-			return fmt.Errorf("apply baseline state for podIdentifier %s: %w", podIdentifier, err)
+			return false, fmt.Errorf("apply baseline state for podIdentifier %s: %w", podIdentifier, err)
 		}
 	} else {
 		// We've additional PolicyEndpoint resources configured against this pod
@@ -554,11 +627,12 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 		}
 
 		if err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED); err != nil {
-			return fmt.Errorf("apply remaining policies for podIdentifier %s: %w", podIdentifier, err)
+			return false, fmt.Errorf("apply remaining policies for podIdentifier %s: %w", podIdentifier, err)
 		}
 	}
 
-	return nil
+	// Both arms above write a map, so reaching here means cleanup did real work.
+	return true, nil
 }
 
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,

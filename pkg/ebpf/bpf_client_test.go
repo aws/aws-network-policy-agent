@@ -453,7 +453,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			podIdentifier:     "test-pod-skip",
 			numInterfaces:     0,
 			isMultiNICEnabled: true,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErr:           ErrProbeAttachSkipped,
 			wantTCAttachCalls: 0,
 		},
 		{
@@ -534,7 +534,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			}
 
 			_, gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces, false)
-			assert.Equal(t, tt.wantErr, gotError)
+			assert.ErrorIs(t, gotError, tt.wantErr)
 		})
 	}
 }
@@ -830,7 +830,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 			providedCount:     0,
 			isMultiNICEnabled: true,
 			wantCount:         0,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErr:           ErrProbeAttachSkipped,
 		},
 	}
 
@@ -847,7 +847,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 
 			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(testPod, "test-pod-id", tt.providedCount)
 			assert.Equal(t, tt.wantCount, gotCount)
-			assert.Equal(t, tt.wantErr, gotErr)
+			assert.ErrorIs(t, gotErr, tt.wantErr)
 		})
 	}
 }
