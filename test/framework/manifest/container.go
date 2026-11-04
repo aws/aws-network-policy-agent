@@ -16,6 +16,7 @@ type Container struct {
 	resources       v1.ResourceRequirements
 	imageRepository string
 	volumeMount     []v1.VolumeMount
+	readinessProbe  *v1.Probe
 }
 
 func NewBusyBoxContainerBuilder() *Container {
@@ -83,6 +84,11 @@ func (c *Container) AddVolumeMount(volumeMount v1.VolumeMount) *Container {
 	return c
 }
 
+func (c *Container) ReadinessProbe(probe *v1.Probe) *Container {
+	c.readinessProbe = probe
+	return c
+}
+
 func (w *Container) Build() v1.Container {
 	return v1.Container{
 		Name:            w.name,
@@ -93,5 +99,6 @@ func (w *Container) Build() v1.Container {
 		Ports:           w.containerPorts,
 		Resources:       w.resources,
 		VolumeMounts:    w.volumeMount,
+		ReadinessProbe:  w.readinessProbe,
 	}
 }

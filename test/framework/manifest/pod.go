@@ -18,6 +18,7 @@ type PodBuilder struct {
 	restartPolicy          v1.RestartPolicy
 	nodeName               string
 	volume                 []v1.Volume
+	hostNetwork            bool
 }
 
 func (p *PodBuilder) Build() *v1.Pod {
@@ -30,6 +31,7 @@ func (p *PodBuilder) Build() *v1.Pod {
 		},
 		Spec: v1.PodSpec{
 			NodeName:                      p.nodeName,
+			HostNetwork:                   p.hostNetwork,
 			ServiceAccountName:            p.serviceAccountName,
 			Containers:                    []v1.Container{p.container},
 			NodeSelector:                  map[string]string{"kubernetes.io/os": p.os},
@@ -106,5 +108,10 @@ func (p *PodBuilder) NodeName(nodeName string) *PodBuilder {
 
 func (p *PodBuilder) AddVolume(volume v1.Volume) *PodBuilder {
 	p.volume = append(p.volume, volume)
+	return p
+}
+
+func (p *PodBuilder) HostNetwork(hostNetwork bool) *PodBuilder {
+	p.hostNetwork = hostNetwork
 	return p
 }
