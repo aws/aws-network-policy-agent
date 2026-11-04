@@ -43,6 +43,11 @@ type MockBpfClient struct {
 	LastIngressRules []fwrp.EbpfFirewallRules
 	LastEgressRules  []fwrp.EbpfFirewallRules
 
+	// Captured args from the most recent UpdatePodStateEbpfMaps call, so tests can assert
+	// which baseline (DEFAULT_ALLOW vs DEFAULT_DENY) was programmed.
+	LastPodStateKey int
+	LastPodState    int
+
 	// Captured args from the most recent UpdateClusterPolicyEbpfMaps call, so tests can
 	// assert that the rules were actually cleared and not just that the call happened.
 	LastClusterPolicyIngressRules []fwrp.EbpfFirewallRules
@@ -63,6 +68,21 @@ type MockBpfClient struct {
 	// identifier's map writes fail every time while every other identifier succeeds. The
 	// call is logged in CallLog but its rules are not recorded.
 	UpdateClusterPolicyEbpfMapsErrFor map[string]error
+
+	// Per-identifier failures for UpdateEbpfMaps (the namespaced path), mirroring
+	// UpdateClusterPolicyEbpfMapsErrFor. Lets a test fail one identifier's namespaced map
+	// writes while every other identifier succeeds.
+	UpdateEbpfMapsErrFor map[string]error
+
+	// Per-pod failures for AttacheBPFProbes. Keyed by pod rather than by identifier,
+	// since GetPodIdentifier strips the last name segment: replicas of one workload share
+	// an identifier and its maps, so a test needs to fail a single replica's attach while
+	// its co-located siblings succeed.
+	AttacheBPFProbesErrFor map[types.NamespacedName]error
+
+	// Pods whose attach succeeded, so a test can assert the attach loop did not stop at
+	// the first failure.
+	AttachedPods map[types.NamespacedName]bool
 
 	// Per-identifier call records. The Last* fields above retain only the most recent
 	// call, which cannot distinguish outcomes when one reconcile programs several
@@ -92,6 +112,7 @@ type PodStateKey struct {
 func (m *MockBpfClient) Reset() {
 	m.CallLog = nil
 	m.LastAttachPodConfirmedLive = false
+	m.AttachedPods = nil
 	m.LastIngressRules = nil
 	m.LastEgressRules = nil
 	m.LastClusterPolicyIngressRules = nil
@@ -108,6 +129,7 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 		*dst = map[string][]fwrp.EbpfFirewallRules{}
 	}
 	(*dst)[podIdentifier] = rules
+
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
@@ -121,10 +143,17 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 	if m.DeletedPods[pod] {
 		return false, nil
 	}
+	if err := m.AttacheBPFProbesErrFor[pod]; err != nil {
+		return false, err
+	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.ForgetIdentifier(podIdentifier)
 	}
+	if m.AttachedPods == nil {
+		m.AttachedPods = map[types.NamespacedName]bool{}
+	}
+	m.AttachedPods[pod] = true
 	return m.AttachFirstPodInPodIdentifier, nil
 }
 
@@ -155,6 +184,9 @@ func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
 	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
 	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
+	if err := m.UpdateEbpfMapsErrFor[podIdentifier]; err != nil {
 		return err
 	}
 	if m.UpdateEbpfMapsErr != nil {
@@ -195,6 +227,7 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	}
 	m.recordPodState(podIdentifier, key, state)
 	return nil
+
 }
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
@@ -237,6 +270,13 @@ func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int)
 	k := PodStateKey{PodIdentifier: podIdentifier, MapKey: key}
 	m.PodStateByIdentifier[k] = state
 	m.podStateSeeded[k] = true
+	// LastPodState tracks the pod-state map write (POD_STATE_MAP_KEY) that carries the
+	// policy verdict. The cluster-policy seed (CLUSTER_POLICY_POD_STATE_MAP_KEY) is always
+	// DEFAULT_ALLOW and must not clobber the verdict the caller asserts on.
+	if key == POD_STATE_MAP_KEY {
+		m.LastPodStateKey = key
+		m.LastPodState = state
+	}
 }
 
 // contextErr fails a map write for an identifier whose probes are detached, as the real
