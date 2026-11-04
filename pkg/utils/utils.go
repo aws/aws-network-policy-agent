@@ -4,9 +4,9 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"unsafe"
 
@@ -44,7 +44,6 @@ var (
 	CATCH_ALL_PROTOCOL   corev1.Protocol = "ANY_IP_PROTOCOL"
 	DENY_ALL_PROTOCOL    corev1.Protocol = "RESERVED_IP_PROTOCOL_NUMBER"
 	DEFAULT_CLUSTER_NAME                 = "k8s-cluster"
-	ErrFileExists                        = "file exists"
 	ErrInvalidFilterList                 = "failed to get filter list"
 	ErrMissingFilter                     = "no active filter to detach"
 )
@@ -264,27 +263,41 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
+// Secondary interfaces try "/" first, then "." for CNI releases before
+// aws/amazon-vpc-cni-k8s#3924. The reverse pairing does not work: a CNI with #3924 and an
+// NPA without this change hashes only the dotted name, so the ADD fails and multi-NIC pods
+// cannot start. A CNI release with #3924 must point nodeAgent.image.tag at an NPA that has
+// this function.
 var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
-	var interfaceName string
 	var errors error
-
+	names := []string{podName}
 	if interfaceIndex > 0 {
-		podName = fmt.Sprintf("%s.%s", podName, strconv.Itoa(interfaceIndex))
+		names = []string{fmt.Sprintf("%s/%d", podName, interfaceIndex), fmt.Sprintf("%s.%d", podName, interfaceIndex)}
 	}
 
-	h := sha1.New()
-	h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, podName)))
+	for _, name := range names {
+		h := sha1.New()
+		h.Write([]byte(fmt.Sprintf("%s.%s", podNamespace, name)))
+		suffix := hex.EncodeToString(h.Sum(nil))[:11]
 
-	for _, prefix := range interfacePrefixes {
-		interfaceName = fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
-		if _, err := getHostLinkByName(interfaceName); err == nil {
-			return interfaceName, nil
-		} else {
-			errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
+		var found []string
+		for _, prefix := range interfacePrefixes {
+			interfaceName := fmt.Sprintf("%s%s", prefix, suffix)
+			if _, err := getHostLinkByName(interfaceName); err == nil {
+				found = append(found, interfaceName)
+			} else {
+				errors = multierror.Append(errors, fmt.Errorf("failed to find link %s: %w", interfaceName, err))
+			}
+		}
+		if len(found) == 1 {
+			return found[0], nil
+		}
+		if len(found) > 1 {
+			return "", fmt.Errorf("multiple host interfaces %v for pod %s/%s", found, podNamespace, podName)
 		}
 	}
 
-	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v hash %v error %v", interfacePrefixes, hex.EncodeToString(h.Sum(nil))[:11], errors)
+	log().Errorf("Not found any interface starting with prefixes and the hash. Prefixes searched %v pod %s/%s index %d error %v", interfacePrefixes, podNamespace, podName, interfaceIndex, errors)
 	return "", errors
 }
 
@@ -469,11 +482,12 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	return protocol
 }
 
-func IsFileExistsError(error string) bool {
-	if error == ErrFileExists {
-		return true
-	}
-	return false
+// IsFileExistsError reports whether err is EEXIST, as returned by netlink when a
+// tc filter or qdisc already exists. netlink appends the kernel's extended ack
+// message to the errno when error reporting is on, so compare the errno, not the
+// text.
+func IsFileExistsError(err error) bool {
+	return errors.Is(err, unix.EEXIST)
 }
 
 func IsInvalidFilterListError(error string) bool {

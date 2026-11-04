@@ -45,11 +45,11 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 	future := now.Add(1 * time.Hour).UTC().Format(time.RFC3339Nano)
 
 	type observeCall struct {
-		pe                   *policyendpoint.PolicyEndpoint
-		programmingSucceeded bool
+		pe      *policyendpoint.PolicyEndpoint
+		outcome policyProgrammingOutcome
 	}
 	obs := func(pe *policyendpoint.PolicyEndpoint) observeCall {
-		return observeCall{pe: pe, programmingSucceeded: true}
+		return observeCall{pe: pe, outcome: programmingLanded}
 	}
 
 	tests := []struct {
@@ -112,19 +112,30 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			observed: 0,
 		},
 		{
-			name: "programming failure suppresses observation AND consumes trigger time",
-			// a later resync of the same annotation must not emit an inflated value
+			name: "programming failure leaves trigger time unconsumed for the pass that lands it",
+			// The retry that finally programs the change reports the full time, retry delay
+			// included; dropping it would hide exactly the slow recover-after-failure cases.
 			calls: []observeCall{
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: true},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
 			},
-			observed: 0,
+			observed: 1,
+		},
+		{
+			name: "repeated failures observe once, on the pass that lands",
+			calls: []observeCall{
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
+			},
+			observed: 1,
 		},
 		{
 			name: "new annotation after programming failure is observed",
 			calls: []observeCall{
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), programmingSucceeded: false},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresher), programmingSucceeded: true},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
+				{pe: newPEWithTriggerTime("pe-1", "ns", fresher), outcome: programmingLanded},
 			},
 			observed: 1,
 		},
@@ -137,7 +148,7 @@ func TestObservePolicyProgrammingLatency(t *testing.T) {
 			}
 			before := histSampleCount(t, policyProgrammingLatency)
 			for _, c := range tt.calls {
-				r.observePolicyProgrammingLatency(c.pe, c.programmingSucceeded)
+				r.observePolicyProgrammingLatency(c.pe, c.outcome)
 			}
 			assert.Equal(t, tt.observed, histSampleCount(t, policyProgrammingLatency)-before)
 		})
@@ -156,8 +167,8 @@ func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
 	pe := newPEWithTriggerTime("pe-1", "ns", fresh)
 
 	before := histSampleCount(t, policyProgrammingLatency)
-	r.observePolicyProgrammingLatency(pe, true)
-	r.observePolicyProgrammingLatency(pe, true) // duplicate, skipped
+	r.observePolicyProgrammingLatency(pe, programmingLanded)
+	r.observePolicyProgrammingLatency(pe, programmingLanded) // duplicate, skipped
 	assert.Equal(t, uint64(1), histSampleCount(t, policyProgrammingLatency)-before)
 
 	// the real cleanup path must delete the tracking entry
@@ -167,7 +178,7 @@ func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
 	assert.NoError(t, err)
 
 	// a recreated PE with a fresh annotation is observed again
-	r.observePolicyProgrammingLatency(pe, true)
+	r.observePolicyProgrammingLatency(pe, programmingLanded)
 	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before)
 }
 
@@ -186,16 +197,17 @@ func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
 	}
 
 	before := histSampleCount(t, clusterPolicyProgrammingLatency)
-	r.observeClusterPolicyProgrammingLatency(cpe, true)
-	r.observeClusterPolicyProgrammingLatency(cpe, true) // duplicate, skipped
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded) // duplicate, skipped
 	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = fresher
-	r.observeClusterPolicyProgrammingLatency(cpe, false) // programming failed: consumed, not observed
-	r.observeClusterPolicyProgrammingLatency(cpe, true)  // same annotation: stays consumed
-	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingDeferred) // not landed yet: left unconsumed
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)   // the pass that lands it observes
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)   // now consumed, so not re-observed
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest
-	r.observeClusterPolicyProgrammingLatency(cpe, true) // changed annotation, observed
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded) // changed annotation, observed
+	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
 }

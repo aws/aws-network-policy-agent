@@ -56,6 +56,8 @@ COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v4ingress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v4egress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6ingress.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6egress.bpf.o .
+COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v4ingress.ctdeny.bpf.o .
+COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/tc.v6ingress.ctdeny.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/v4events.bpf.o .
 COPY --from=bpfbuilder /bpfbuilder/pkg/ebpf/c/v6events.bpf.o .
 

@@ -358,6 +358,8 @@ type peFixture struct {
 	// namespace is still resolvable after deleteSlice removes the object.
 	store           map[string]policyk8sawsv1.PolicyEndpoint
 	sliceNamespaces map[string]string
+	// getErr makes Get fail for the named PEs, modelling an API error while deriving rules.
+	getErr map[string]error
 }
 
 func newPEFixture(t *testing.T) *peFixture {
@@ -395,6 +397,9 @@ func newPEFixture(t *testing.T) *peFixture {
 	mockClient.EXPECT().
 		Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpoint{}), gomock.Any()).
 		DoAndReturn(func(_ context.Context, key types.NamespacedName, obj *policyk8sawsv1.PolicyEndpoint, _ ...client.GetOption) error {
+			if err := fx.getErr[key.Name]; err != nil {
+				return err
+			}
 			pe, ok := fx.store[key.Name]
 			if !ok || pe.Namespace != key.Namespace {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, key.Name)
