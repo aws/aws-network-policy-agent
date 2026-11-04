@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 type Container struct {
@@ -37,6 +38,22 @@ func NewAgnHostContainerBuilder() *Container {
 		command:         []string{"/bin/sh", "-c"},
 		imagePullPolicy: v1.PullIfNotPresent,
 	}
+}
+
+// NewNetExecContainerBuilder serves HTTP on port, with a readiness probe that fails within
+// about 3s once kubelet can't reach it.
+func NewNetExecContainerBuilder(port int) *Container {
+	c := NewAgnHostContainerBuilder()
+	c.args = []string{fmt.Sprintf("/agnhost netexec --http-port=%d --udp-port=-1", port)}
+	c.readinessProbe = &v1.Probe{
+		ProbeHandler: v1.ProbeHandler{
+			HTTPGet: &v1.HTTPGetAction{Path: "/", Port: intstr.FromInt(port)},
+		},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: 3,
+	}
+	return c
 }
 
 func (c *Container) Name(name string) *Container {
@@ -81,11 +98,6 @@ func (c *Container) ImageRepository(imageRepository string) *Container {
 
 func (c *Container) AddVolumeMount(volumeMount v1.VolumeMount) *Container {
 	c.volumeMount = append(c.volumeMount, volumeMount)
-	return c
-}
-
-func (c *Container) ReadinessProbe(probe *v1.Probe) *Container {
-	c.readinessProbe = probe
 	return c
 }
 

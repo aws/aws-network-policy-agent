@@ -1,141 +1,82 @@
 package policy
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Traffic from a pod's own node must bypass network policy so kubelet probes keep working (#56).
 // Pod names keep distinct prefixes before the last "-" so they don't share eBPF maps.
 var _ = Describe("Host Traffic Test Cases", Ordered, func() {
-	var (
-		serverPod, newServerPod, clientPod *v1.Pod
-		proberA, proberB                   *v1.Pod
-		nodeA, nodeB                       string
-		policy                             *network.NetworkPolicy
-		serverPort                         = 8080
-		targetLabel                        = "hosttraffic-target"
+	const (
+		serverPort  = 8080
+		targetLabel = "hosttraffic-target"
 	)
 
-	buildServerPod := func(name, nodeName string) *v1.Pod {
-		ctnr := manifest.NewAgnHostContainerBuilder().
-			ImageRepository(fw.Options.TestImageRegistry).
-			Args([]string{fmt.Sprintf("/agnhost netexec --http-port=%d", serverPort)}).
-			ReadinessProbe(&v1.Probe{
-				ProbeHandler: v1.ProbeHandler{
-					HTTPGet: &v1.HTTPGetAction{Path: "/", Port: intstr.FromInt(serverPort)},
-				},
-				PeriodSeconds:    1,
-				TimeoutSeconds:   1,
-				FailureThreshold: 3,
-			}).
-			Build()
-		return manifest.NewDefaultPodBuilder().
-			Name(name).
-			Namespace(namespace).
-			AddLabel("app", targetLabel).
-			NodeName(nodeName).
-			TerminationGracePeriod(1).
-			Container(ctnr).
-			Build()
-	}
+	var (
+		nodeA, nodeB                       string
+		serverPod, newServerPod, clientPod *v1.Pod
+		proberA, proberB                   *v1.Pod
+		policy                             *network.NetworkPolicy
+	)
 
-	buildIdlePod := func(name, label string) *manifest.PodBuilder {
-		ctnr := manifest.NewBusyBoxContainerBuilder().
-			ImageRepository(fw.Options.TestImageRegistry).
-			Command([]string{"sleep", "1000000"}).
-			Build()
+	pod := func(name, label, nodeName string, ctnr *manifest.Container) *manifest.PodBuilder {
 		return manifest.NewDefaultPodBuilder().
 			Name(name).
 			Namespace(namespace).
 			AddLabel("app", label).
+			NodeName(nodeName).
 			TerminationGracePeriod(1).
-			Container(ctnr)
+			Container(ctnr.ImageRepository(fw.Options.TestImageRegistry).Build())
 	}
 
-	// Host probers are selected too; a selected hostNetwork pod must not break enforcement for the rest.
-	buildHostProber := func(name, nodeName string) *v1.Pod {
-		return buildIdlePod(name, targetLabel).HostNetwork(true).NodeName(nodeName).Build()
-	}
-
-	// Exec through the apiserver fails transiently; retry so Consistently only sees verdicts.
-	tcpProbe := func(prober, target *v1.Pod) func() (string, error) {
-		return func() (string, error) {
-			var out string
-			var err error
-			for attempt := 0; attempt < 3; attempt++ {
-				if out, err = fw.PodManager.TCPProbe(namespace, prober.Name, target.Status.PodIP, serverPort); err == nil {
-					return out, nil
-				}
-				time.Sleep(utils.PollIntervalShort)
-			}
-			return "", err
-		}
-	}
-
-	podReady := func(pod *v1.Pod) func() (bool, error) {
-		return func() (bool, error) {
-			current := &v1.Pod{}
-			if err := fw.K8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current); err != nil {
-				return false, err
-			}
-			for _, c := range current.Status.Conditions {
-				if c.Type == v1.PodReady {
-					return c.Status == v1.ConditionTrue, nil
-				}
-			}
-			return false, nil
-		}
-	}
-
-	createPod := func(pod *v1.Pod) *v1.Pod {
-		created, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, pod, 2*time.Minute)
-		Expect(err).ToNot(HaveOccurred(), "pod %s did not become ready", pod.Name)
+	createPod := func(b *manifest.PodBuilder) *v1.Pod {
+		created, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, b.Build(), 2*time.Minute)
+		Expect(err).ToNot(HaveOccurred())
 		return created
 	}
 
-	BeforeAll(func() {
-		// NodeName bypasses the scheduler, so skip nodes the agent does not run on or that
-		// would evict the pods: non-Linux, Fargate, cordoned, NoExecute-tainted, not ready.
-		nodes := &v1.NodeList{}
-		Expect(fw.K8sClient.List(ctx, nodes, client.MatchingLabels{"kubernetes.io/os": "linux"})).To(Succeed())
-		var ready []string
-		for _, n := range nodes.Items {
-			if n.Spec.Unschedulable || n.Labels["eks.amazonaws.com/compute-type"] == "fargate" {
-				continue
-			}
-			if lo.ContainsBy(n.Spec.Taints, func(t v1.Taint) bool { return t.Effect == v1.TaintEffectNoExecute }) {
-				continue
-			}
-			if lo.ContainsBy(n.Status.Conditions, func(c v1.NodeCondition) bool {
-				return c.Type == v1.NodeReady && c.Status == v1.ConditionTrue
-			}) {
-				ready = append(ready, n.Name)
-			}
+	server := func(name, nodeName string) *v1.Pod {
+		return createPod(pod(name, targetLabel, nodeName, manifest.NewNetExecContainerBuilder(serverPort)))
+	}
+
+	// Host probers are selected too; a selected hostNetwork pod must not break enforcement for the rest.
+	hostProber := func(name, nodeName string) *v1.Pod {
+		return createPod(pod(name, targetLabel, nodeName, manifest.NewBusyBoxContainerBuilder()).HostNetwork(true))
+	}
+
+	probe := func(from, to *v1.Pod) func() (string, error) {
+		return func() (string, error) {
+			return fw.PodManager.TCPProbe(namespace, from.Name, to.Status.PodIP, serverPort)
 		}
-		if len(ready) < 2 {
+	}
+
+	ready := func(p *v1.Pod) func() (bool, error) {
+		return func() (bool, error) { return fw.PodManager.IsPodReady(ctx, p) }
+	}
+
+	BeforeAll(func() {
+		nodes, err := utils.SchedulableNodes(ctx, fw.K8sClient)
+		Expect(err).ToNot(HaveOccurred())
+		if len(nodes) < 2 {
 			Skip("needs at least two ready worker nodes")
 		}
-		nodeA, nodeB = ready[0], ready[1]
+		nodeA, nodeB = nodes[0], nodes[1]
 
-		serverPod = createPod(buildServerPod("hosttraffic-server-0", nodeA))
-		clientPod = createPod(buildIdlePod("hosttraffic-client", "hosttraffic-client").Build())
-		proberA = createPod(buildHostProber("hosttraffic-nodea-prober", nodeA))
-		proberB = createPod(buildHostProber("hosttraffic-nodeb-prober", nodeB))
+		serverPod = server("hosttraffic-server-0", nodeA)
+		clientPod = createPod(pod("hosttraffic-client", "hosttraffic-client", "", manifest.NewBusyBoxContainerBuilder()))
+		proberA = hostProber("hosttraffic-nodea-prober", nodeA)
+		proberB = hostProber("hosttraffic-nodeb-prober", nodeB)
 
-		for _, prober := range []*v1.Pod{clientPod, proberA, proberB} {
-			Eventually(tcpProbe(prober, serverPod), utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
-				"%s cannot reach the server before the policy", prober.Name)
+		for _, from := range []*v1.Pod{clientPod, proberA, proberB} {
+			Eventually(probe(from, serverPod), utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("OPEN"),
+				"%s cannot reach the server before the policy", from.Name)
 		}
 
 		policy = manifest.NewNetworkPolicyBuilder().
@@ -148,27 +89,27 @@ var _ = Describe("Host Traffic Test Cases", Ordered, func() {
 	})
 
 	It("should keep a running pod ready and reachable only from its own node under deny-all", func() {
-		Eventually(tcpProbe(clientPod, serverPod), utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
+		Eventually(probe(clientPod, serverPod), utils.EnforcementTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
 			"deny-all was not enforced on the server pod")
-		Eventually(tcpProbe(proberB, serverPod), utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
+		Eventually(probe(proberB, serverPod), utils.ProbeTimeout, utils.ProbeInterval).Should(Equal("CLOSE"),
 			"traffic from another node was not denied")
 
-		Consistently(podReady(serverPod), utils.StabilityWindow, time.Second).Should(BeTrue(),
+		Consistently(ready(serverPod), utils.StabilityWindow, time.Second).Should(BeTrue(),
 			"kubelet readiness probe was blocked")
-		Consistently(tcpProbe(proberA, serverPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
+		Consistently(probe(proberA, serverPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
 			"traffic from the pod's own node was blocked")
 	})
 
 	It("should let a new replica on another node become ready under deny-all", func() {
-		newServerPod = createPod(buildServerPod("hosttraffic-server-1", nodeB))
+		newServerPod = server("hosttraffic-server-1", nodeB)
 
-		Consistently(tcpProbe(clientPod, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
+		Consistently(probe(clientPod, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
 			"deny-all was not enforced on the new replica")
-		Consistently(tcpProbe(proberA, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
+		Consistently(probe(proberA, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("CLOSE"),
 			"traffic from another node was not denied")
-		Consistently(podReady(newServerPod), utils.StabilityWindow, time.Second).Should(BeTrue(),
+		Consistently(ready(newServerPod), utils.StabilityWindow, time.Second).Should(BeTrue(),
 			"kubelet readiness probe was blocked")
-		Consistently(tcpProbe(proberB, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
+		Consistently(probe(proberB, newServerPod), utils.StabilityWindow, utils.ProbeInterval).Should(Equal("OPEN"),
 			"traffic from the pod's own node was blocked")
 	})
 
@@ -176,9 +117,9 @@ var _ = Describe("Host Traffic Test Cases", Ordered, func() {
 		if policy != nil {
 			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, policy)
 		}
-		for _, pod := range []*v1.Pod{newServerPod, proberB, proberA, clientPod, serverPod} {
-			if pod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, pod)
+		for _, p := range []*v1.Pod{newServerPod, proberB, proberA, clientPod, serverPod} {
+			if p != nil {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, p)
 			}
 		}
 	})

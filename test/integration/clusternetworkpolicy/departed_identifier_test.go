@@ -6,13 +6,12 @@ import (
 
 	policyk8sawsv1alpha1 "github.com/aws/amazon-network-policy-controller-k8s/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // A workload's last pod leaves a node while the workload keeps running elsewhere, and a
@@ -130,24 +129,8 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 
 	BeforeAll(func() {
 		By("Picking two schedulable worker nodes", func() {
-			// NodeName bypasses the scheduler, so skip nodes the agent does not run on or that
-			// would evict the pods: non-Linux, Fargate, cordoned, NoExecute-tainted, not ready.
-			nodes := &v1.NodeList{}
-			Expect(fw.K8sClient.List(ctx, nodes, client.MatchingLabels{"kubernetes.io/os": "linux"})).To(Succeed())
-			var ready []string
-			for _, n := range nodes.Items {
-				if n.Spec.Unschedulable || n.Labels["eks.amazonaws.com/compute-type"] == "fargate" {
-					continue
-				}
-				if lo.ContainsBy(n.Spec.Taints, func(t v1.Taint) bool { return t.Effect == v1.TaintEffectNoExecute }) {
-					continue
-				}
-				if lo.ContainsBy(n.Status.Conditions, func(c v1.NodeCondition) bool {
-					return c.Type == v1.NodeReady && c.Status == v1.ConditionTrue
-				}) {
-					ready = append(ready, n.Name)
-				}
-			}
+			ready, err := utils.SchedulableNodes(ctx, fw.K8sClient)
+			Expect(err).ToNot(HaveOccurred())
 			if len(ready) < 2 {
 				Skip("needs at least two ready worker nodes")
 			}
