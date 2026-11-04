@@ -1304,7 +1304,10 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		fx.reconcileAll()
 
 		// The CPE is still listed while its deletion is in progress.
+		fx.markDeleting("cnp-1-aaaaa")
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+		fx.assertClusterPolicyRulesCleared(stuck)
+		fx.assertClusterPolicyRulesCleared(resident)
 
 		fx.deleteSlice("cnp-1-aaaaa")
 		fx.reset()
@@ -1323,6 +1326,7 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		fx.reconcileAll()
 
 		// The CPE is still listed while its deletion is in progress, and an update fails.
+		fx.markDeleting("cnp-1-aaaaa")
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
 		require.ErrorIs(t, fx.reconcileDeleted("cnp-1-aaaaa"), writeFailed)
 
@@ -1497,18 +1501,9 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 			"a late delete event for a replaced slice must not clear the Deny rule")
 	})
 
-	// Accepted residual, mirroring the namespaced case. The purge prunes by EXACT CPE name, never
-	// parent-wide -- for cluster policies an over-delete drops Deny rules, i.e. opens traffic. The
-	// cost is this case: a re-slice that simultaneously deselects an identifier, observed only through
-	// the surviving slice's reconcile, retains the departed slice's name.
-	//
-	// Inert rather than harmful: deriveClusterPolicyIngressAndEgressFirewallRules does a Get
-	// per tracked name and skips NotFound, so a name whose object is gone contributes no
-	// rules. Pinned here so the trade-off stays visible.
-	t.Run("a re-slice that also deselects an identifier retains the departed slice name", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
+	t.Run("a re-slice that also deselects an identifier reclaims the departed slice name", func(t *testing.T) {
 		fx := newCPEFixture(t)
-		gone, kept := identifierOf("gone-aaa"), identifierOf("kept-aaa")
+		gone := identifierOf("gone-aaa")
 		rules := []ruleRef{deny("192.168.90.1/32")}
 
 		fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
@@ -1522,11 +1517,7 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 			ingress: rules})
 		fx.reconcileAll()
 
-		assert.Equal(t, []string{"cnp-1-bbbbb"}, fx.identifierSlices(kept),
-			"the still-selected identifier tracks only the current slice")
-		assert.Equal(t, []string{"cnp-1-aaaaa"}, fx.identifierSlices(gone),
-			"accepted residual: exact-name pruning cannot reach a name outside "+
-				"parentCPEList + resourceName")
+		fx.assertIdentifierAbsent(gone)
 	})
 
 	t.Run("the departed slice's own delete event reclaims the retained name", func(t *testing.T) {

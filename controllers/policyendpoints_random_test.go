@@ -270,6 +270,7 @@ func runRandomizedPolicy(t *testing.T, seed int64) {
 			if !st[s].present {
 				continue
 			}
+			fx.markDeleting(apiName(s))
 			_ = reconcile("D:" + apiName(s))
 			st[s].present = false
 			logf("present %s=false after deletion in progress (%s)", s, apiName(s))

@@ -17,8 +17,8 @@ import (
 )
 
 // A slice name moves from alpha to beta when NPC deletes alpha's slice and creates one for beta
-// with the same truncated GenerateName, and the agent sees both as one update. The handler then
-// queues (name, alpha) and (name, beta); these tests drive those requests in every order.
+// with the same truncated GenerateName. The handler queues (name, alpha) and (name, beta); these
+// tests drive those requests in every order.
 
 func drain(q workqueue.TypedRateLimitingInterface[EndpointRequest]) []EndpointRequest {
 	var out []EndpointRequest
@@ -359,6 +359,39 @@ func TestClusterPolicyEndpointNameReuse_AnyOrder(t *testing.T) {
 		ingress, _, err := s.fx.r.DeriveClusterPolicyFireWallRulesPerPodIdentifier(context.TODO(), identifierOf("z-aaa"))
 		require.NoError(t, err)
 		assert.Equal(t, []string{"Deny 192.168.90.4/32"}, actionCIDRsOf(ingress))
+	})
+
+	t.Run("the old parent's cleanup does not program the new parent", func(t *testing.T) {
+		s := newCPEReuse(t)
+		require.NoError(t, s.fx.reconcileUnder(s.x, reuseAlpha))
+		assert.NotContains(t, s.fx.bpf.ClusterPolicyIngressByIdentifier, identifierOf("new-aaa"))
+	})
+
+	t.Run("repeating either request after the move changes nothing", func(t *testing.T) {
+		s := newCPEReuse(t)
+		require.NoError(t, s.fx.reconcileUnder(s.x, reuseAlpha))
+		require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
+		ingress := maps.Clone(s.fx.bpf.ClusterPolicyIngressByIdentifier)
+		for range 2 {
+			require.NoError(t, s.fx.reconcileUnder(s.x, reuseAlpha))
+			require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
+		}
+		assert.Equal(t, ingress, s.fx.bpf.ClusterPolicyIngressByIdentifier)
+		s.assertMoved(t)
+	})
+}
+
+func TestClusterPolicyEndpointReconcile_RoutesByRequestParent(t *testing.T) {
+	x := generatedSliceName(reuseAlpha, "aaaaa")
+	fx := newCPEFixture(t)
+	fx.setSlices(sliceSpec{name: x, parent: reuseAlpha, pods: []podRef{localPod("old-aaa", "10.1.1.1")}, ingress: []ruleRef{deny("192.168.90.1/32")}})
+	fx.reconcileAll()
+
+	t.Run("a request for a parent that never owned the slice is a no-op", func(t *testing.T) {
+		fx.reset()
+		require.NoError(t, fx.reconcileUnder(x, "unrelated"))
+		assert.Empty(t, fx.bpf.CallLog)
+		assert.Equal(t, refsOf(reuseAlpha, x), fx.identifierRefs(identifierOf("old-aaa")))
 	})
 }
 

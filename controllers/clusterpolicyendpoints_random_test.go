@@ -18,8 +18,9 @@ import (
 // Randomized model check of the cluster policy reconciler. Each seed runs a random sequence
 // of slice changes, slice names reused under another parent, map-write and API failures, pods
 // leaving the node and duplicate events, reconciling the (slice, parent) requests the event
-// handler would queue and retrying the ones that errored, as the workqueue does. Once failures stop the queue must drain, and every identifier that still has
-// programs on the node must hold exactly the rules of the parents that select it.
+// handler would queue and retrying the ones that errored, as the workqueue does. Once failures
+// stop the queue must drain, and every identifier that still has programs on the node must hold
+// exactly the rules of the parents that select it.
 //
 // CPE_RANDOM_SEEDS and CPE_RANDOM_START widen or move the seed range for deeper runs.
 func TestClusterPolicySlices_Randomized(t *testing.T) {
@@ -329,8 +330,7 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 			n := names[rng.Intn(len(names))]
 			_ = reconcile(cpeRequest(n, fx.store[n].Spec.PolicyRef.Name))
 		case op == 14:
-			// NPC deletes one parent's slice and creates another parent's under the same
-			// truncated GenerateName; the agent sees one update that changes the parent.
+			// NPC deletes one parent's slice and creates another parent's under the same name
 			from, to := slices[rng.Intn(len(slices))], slices[rng.Intn(len(slices))]
 			if !st[from].present || st[to].present || parentOf(from) == parentOf(to) {
 				continue

@@ -24,7 +24,7 @@ type EndpointRequest struct {
 }
 
 // endpointEventHandler enqueues a slice under the parent each event carries. An update that
-// changes the parent, such as a delete and recreate seen as one update, enqueues both parents.
+// changes the parent, such as a delete and recreate folded together by a relist, enqueues both.
 func endpointEventHandler[T client.Object](parentOf func(T) string) handler.TypedEventHandler[T, EndpointRequest] {
 	enqueue := func(q workqueue.TypedRateLimitingInterface[EndpointRequest], obj T) {
 		q.Add(EndpointRequest{Endpoint: client.ObjectKeyFromObject(obj), Parent: parentOf(obj)})

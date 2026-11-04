@@ -30,11 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// These tests run the controllers, event handler included, against a real API server so a slice
-// deleted and recreated under another policy reaches the agent as one update, as it does when the
-// agent falls behind. A gate holds the single worker inside a reconcile while the test changes
-// slices, then releases it once the cache holds the changes. The update must queue the old and
-// new parents separately and the two reconciles must leave eBPF correct in either order.
+// These tests run the controllers against a real API server. Delete-and-recreate tests hold the
+// worker so both parents are queued before either runs; they arrive as a delete and a create. The
+// in-place parent change tests send a real update, which is what exercises UpdateFunc.
 
 const (
 	envtestNamespace = "np-target"
@@ -68,6 +66,10 @@ func minimalCRD(plural, kind string, scope apiextensionsv1.ResourceScope) *apiex
 func startAPIServer(t *testing.T) (*rest.Config, client.Client, *runtime.Scheme) {
 	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		// CI must run these: a skip there hides a broken setup-envtest behind a green build
+		if os.Getenv("CI") != "" {
+			t.Fatal("KUBEBUILDER_ASSETS not set in CI; make test must provide envtest assets")
+		}
 		t.Skip("KUBEBUILDER_ASSETS not set; run with make test")
 	}
 	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{
@@ -129,9 +131,12 @@ func (g *gatedReconciler) log() []reconcileResult {
 }
 
 // succeeded reports whether req's latest reconcile succeeded
-func (g *gatedReconciler) succeeded(req EndpointRequest) bool {
+func (g *gatedReconciler) succeeded(req EndpointRequest) bool { return g.succeededSince(0, req) }
+
+// succeededSince reports whether req's latest reconcile at or after log index n succeeded
+func (g *gatedReconciler) succeededSince(n int, req EndpointRequest) bool {
 	log := g.log()
-	for i := len(log) - 1; i >= 0; i-- {
+	for i := len(log) - 1; i >= n; i-- {
 		if log[i].req == req {
 			return log[i].err == nil
 		}
@@ -267,7 +272,7 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		}, before)
 		return run, direct, r
 	}
-	// moveToBeta reuses x under beta while the worker is held, so the agent sees one update
+	// moveToBeta reuses x under beta while the worker is held, so both parents are queued before either runs
 	moveToBeta := func(t *testing.T, run *agentRun, direct client.Client) {
 		run.holdWorker(direct, gate())
 		require.NoError(t, direct.Delete(context.Background(), envtestPE(x, reuseAlpha, "", "", "")))
@@ -290,7 +295,7 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		assert.False(t, tracked, "the old parent's snapshot must be dropped")
 	}
 
-	t.Run("delete and recreate seen as one update reconciles both parents", func(t *testing.T) {
+	t.Run("delete and recreate under another parent while the worker is busy reconciles both parents", func(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
 		run, direct, r := start(t, bpf, nil)
 		require.NoError(t, direct.Create(context.Background(), envtestPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
@@ -298,6 +303,25 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 
 		moveToBeta(t, run, direct)
 		eventually(t, func() bool { return run.gate.succeeded(alphaReq) && run.gate.succeeded(betaReq) }, "both parents reconciled")
+		run.stop()
+		assertMoved(t, bpf, r)
+	})
+
+	t.Run("an update that changes the parent reconciles both parents", func(t *testing.T) {
+		bpf := &ebpf.MockBpfClient{}
+		run, direct, r := start(t, bpf, nil)
+		require.NoError(t, direct.Create(context.Background(), envtestPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
+		eventually(t, func() bool { return run.gate.succeeded(alphaReq) }, "alpha programmed")
+		n := len(run.gate.log())
+
+		// The same object moves to beta, so the informer delivers an update carrying both parents
+		pe := &policyk8sawsv1.PolicyEndpoint{}
+		require.NoError(t, direct.Get(context.Background(), key, pe))
+		moved := envtestPE(x, reuseBeta, "new-aaa", "192.168.90.2/32", "10.1.1.2")
+		pe.Spec = moved.Spec
+		require.NoError(t, direct.Update(context.Background(), pe))
+		eventually(t, func() bool { return run.gate.succeededSince(n, alphaReq) && run.gate.succeededSince(n, betaReq) },
+			"both parents reconciled after the update")
 		run.stop()
 		assertMoved(t, bpf, r)
 	})
@@ -381,7 +405,7 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 	sibling := generatedSliceName(reuseBeta, "bbbbb")
 	sibPod := utils.GetPodIdentifier("sib-aaa", envtestNamespace)
 
-	t.Run("delete and recreate seen as one update reconciles both parents", func(t *testing.T) {
+	t.Run("delete and recreate under another parent while the worker is busy reconciles both parents", func(t *testing.T) {
 		cfg, direct, scheme := startAPIServer(t)
 		bpf := &ebpf.MockBpfClient{}
 		var r *ClusterPolicyEndpointsReconciler
@@ -406,6 +430,35 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		for _, id := range []string{newPod, sibPod} {
 			assert.ElementsMatch(t, []string{"Deny 192.168.90.2/32", "Deny 192.168.90.3/32"}, actionCIDRsOf(bpf.ClusterPolicyIngressByIdentifier[id]), id)
 		}
+		_, tracked := r.ClusterPolicyEndpointSelectorMap.Load(alphaReq)
+		assert.False(t, tracked, "nothing may stay recorded under the old parent")
+		_, tracked = r.clusterNetworkPolicyToPodIdentifierMap.Load(reuseAlpha)
+		assert.False(t, tracked, "the old parent's snapshot must be dropped")
+	})
+	t.Run("an update that changes the parent reconciles both parents", func(t *testing.T) {
+		cfg, direct, scheme := startAPIServer(t)
+		bpf := &ebpf.MockBpfClient{}
+		var r *ClusterPolicyEndpointsReconciler
+		run := startAgent(t, cfg, scheme, setupCPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
+			r = NewClusterPolicyEndpointsReconciler(c, fixtureNodeIP, bpf)
+			return r
+		}, nil)
+		require.NoError(t, direct.Create(context.Background(), envtestCPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
+		eventually(t, func() bool { return run.gate.succeeded(alphaReq) }, "alpha programmed")
+		n := len(run.gate.log())
+
+		// The same object moves to beta, so the informer delivers an update carrying both parents
+		cpe := &policyk8sawsv1.ClusterPolicyEndpoint{}
+		require.NoError(t, direct.Get(context.Background(), types.NamespacedName{Name: x}, cpe))
+		cpe.Spec = envtestCPE(x, reuseBeta, "new-aaa", "192.168.90.2/32", "10.1.1.2").Spec
+		require.NoError(t, direct.Update(context.Background(), cpe))
+		eventually(t, func() bool { return run.gate.succeededSince(n, alphaReq) && run.gate.succeededSince(n, betaReq) },
+			"both parents reconciled after the update")
+		run.stop()
+
+		assert.Empty(t, bpf.ClusterPolicyIngressByIdentifier[oldPod], "the old pod's Deny must be cleared")
+		assert.Equal(t, ebpf.DEFAULT_ALLOW, bpf.PodStateByIdentifier[ebpf.PodStateKey{PodIdentifier: oldPod, MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}])
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, actionCIDRsOf(bpf.ClusterPolicyIngressByIdentifier[newPod]))
 		_, tracked := r.ClusterPolicyEndpointSelectorMap.Load(alphaReq)
 		assert.False(t, tracked, "nothing may stay recorded under the old parent")
 		_, tracked = r.clusterNetworkPolicyToPodIdentifierMap.Load(reuseAlpha)

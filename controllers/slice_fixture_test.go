@@ -256,6 +256,17 @@ func (fx *cpeFixture) deleteSlice(name string) {
 	delete(fx.store, name)
 }
 
+// markDeleting sets a DeletionTimestamp on a slice that is still listed, modelling a delete
+// held open by a finalizer, so the next reconcile takes the cleanup path.
+func (fx *cpeFixture) markDeleting(name string) {
+	fx.t.Helper()
+	cpe, ok := fx.store[name]
+	require.True(fx.t, ok, "markDeleting: %s is not in the store", name)
+	now := metav1.Now()
+	cpe.DeletionTimestamp = &now
+	fx.store[name] = cpe
+}
+
 // reconcileAll reconciles every slice currently present, which is how the agent reaches
 // steady state after a restart or a policy create.
 func (fx *cpeFixture) reconcileAll() {
@@ -302,7 +313,8 @@ func (fx *cpeFixture) reconcile(name string) error {
 	return fx.r.reconcileClusterPolicyEndpoint(context.TODO(), &cpe)
 }
 
-// reconcileDeleted reconciles a slice that is gone from the API server.
+// reconcileDeleted reconciles a slice that is gone from the API server, or, after
+// markDeleting, one whose deletion is in progress.
 func (fx *cpeFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
 
 // reconcileEvent reconciles a slice under its last parent through the entry point a watch event uses.
@@ -476,6 +488,17 @@ func (fx *peFixture) setSlices(specs ...sliceSpec) {
 
 func (fx *peFixture) deleteSlice(name string) {
 	delete(fx.store, name)
+}
+
+// markDeleting sets a DeletionTimestamp on a slice that is still listed, modelling a delete
+// held open by a finalizer, so the next reconcile takes the cleanup path.
+func (fx *peFixture) markDeleting(name string) {
+	fx.t.Helper()
+	pe, ok := fx.store[name]
+	require.True(fx.t, ok, "markDeleting: %s is not in the store", name)
+	now := metav1.Now()
+	pe.DeletionTimestamp = &now
+	fx.store[name] = pe
 }
 
 func (fx *peFixture) reconcileAll() {

@@ -554,33 +554,10 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 		}
 	})
 
-	// The authoritative insert collapses Map1 to the parent's live slice set, so the cases
-	// below are the ones it cannot reach: the identifier stops being selected in the same
-	// change that alters the slice set, leaving Map1 holding a name that is no longer in
-	// parentPEList. The purge reclaims those by exact name, drawing from the parent's live
-	// slices plus the reconciled resource's own name.
-
-	// Accepted residual. The purge prunes by EXACT PolicyEndpoint name, never parent-wide, so it
-	// cannot drop a DIFFERENT policy's slices. The cost of that safety is this case -- a re-slice that
-	// simultaneously deselects an identifier, observed only through the SURVIVING slice's reconcile.
-	// There, resourceName is the surviving slice, so the departed slice's name is not in scope and the
-	// identifier retains it.
-	//
-	// Scope of the cost, measured below rather than assumed:
-	//   - The retained name is a permanent Map1 entry if a sibling reconcile has already
-	//     rewritten Map3 to drop the identifier, since the purge then stops deriving it as
-	//     stale and never visits it again. That is the leak.
-	//   - Enforcement still converges, but by a different route. The retained name's object
-	//     is gone, so deriveIngressAndEgressFirewallRules Gets it, sees NotFound, and
-	//     derives no rules -- so when the pod is eventually cleaned up it lands on baseline
-	//     via the no-active-policies path rather than via cleanupPod's Map1-absent branch.
-	//   - Until that cleanup runs, this reconcile does not touch the deselected identifier
-	//     at all (asserted below), so its eBPF maps keep whatever the previous reconcile
-	//     wrote. The sibling delete event is what closes the window.
-	t.Run("a re-slice that also deselects an identifier retains the departed slice name", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
+	// The identifier is stale for the parent, so all its entries go, even the departed slice's
+	t.Run("a re-slice that also deselects an identifier reclaims the departed slice name", func(t *testing.T) {
 		fx := newPEFixture(t)
-		gone, kept := identifierOf("gone-aaa"), identifierOf("kept-aaa")
+		gone := identifierOf("gone-aaa")
 		rules := []ruleRef{allow("192.168.90.1/32")}
 
 		fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
@@ -589,31 +566,12 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 		fx.reconcileAll()
 		require.Equal(t, []string{"np-1-aaaaa"}, fx.identifierSlices(gone))
 
-		// One change renames the slice and drops gone-aaa. Only np-1-bbbbb is reconciled,
-		// so np-1-aaaaa is never named: not by the insert (gone-aaa is not selected) and
-		// not by the purge (resourceName is np-1-bbbbb).
-		// Reset the recorder first, so the assertions below describe what THIS reconcile
-		// did rather than what round 1 left recorded.
-		fx.reset()
 		fx.setSlices(sliceSpec{name: "np-1-bbbbb", parent: "np-1",
 			pods:    []podRef{localPod("kept-aaa", "10.1.1.2")},
 			ingress: rules})
 		fx.reconcileAll()
 
-		assert.Equal(t, []string{"np-1-bbbbb"}, fx.identifierSlices(kept),
-			"the still-selected identifier tracks only the current slice")
-		assert.Equal(t, []string{"np-1-aaaaa"}, fx.identifierSlices(gone),
-			"accepted residual: the departed slice's name is retained because exact-name "+
-				"pruning cannot reach a name outside parentPEList + resourceName")
-
-		// The deselected identifier is not reprogrammed by this reconcile. Its eBPF maps
-		// retain whatever round 1 wrote until something cleans it up -- which is why the
-		// retained Map1 entry matters: cleanupPod's baseline restore is gated on the Map1
-		// entry being ABSENT, so a retained name suppresses it.
-		_, ingressWritten := fx.bpf.IngressByIdentifier[gone]
-		state, stateWritten := fx.podState(gone)
-		t.Logf("deselected identifier %s: ingress rewritten=%v pod_state written=%v state=%d",
-			gone, ingressWritten, stateWritten, state)
+		fx.assertIdentifierAbsent(gone)
 	})
 
 	t.Run("the departed slice's own delete event reclaims the retained name", func(t *testing.T) {

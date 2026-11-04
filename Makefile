@@ -29,7 +29,7 @@ ARCH = $(lastword $(subst :, ,$(filter $(UNAME_ARCH):%,x86_64:amd64 aarch64:arm6
 IMAGE_ARCH_SUFFIX = $(addprefix -,$(filter $(ARCH),arm64))
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.25.0
+ENVTEST_K8S_VERSION = 1.37.0
 
 # Skip installing the latest managed addon while running cyclonus test
 SKIP_ADDON_INSTALLATION ?= "false"
@@ -86,7 +86,9 @@ vet: setup-ebpf-sdk-override # Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./pkg/... ./controllers/... -v -coverprofile=coverage.txt -covermode=atomic
+	@assets="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" && test -n "$$assets" || \
+		{ echo "ERROR: setup-envtest could not provide kubebuilder assets $(ENVTEST_K8S_VERSION)"; exit 1; }; \
+	KUBEBUILDER_ASSETS="$$assets" go test ./pkg/... ./controllers/... -v -coverprofile=coverage.txt -covermode=atomic
 
 ##@ Build
 
@@ -274,11 +276,13 @@ $(LOCALBIN):
 ## Tool Binaries
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-ENVTEST ?= $(LOCALBIN)/setup-envtest
+ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.4.3
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
+# Pinned release-0.25 commit, matching controller-runtime. Older builds use the retired GCS bucket (401).
+ENVTEST_VERSION ?= v0.25.3-0.20261103101737-9603adbb18be
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 .PHONY: kustomize
@@ -299,7 +303,8 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20230216140739-c98506dc3b8e
+	test -s $@ || { GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
+		mv $(LOCALBIN)/setup-envtest $@; }
 
 # Check formatting of source code files without modification.
 check-format: FORMAT_FLAGS = -l
