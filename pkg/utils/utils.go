@@ -263,6 +263,11 @@ func getHostLinkByName(name string) (netlink.Link, error) {
 	return getLinkByNameFunc(name)
 }
 
+// Secondary interfaces try "/" first, then "." for CNI releases before
+// aws/amazon-vpc-cni-k8s#3924. The reverse pairing does not work: a CNI with #3924 and an
+// NPA without this change hashes only the dotted name, so the ADD fails and multi-NIC pods
+// cannot start. A CNI release with #3924 must point nodeAgent.image.tag at an NPA that has
+// this function.
 var GetHostVethName = func(podName, podNamespace string, interfaceIndex int, interfacePrefixes []string) (string, error) {
 	var errors error
 	names := []string{podName}

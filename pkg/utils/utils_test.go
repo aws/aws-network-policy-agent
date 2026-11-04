@@ -1009,3 +1009,37 @@ func TestConvByteArrayToIP(t *testing.T) {
 		})
 	}
 }
+
+// Vectors from aws/amazon-vpc-cni-k8s#3924. If either repo changes how it hashes the name,
+// this fails instead of the lookup silently missing.
+func TestGetHostVethName_MatchesCNINaming(t *testing.T) {
+	originalFunc := getLinkByNameFunc
+	defer func() { getLinkByNameFunc = originalFunc }()
+
+	tests := []struct {
+		name      string
+		podName   string
+		namespace string
+		index     int
+		want      string
+	}{
+		{name: "slash separator for a secondary interface",
+			podName: "web", namespace: "prod", index: 1, want: "eni6803dcbd785"},
+		{name: "pod whose own name ends in .1",
+			podName: "web.1", namespace: "prod", index: 0, want: "enie12e7897172"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getLinkByNameFunc = func(name string) (netlink.Link, error) {
+				if name == tt.want {
+					return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+				}
+				return nil, netlink.LinkNotFoundError{}
+			}
+			got, err := GetHostVethName(tt.podName, tt.namespace, tt.index, []string{"eni", "vlan"})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got,
+				"host-veth naming must stay in step with the VPC CNI")
+		})
+	}
+}
