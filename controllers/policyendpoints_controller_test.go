@@ -2172,3 +2172,146 @@ func TestCleanupPod_BaselineRestoreFailureRequeues(t *testing.T) {
 	// The restore was genuinely attempted - this is not the already-torn-down skip path.
 	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps")
 }
+
+func TestPolicyEndpointReconcile_IgnoresPodsOutsideItsNamespace(t *testing.T) {
+	const (
+		nodeIP    = "1.1.1.1"
+		podNS     = "team-a"
+		otherNS   = "team-b"
+		ownRule   = "10.0.0.5/32"
+		otherRule = "198.51.100.7/32"
+	)
+	pod := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.10", Name: "web-6d4b75cb6d-zzzzz", Namespace: podNS}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	remotePod := policyendpoint.PodEndpoint{HostIP: "2.2.2.2", PodIP: "10.2.1.10", Name: "api-7f9c8b6d5-yyyyy", Namespace: podNS}
+	remoteIdentifier := utils.GetPodIdentifier(remotePod.Name, remotePod.Namespace)
+	peNamespacePod := policyendpoint.PodEndpoint{HostIP: nodeIP, PodIP: "10.1.1.20", Name: "worker-5c7d9f8b4-xxxxx", Namespace: otherNS}
+	peNamespaceIdentifier := utils.GetPodIdentifier(peNamespacePod.Name, peNamespacePod.Namespace)
+
+	ownPE := getPolicyEndpoint("allow-client", podNS, []policyendpoint.PodEndpoint{pod})
+	ownPE.Spec.PodIsolation = []networking.PolicyType{networking.PolicyTypeIngress}
+	ownPE.Spec.Ingress = []policyendpoint.EndpointInfo{{CIDR: ownRule}}
+
+	for _, tc := range []struct {
+		name      string
+		endpoints []policyendpoint.PodEndpoint
+		ingress   []policyendpoint.EndpointInfo
+		isolate   []networking.PolicyType
+		// pod in the PolicyEndpoint's namespace expected to be programmed
+		wantProgrammed string
+	}{
+		{name: "entry with rules", endpoints: []policyendpoint.PodEndpoint{pod},
+			ingress: []policyendpoint.EndpointInfo{{CIDR: otherRule}}, isolate: []networking.PolicyType{networking.PolicyTypeIngress}},
+		{name: "entry with isolation only", endpoints: []policyendpoint.PodEndpoint{pod},
+			isolate: []networking.PolicyType{networking.PolicyTypeIngress, networking.PolicyTypeEgress}},
+		{name: "entry for a pod on another node", endpoints: []policyendpoint.PodEndpoint{remotePod},
+			ingress: []policyendpoint.EndpointInfo{{CIDR: otherRule}}, isolate: []networking.PolicyType{networking.PolicyTypeIngress}},
+		{name: "entries followed by a same-namespace pod", endpoints: []policyendpoint.PodEndpoint{pod, remotePod, peNamespacePod},
+			ingress: []policyendpoint.EndpointInfo{{CIDR: otherRule}}, isolate: []networking.PolicyType{networking.PolicyTypeIngress},
+			wantProgrammed: peNamespaceIdentifier},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			otherPE := getPolicyEndpoint("other-policy", otherNS, tc.endpoints)
+			otherPE.Spec.PodIsolation = tc.isolate
+			otherPE.Spec.Ingress = tc.ingress
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockClient := mock_client.NewMockClient(ctrl)
+			mockBpf := &ebpf.MockBpfClient{}
+			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+
+			otherExists := true
+			byKey := func(key types.NamespacedName) (policyendpoint.PolicyEndpoint, bool) {
+				switch key {
+				case types.NamespacedName{Name: ownPE.Name, Namespace: podNS}:
+					return ownPE, true
+				case types.NamespacedName{Name: otherPE.Name, Namespace: otherNS}:
+					return otherPE, otherExists
+				}
+				return policyendpoint.PolicyEndpoint{}, false
+			}
+			mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
+					got, ok := byKey(key)
+					if !ok {
+						return apierrors.NewNotFound(schema.GroupResource{Resource: "policyendpoints"}, key.Name)
+					}
+					*pe = got
+					return nil
+				},
+			).AnyTimes()
+			mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, list *policyendpoint.PolicyEndpointList, opts ...client.ListOption) error {
+					*list = policyendpoint.PolicyEndpointList{}
+					switch (&client.ListOptions{}).ApplyOptions(opts).Namespace {
+					case podNS:
+						list.Items = []policyendpoint.PolicyEndpoint{ownPE}
+					case otherNS:
+						if otherExists {
+							list.Items = []policyendpoint.PolicyEndpoint{otherPE}
+						}
+					}
+					return nil
+				},
+			).AnyTimes()
+
+			reconcile := func(pe policyendpoint.PolicyEndpoint) {
+				_, err := r.Reconcile(context.Background(), peRequestOf(&pe))
+				assert.NoError(t, err)
+			}
+			wantOwnRules := []fwrp.EbpfFirewallRules{{IPCidr: ownRule}}
+			assertUnchanged := func(when string) {
+				t.Helper()
+				assert.Equal(t, wantOwnRules, mockBpf.IngressByIdentifier[podIdentifier], "ingress rules %s", when)
+				pes, _ := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+				assert.Equal(t, []utils.PolicyEndpointRef{{Name: ownPE.Name, Parent: ownPE.Spec.PolicyRef.Name}}, pes, "policy mapping %s", when)
+				_, remoteTracked := r.podIdentifierToPolicyEndpointMap.Load(remoteIdentifier)
+				assert.False(t, remoteTracked, "remote identifier must not be mapped %s", when)
+				assert.False(t, r.ArePoliciesAvailableInLocalCache(remoteIdentifier), "remote identifier must report no policies %s", when)
+			}
+
+			reconcile(ownPE)
+			assertUnchanged("after its own policy")
+
+			mockBpf.CallLog = nil
+			reconcile(otherPE)
+			assertUnchanged("after a PolicyEndpoint in another namespace listed it")
+			for id := range mockBpf.IngressByIdentifier {
+				if id != podIdentifier && id != tc.wantProgrammed {
+					t.Errorf("unexpected identifier programmed: %s", id)
+				}
+			}
+			if tc.wantProgrammed != "" {
+				assert.Equal(t, []fwrp.EbpfFirewallRules{{IPCidr: otherRule}}, mockBpf.IngressByIdentifier[tc.wantProgrammed],
+					"same-namespace pod listed after the ignored entry must be programmed")
+				pes, _ := r.podIdentifierToPolicyEndpointMap.Load(tc.wantProgrammed)
+				assert.Equal(t, []utils.PolicyEndpointRef{{Name: otherPE.Name, Parent: otherPE.Spec.PolicyRef.Name}}, pes)
+			} else {
+				assert.NotContains(t, mockBpf.CallLog, "UpdateEbpfMaps", "an ignored entry must not program any maps")
+				_, tracked := r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("other-policy", otherNS))
+				assert.False(t, tracked, "the other-namespace PolicyEndpoint must not track the pod")
+			}
+
+			otherExists = false
+			delete(mockBpf.IngressByIdentifier, tc.wantProgrammed)
+			mockBpf.CallLog = nil
+			reconcile(otherPE)
+			assertUnchanged("after the other PolicyEndpoint was deleted")
+			if tc.wantProgrammed != "" {
+				assert.False(t, r.ArePoliciesAvailableInLocalCache(tc.wantProgrammed),
+					"same-namespace pod must have no policies once its PolicyEndpoint is deleted")
+				assert.Equal(t, DEFAULT_ALLOW, mockBpf.PodStateByIdentifier[ebpf.PodStateKey{PodIdentifier: tc.wantProgrammed, MapKey: ebpf.POD_STATE_MAP_KEY}],
+					"same-namespace pod must be returned to baseline")
+			} else {
+				assert.NotContains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps", "deleting the other PolicyEndpoint must not touch the pod")
+			}
+
+			delete(mockBpf.IngressByIdentifier, podIdentifier)
+			mockBpf.CallLog = nil
+			reconcile(ownPE)
+			assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps", "its own policy must reprogram the pod")
+			assertUnchanged("after its own policy reconciled again")
+		})
+	}
+}
