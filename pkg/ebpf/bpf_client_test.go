@@ -1478,6 +1478,9 @@ func TestBpfClient_PodStateWritersWaitForPodIdentifierLock(t *testing.T) {
 		"CreatePodStateEbpfEntryIfNotExists": func() error {
 			return client.CreatePodStateEbpfEntryIfNotExists(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, DEFAULT_ALLOW)
 		},
+		"SetPodStateBaseline": func() error {
+			return client.SetPodStateBaseline(podIdentifier, POD_STATE_MAP_KEY, DEFAULT_ALLOW, 0)
+		},
 		"UpdateClusterPolicyEbpfMaps": func() error {
 			return client.UpdateClusterPolicyEbpfMaps(podIdentifier, nil, nil)
 		},
@@ -2653,4 +2656,119 @@ func TestBpfClient_deleteBPFProgramAndMaps_FailedSDKCloseIsNotRepeated(t *testin
 			assert.Empty(t, bpffs.closed)
 		})
 	}
+}
+
+// recordPodStateWrites records SetPodStateBaseline's map writes instead of making them.
+func recordPodStateWrites(t *testing.T) *[]string {
+	t.Helper()
+	origSeed, origOverwrite := seedPodStateLocked, overwritePodStateLocked
+	t.Cleanup(func() { seedPodStateLocked, overwritePodStateLocked = origSeed, origOverwrite })
+	var got []string
+	seedPodStateLocked = func(_ *bpfClient, id string, key, state int) error {
+		got = append(got, fmt.Sprintf("seed %s %d %d", id, key, state))
+		return nil
+	}
+	overwritePodStateLocked = func(_ *bpfClient, id string, key, state int, ingress, egress bool) error {
+		got = append(got, fmt.Sprintf("overwrite %s %d %d %t %t", id, key, state, ingress, egress))
+		return nil
+	}
+	return &got
+}
+
+func TestBpfClient_SetPodStateBaseline_ChoosesWrite(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		writeBefore int // key written with POLICIES_APPLIED before reading since, -1 for none
+		writeAfter  int // key written with POLICIES_APPLIED after reading since, -1 for none
+		want        string
+	}{
+		{name: "no write", writeBefore: -1, writeAfter: -1, want: "overwrite"},
+		{name: "write before the read", writeBefore: CLUSTER_POLICY_POD_STATE_MAP_KEY, writeAfter: -1, want: "overwrite"},
+		{name: "write after the read", writeBefore: -1, writeAfter: CLUSTER_POLICY_POD_STATE_MAP_KEY, want: "seed"},
+		{name: "write after the read to the other key", writeBefore: -1, writeAfter: POD_STATE_MAP_KEY, want: "overwrite"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRaceTestBpfClient(t)
+			// No programs, so no kernel map writes.
+			client.policyEndpointeBPFContext.Store("ds@ns", BPFContext{})
+			paWrite := func(key int) {
+				require.NoError(t, client.UpdatePodStateEbpfMaps("ds@ns", key, POLICIES_APPLIED, true, true))
+			}
+			if tt.writeBefore >= 0 {
+				paWrite(tt.writeBefore)
+			}
+			since := client.PodStateGeneration("ds@ns", CLUSTER_POLICY_POD_STATE_MAP_KEY)
+			if tt.writeAfter >= 0 {
+				paWrite(tt.writeAfter)
+			}
+			got := recordPodStateWrites(t)
+			require.NoError(t, client.SetPodStateBaseline("ds@ns", CLUSTER_POLICY_POD_STATE_MAP_KEY, DEFAULT_DENY, since))
+			want := fmt.Sprintf("overwrite ds@ns %d %d true true", CLUSTER_POLICY_POD_STATE_MAP_KEY, DEFAULT_DENY)
+			if tt.want == "seed" {
+				want = fmt.Sprintf("seed ds@ns %d %d", CLUSTER_POLICY_POD_STATE_MAP_KEY, DEFAULT_DENY)
+			}
+			assert.Equal(t, []string{want}, *got)
+		})
+	}
+}
+
+// A POLICIES_APPLIED written while SetPodStateBaseline waits for the lock must not be overwritten.
+func TestBpfClient_SetPodStateBaseline_ComparesUnderIdentifierLock(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	client.policyEndpointeBPFContext.Store("ds@ns", BPFContext{})
+	since := client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY)
+	got := recordPodStateWrites(t)
+
+	client.podIdentifierLocks.Lock("ds@ns")
+	done := make(chan error, 1)
+	go func() { done <- client.SetPodStateBaseline("ds@ns", POD_STATE_MAP_KEY, DEFAULT_ALLOW, since) }()
+	select {
+	case <-done:
+		t.Fatal("SetPodStateBaseline ran while the identifier lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = client.updatePodStateLocked("ds@ns", POD_STATE_MAP_KEY, POLICIES_APPLIED, true, true)
+	client.podIdentifierLocks.Unlock("ds@ns")
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetPodStateBaseline did not return after the lock was released")
+	}
+	assert.Equal(t, []string{fmt.Sprintf("seed ds@ns %d %d", POD_STATE_MAP_KEY, DEFAULT_ALLOW)}, *got)
+}
+
+func TestBpfClient_PodStateGeneration(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	client.policyEndpointeBPFContext.Store("ds@ns", BPFContext{})
+	assert.Zero(t, client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY))
+	_ = client.UpdatePodStateEbpfMaps("ds@ns", POD_STATE_MAP_KEY, DEFAULT_ALLOW, true, true)
+	_ = client.CreatePodStateEbpfEntryIfNotExists("ds@ns", POD_STATE_MAP_KEY, DEFAULT_DENY)
+	assert.Zero(t, client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY), "baseline writes do not move it")
+
+	_ = client.UpdatePodStateEbpfMaps("ds@ns", POD_STATE_MAP_KEY, POLICIES_APPLIED, true, true)
+	first := client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY)
+	assert.NotZero(t, first)
+	assert.Zero(t, client.PodStateGeneration("ds@ns", CLUSTER_POLICY_POD_STATE_MAP_KEY), "keys are independent")
+	assert.Zero(t, client.PodStateGeneration("other@ns", POD_STATE_MAP_KEY), "identifiers are independent")
+
+	client.forgetPodStateGenerations("ds@ns")
+	assert.Zero(t, client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY), "forgotten with the maps")
+	_ = client.UpdatePodStateEbpfMaps("ds@ns", POD_STATE_MAP_KEY, POLICIES_APPLIED, true, true)
+	assert.NotEqual(t, first, client.PodStateGeneration("ds@ns", POD_STATE_MAP_KEY), "never reused after teardown")
+}
+
+// A write after the maps are deleted must not leave a generation behind.
+func TestBpfClient_PodStateGeneration_NotRecordedWithoutMaps(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("backup-%d@ns", i)
+		client.policyEndpointeBPFContext.Store(id, BPFContext{})
+		client.policyEndpointeBPFContext.Delete(id)
+		client.forgetPodStateGenerations(id)
+		assert.Error(t, client.UpdatePodStateEbpfMaps(id, POD_STATE_MAP_KEY, POLICIES_APPLIED, true, true))
+	}
+	left := 0
+	client.podStatePAGenerations.Range(func(_, _ any) bool { left++; return true })
+	assert.Zero(t, left, "generations left behind for identifiers whose maps are gone")
 }

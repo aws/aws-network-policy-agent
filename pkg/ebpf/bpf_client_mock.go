@@ -38,6 +38,7 @@ type MockBpfClient struct {
 	UpdateClusterPolicyEbpfMapsErr        error
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
+	SetPodStateBaselineErr                error
 	AttacheBPFProbesErr                   error
 
 	// Captured args from the most recent UpdateEbpfMaps call.
@@ -98,6 +99,10 @@ type MockBpfClient struct {
 	// contents rather than recorded calls. CreatePodStateEbpfEntryIfNotExists uses
 	// BPF_NOEXIST, so it must not overwrite one.
 	podStateSeeded map[PodStateKey]bool
+
+	// POLICIES_APPLIED write generations, as in bpfClient.
+	paGenerations map[PodStateKey]uint64
+	paSeq         uint64
 }
 
 // PodStateKey identifies one entry of the pod-state map. POD_STATE_MAP_KEY holds the
@@ -178,6 +183,11 @@ func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
 			delete(m.podStateSeeded, k)
 		}
 	}
+	for k := range m.paGenerations {
+		if k.PodIdentifier == podIdentifier {
+			delete(m.paGenerations, k)
+		}
+	}
 	for k := range m.PodStateByIdentifier {
 		if k.PodIdentifier == podIdentifier {
 			delete(m.PodStateByIdentifier, k)
@@ -226,6 +236,13 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
 	}
+	if state == POLICIES_APPLIED {
+		if m.paGenerations == nil {
+			m.paGenerations = map[PodStateKey]uint64{}
+		}
+		m.paSeq++
+		m.paGenerations[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] = m.paSeq
+	}
 	if m.UpdatePodStateEbpfMapsErr != nil {
 		return m.UpdatePodStateEbpfMapsErr
 	}
@@ -257,6 +274,26 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 	if !m.podStateSeeded[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] {
 		m.recordPodState(podIdentifier, key, state)
 	}
+	return nil
+}
+
+func (m *MockBpfClient) PodStateGeneration(podIdentifier string, key int) uint64 {
+	return m.paGenerations[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}]
+}
+
+// SetPodStateBaseline mirrors bpfClient.SetPodStateBaseline.
+func (m *MockBpfClient) SetPodStateBaseline(podIdentifier string, key int, state int, since uint64) error {
+	m.CallLog = append(m.CallLog, "SetPodStateBaseline")
+	if err := m.contextErr(podIdentifier); err != nil {
+		return err
+	}
+	if m.SetPodStateBaselineErr != nil {
+		return m.SetPodStateBaselineErr
+	}
+	if m.PodStateGeneration(podIdentifier, key) != since && m.podStateSeeded[PodStateKey{PodIdentifier: podIdentifier, MapKey: key}] {
+		return nil
+	}
+	m.recordPodState(podIdentifier, key, state)
 	return nil
 }
 
