@@ -25,6 +25,11 @@ type InMemoryBpfMap struct {
 	deleteEntry func(key []byte) error
 	// In-memory representation of the map contents
 	contents map[string][]byte
+	// programmedFrom is the RulesFingerprint of the rule list contents was last refreshed
+	// from, set only when that refresh landed every add and every delete. Empty means
+	// unknown, so it never matches: the map was loaded from the kernel, refreshed without a
+	// fingerprint, or last refreshed with a failure that a later refresh has to retry.
+	programmedFrom string
 	// Mutex for thread safety
 	mutex sync.RWMutex
 }
@@ -89,6 +94,7 @@ func (m *InMemoryBpfMap) loadFromKernel() error {
 
 	// Clear current contents
 	m.contents = make(map[string][]byte)
+	m.programmedFrom = ""
 
 	// Get all keys from the kernel map
 	keys, err := m.bpfMap.GetAllMapKeys()
@@ -128,6 +134,38 @@ func (m *InMemoryBpfMap) loadFromKernel() error {
 func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	m.programmedFrom = ""
+	_, err := m.bulkRefreshLocked(newMapContents)
+	return err
+}
+
+// RefreshFromRules is BulkRefresh for contents computed from a rule list with the given
+// RulesFingerprint. When every add and every delete lands, the map records the fingerprint,
+// so a later call with the same rules can skip both the computation and the refresh (see
+// ProgrammedFrom). Any failure leaves no fingerprint, so the next call recomputes and the
+// diff retries what failed.
+func (m *InMemoryBpfMap) RefreshFromRules(fingerprint string, newMapContents map[string][]byte) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.programmedFrom = ""
+	clean, err := m.bulkRefreshLocked(newMapContents)
+	if clean {
+		m.programmedFrom = fingerprint
+	}
+	return err
+}
+
+// ProgrammedFrom reports whether the map holds exactly the entries computed from a rule list
+// with this fingerprint, as last written by a fully successful RefreshFromRules.
+func (m *InMemoryBpfMap) ProgrammedFrom(fingerprint string) bool {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return fingerprint != "" && m.programmedFrom == fingerprint
+}
+
+// bulkRefreshLocked diffs newMapContents against contents and applies the difference to the
+// kernel. clean is true only when every add and every delete succeeded. Callers hold m.mutex.
+func (m *InMemoryBpfMap) bulkRefreshLocked(newMapContents map[string][]byte) (clean bool, err error) {
 
 	// Find entries to add or update
 	toAdd := make(map[string][]byte)
@@ -169,20 +207,22 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 	}
 
 	// Apply deletes to kernel
+	failedDeletes := 0
 	for _, k := range toDelete {
 		keyByte := []byte(k)
 
 		if err := m.deleteEntryOrSDK(keyByte); err != nil {
 			log().Errorf("Failed to delete from kernel map for key %x: %v", keyByte, err)
-			// Continue with other deletions
+			// Continue with other deletions. The key stays in contents, so the next diff retries it.
+			failedDeletes++
 		} else {
 			// Remove from in-memory if kernel delete operation is successful
 			delete(m.contents, k)
 		}
 	}
 
-	log().Infof("Bulk refresh: added/updated %d of %d entries, deleted %d entries",
-		len(toAdd)-len(failedKeys), len(toAdd), len(toDelete))
+	log().Infof("Bulk refresh: added/updated %d of %d entries, deleted %d of %d entries",
+		len(toAdd)-len(failedKeys), len(toAdd), len(toDelete)-failedDeletes, len(toDelete))
 
 	if firstErr != nil {
 		// Log the full key list once here, and return a short error: this error is
@@ -191,10 +231,10 @@ func (m *InMemoryBpfMap) BulkRefresh(newMapContents map[string][]byte) error {
 		// failed key on one line, on every retry.
 		log().Errorf("Failed to update kernel map %d during bulk refresh for %d of %d keys (%s): %v",
 			m.bpfMap.MapID, len(failedKeys), len(toAdd), summarizeKeys(failedKeys), firstErr)
-		return fmt.Errorf("%d of %d map updates failed (%s): %w",
+		return false, fmt.Errorf("%d of %d map updates failed (%s): %w",
 			len(failedKeys), len(toAdd), summarizeKeys(failedKeys), firstErr)
 	}
-	return nil
+	return failedDeletes == 0, nil
 }
 
 // summarizeKeys renders at most a few keys, so a systemic failure cannot put

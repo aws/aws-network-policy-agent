@@ -160,7 +160,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	}
 
 	for key, value := range cidrsMap {
-		log().Infof("Updating Map with IP Key: %s", string(key))
+		log().Debugf("Updating Map with IP Key: %s", string(key))
 		_, firewallMapKey, _ := net.ParseCIDR(string(key))
 		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 		firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
@@ -324,7 +324,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 		// If this current rule doesn't have any port/protocol, the rule is not specific to any port/protocol
 		if len(rule.L4Info) == 0 {
-			log().Info("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
+			log().Debug("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], utils.L4Rule{
 				Action:   rule.Action,
 				Priority: rule.Priority,
@@ -345,7 +345,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 	// Step 4: Resolve conflicts and create final map entries
 	for cidr, l4Rules := range cidrL4Rules {
-		log().Infof("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
+		log().Debugf("cluster policy firewall rule processing complete: CIDR: %+v, Rules Count: %d", cidr, len(l4Rules))
 		resolvedL4Rules := f.removeDuplicateL4Rules(l4Rules)
 
 		_, firewallMapKey, _ := net.ParseCIDR(cidr)
