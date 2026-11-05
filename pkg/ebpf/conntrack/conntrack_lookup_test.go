@@ -308,9 +308,9 @@ func TestParseGetReply(t *testing.T) {
 	require.NoError(t, parseConntrackFlow(flowMessage(nl.FAMILY_V4, flowToNlData(flow)), &got))
 	assert.Equal(t, flow.Forward, got.Forward)
 	assert.Equal(t, flow.Reverse, got.Reverse)
-	assert.True(t, v4FlowHasKey(&got, v4LookupKey(v4Key(podA, 49000, vip, 80, unix.IPPROTO_TCP, podA, 7))))
-	assert.True(t, v4FlowHasKey(&got, v4LookupKey(v4Key(podA, 49000, podB, 8080, unix.IPPROTO_TCP, podB, 7))))
-	assert.False(t, v4FlowHasKey(&got, v4LookupKey(v4Key(node, 61001, podB, 8080, unix.IPPROTO_TCP, podB, 7))))
+	assert.True(t, flowHasKey(&got, v4GCEntry(v4Key(podA, 49000, vip, 80, unix.IPPROTO_TCP, podA, 7)).key))
+	assert.True(t, flowHasKey(&got, v4GCEntry(v4Key(podA, 49000, podB, 8080, unix.IPPROTO_TCP, podB, 7)).key))
+	assert.False(t, flowHasKey(&got, v4GCEntry(v4Key(node, 61001, podB, 8080, unix.IPPROTO_TCP, podB, 7)).key))
 }
 
 func TestNewProtocolDumpRequest(t *testing.T) {

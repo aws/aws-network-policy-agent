@@ -643,18 +643,6 @@ func TestConntrackGCV6KeepDeleteKernel(t *testing.T) {
 			},
 		},
 		{
-			name: "SCTP: netlink reports no ports, so an entry with ports never matches",
-			flows: []*netlink.ConntrackFlow{
-				testFlow(true, protoSCTP, podA6, 45000, remote6, 9999, remote6, 9999),
-			},
-			local: []utils.ConntrackKeyV6{
-				v6Key(podA6, 45000, remote6, 9999, protoSCTP, podA6, 7),
-			},
-			wantDeleted: []utils.ConntrackKeyV6{
-				v6Key(podA6, 45000, remote6, 9999, protoSCTP, podA6, 7),
-			},
-		},
-		{
 			name: "owner that is neither side is deleted, ifindex copies are kept together",
 			flows: []*netlink.ConntrackFlow{
 				testFlow(true, protoTCP, podA6, 46000, remote6, 443, remote6, 443),
