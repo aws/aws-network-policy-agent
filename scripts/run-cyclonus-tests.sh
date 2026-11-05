@@ -104,6 +104,11 @@ if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" ]]; then
     verify_endpoint_chunk_size "$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE"
 fi
 
+if ! wait_for_aws_node_settled; then
+    echo "aws-node readiness gate failed; refusing to run cyclonus against a not-ready dataplane"
+    exit 1
+fi
+
 run_cyclonus_tests
 
 check_path_cleanup
