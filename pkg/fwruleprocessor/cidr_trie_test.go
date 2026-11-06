@@ -195,7 +195,14 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRs(firewallRule string,
 func assertEquivalent(t *testing.T, ruleMap map[string]EbpfFirewallRules, target string) {
 	t.Helper()
 	linear := checkAndDeriveL4InfoFromAnyMatchingCIDRs(target, ruleMap)
-	trie := checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(target, buildTrie(ruleMap), ruleMap)
+	// checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie now takes per-CIDR
+	// contribution slices. Each CIDR in this oracle has a single contributing
+	// rule, so wrap each value in a one-element slice.
+	contributions := make(map[string][]EbpfFirewallRules, len(ruleMap))
+	for cidr, r := range ruleMap {
+		contributions[cidr] = []EbpfFirewallRules{r}
+	}
+	trie := checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(target, buildTrie(ruleMap), contributions)
 	assert.Equal(t, portSet(linear), portSet(trie),
 		"trie result must equal linear result for target %s", target)
 }

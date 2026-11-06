@@ -951,3 +951,193 @@ func TestComputeMapEntries_SameFamilyExceptRetained(t *testing.T) {
 	_, ok := got[wantKey]
 	assert.Truef(t, ok, "same-family except 10.10.0.0/16 was not added to the map")
 }
+
+// TestFWRuleProcessor_ExceptCrossContamination743 reproduces GitHub issue #743.
+//
+// Two ipBlock rules canonicalize to the same /8 key:
+//   - rule 1: 10.0.0.0/8 except 10.1.0.0/16, allowing tcp/80
+//   - rule 2: 10.161.0.0/8 (host bits set; masks to 10.0.0.0/8), allowing tcp/443
+//
+// Because the two rules share a canonical CIDR, the merge branch in
+// ComputeMapEntriesFromEndpointRules used to union their Except lists. After the
+// merge, the single 10.0.0.0/8 entry carried 10.1.0.0/16 as an except for BOTH
+// ports. A narrower CIDR inside the except (10.1.2.3/32) then inherited nothing,
+// so rule 2's port 443 was lost even though rule 2 never excepted anything.
+//
+// Correct behavior: an except only suppresses the ports of the rule it came from.
+// 10.1.2.3/32 should inherit tcp/443 from rule 2 (no except) while rule 1's tcp/80
+// stays suppressed there. Combined with its own tcp/22, the final entry is {22,443}.
+func TestFWRuleProcessor_ExceptCrossContamination743(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port22 int32 = 22
+	var port80 int32 = 80
+	var port443 int32 = 443
+
+	nodeIP := "10.255.0.1"
+
+	// The only difference between the two variants is how rule 2 spells the /8:
+	// a host-bit spelling that canonicalizes to 10.0.0.0/8, versus the identical
+	// 10.0.0.0/8 string. Both must produce the same result.
+	variants := []struct {
+		name        string
+		rule2IPCidr v1alpha1.NetworkAddress
+	}{
+		{name: "host-bit spelling 10.161.0.0/8", rule2IPCidr: "10.161.0.0/8"},
+		{name: "identical CIDR 10.0.0.0/8", rule2IPCidr: "10.0.0.0/8"},
+	}
+
+	_, targetNet, _ := net.ParseCIDR("10.1.2.3/32")
+	targetKey := string(utils.ComputeTrieKey(*targetNet, false))
+
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			rules := []EbpfFirewallRules{
+				{
+					IPCidr: "10.0.0.0/8",
+					Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"},
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port80}},
+				},
+				{
+					IPCidr: v.rule2IPCidr, // canonicalizes to 10.0.0.0/8
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}},
+				},
+				{
+					IPCidr: "10.1.2.3/32",
+					L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port22}},
+				},
+			}
+
+			// Run many iterations: the merge order and map iteration order are not
+			// fixed, so iterate to catch the bug deterministically and prove the fix
+			// is stable across orderings.
+			for i := 0; i < 500; i++ {
+				got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(rules)
+				if err != nil {
+					t.Fatalf("iteration %d: unexpected error: %v", i, err)
+				}
+
+				value, ok := got[targetKey]
+				if !ok {
+					t.Fatalf("iteration %d: expected a map entry for 10.1.2.3/32", i)
+				}
+
+				ports := decodeTrieValuePorts(value)
+				if !containsInt(ports, int(port22)) || !containsInt(ports, int(port443)) {
+					t.Fatalf("iteration %d: 10.1.2.3/32 entry lost a port; got ports=%v (want both 22 and 443). "+
+						"Rule 1's except (10.1.0.0/16) cross-contaminated rule 2 and suppressed its tcp/443.", i, ports)
+				}
+			}
+		})
+	}
+}
+
+// TestFWRuleProcessor_ExceptEntryKeepsOtherRulesPorts743 covers the except pass
+// from issue #743. An except CIDR denies only the ports of the rule that
+// declared it. Ports allowed by other rules that cover the whole except range
+// stay allowed there, and the except gets a deny-all only when no such rule
+// exists. The cases are the fixtures listed in the issue plus the no-cover and
+// narrower-rule variants.
+func TestFWRuleProcessor_ExceptEntryKeepsOtherRulesPorts743(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80 int32 = 80
+	var port443 int32 = 443
+	var port8080 int32 = 8080
+
+	nodeIP := "10.255.0.1"
+	denyAll := utils.ComputeTrieValue([]v1alpha1.Port{{Protocol: &DENY_ALL_PROTOCOL}}, false, false)
+
+	tcp := func(p *int32) []v1alpha1.Port { return []v1alpha1.Port{{Protocol: &protocolTCP, Port: p}} }
+
+	tests := []struct {
+		name         string
+		rules        []EbpfFirewallRules
+		exceptCIDR   string
+		wantPorts    []int
+		wantNotPorts []int
+		wantDenyAll  bool
+	}{
+		{
+			name: "identical /8 merged, except keeps other rule's 443",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"}, L4Info: tcp(&port80)},
+				{IPCidr: "10.0.0.0/8", L4Info: tcp(&port443)},
+			},
+			exceptCIDR:   "10.1.0.0/16",
+			wantPorts:    []int{443},
+			wantNotPorts: []int{80},
+		},
+		{
+			name: "host-bit /8 merged, except keeps other rule's 443",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"}, L4Info: tcp(&port80)},
+				{IPCidr: "10.161.0.0/8", L4Info: tcp(&port443)},
+			},
+			exceptCIDR:   "10.1.0.0/16",
+			wantPorts:    []int{443},
+			wantNotPorts: []int{80},
+		},
+		{
+			name: "0.0.0.0/0 except 10.0.0.0/8 with a second 0.0.0.0/0 :443",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "0.0.0.0/0", Except: []v1alpha1.NetworkAddress{"10.0.0.0/8"}, L4Info: tcp(&port80)},
+				{IPCidr: "0.0.0.0/0", L4Info: tcp(&port443)},
+			},
+			exceptCIDR:   "10.0.0.0/8",
+			wantPorts:    []int{443},
+			wantNotPorts: []int{80},
+		},
+		{
+			name: "no merge: covering 10.0.0.0/9 :443 keeps 443 in 10.1.0.0/16",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"}, L4Info: tcp(&port80)},
+				{IPCidr: "10.0.0.0/9", L4Info: tcp(&port443)},
+			},
+			exceptCIDR:   "10.1.0.0/16",
+			wantPorts:    []int{443},
+			wantNotPorts: []int{80},
+		},
+		{
+			name: "no other covering rule: except is deny-all",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"}, L4Info: tcp(&port80)},
+			},
+			exceptCIDR:  "10.1.0.0/16",
+			wantDenyAll: true,
+		},
+		{
+			name: "narrower rule inside the except does not spread over it",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: []v1alpha1.NetworkAddress{"10.1.0.0/16"}, L4Info: tcp(&port80)},
+				{IPCidr: "10.1.0.0/24", L4Info: tcp(&port8080)},
+			},
+			exceptCIDR:  "10.1.0.0/16",
+			wantDenyAll: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, exceptNet, _ := net.ParseCIDR(tt.exceptCIDR)
+			exceptKey := string(utils.ComputeTrieKey(*exceptNet, false))
+
+			got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(tt.rules)
+			assert.NoError(t, err)
+
+			value, ok := got[exceptKey]
+			if !assert.Truef(t, ok, "expected a map entry for except CIDR %s", tt.exceptCIDR) {
+				return
+			}
+			if tt.wantDenyAll {
+				assert.Equal(t, denyAll, value, "except CIDR %s should be deny-all", tt.exceptCIDR)
+				return
+			}
+			ports := decodeTrieValuePorts(value)
+			for _, p := range tt.wantPorts {
+				assert.Contains(t, ports, p, "except CIDR %s lost port %d allowed by another rule", tt.exceptCIDR, p)
+			}
+			for _, p := range tt.wantNotPorts {
+				assert.NotContains(t, ports, p, "except CIDR %s still allows the excepting rule's port %d", tt.exceptCIDR, p)
+			}
+		})
+	}
+}
