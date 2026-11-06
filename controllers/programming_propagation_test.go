@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
 )
 
 // The #686 fix: a failed eBPF map write must reach controller-runtime so the
@@ -299,11 +298,10 @@ func TestReconcilePolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing.T) {
 			fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
 				pods:    []podRef{},
 				ingress: []ruleRef{allow("192.168.90.1/32")}})
-			fx.r.policyEndpointSelectorMap.Store(
-				utils.GetPolicyEndpointIdentifier("np-1-aaaaa", fixtureNamespace),
+			fx.r.policyEndpointSelectorMap.Store(fx.request("np-1-aaaaa", "np-1"),
 				[]npatypes.Pod{{NamespacedName: web, PodIP: "10.1.1.1"}})
 			if tt.otherSelector {
-				fx.r.podIdentifierToPolicyEndpointMap.Store(identifier, []string{"np-2-aaaaa"})
+				fx.r.podIdentifierToPolicyEndpointMap.Store(identifier, refsOf("np-2", "np-2-aaaaa"))
 			}
 
 			pe := fx.store["np-1-aaaaa"]
@@ -327,7 +325,7 @@ func TestReconcileClusterPolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing
 	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 		pods:    []podRef{},
 		ingress: []ruleRef{deny("192.168.90.1/32")}})
-	fx.r.ClusterPolicyEndpointSelectorMap.Store("cnp-1-aaaaa",
+	fx.r.ClusterPolicyEndpointSelectorMap.Store(cpeRequest("cnp-1-aaaaa", "cnp-1"),
 		[]npatypes.Pod{{NamespacedName: web, PodIP: "10.1.1.1"}})
 
 	cpe := fx.store["cnp-1-aaaaa"]

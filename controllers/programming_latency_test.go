@@ -12,8 +12,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 )
 
 // histSampleCount reads the cumulative sample count of a package-level
@@ -172,9 +170,7 @@ func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
 	assert.Equal(t, uint64(1), histSampleCount(t, policyProgrammingLatency)-before)
 
 	// the real cleanup path must delete the tracking entry
-	err := r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: "pe-1", Namespace: "ns"},
-	})
+	err := r.cleanUpPolicyEndpoint(context.TODO(), peRequestOf(pe))
 	assert.NoError(t, err)
 
 	// a recreated PE with a fresh annotation is observed again
@@ -210,4 +206,52 @@ func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
 	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest
 	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded) // changed annotation, observed
 	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+}
+
+// Trigger times are tracked per (slice, parent), so a name that moves to another parent is
+// observed again, and the old parent's cleanup leaves the new parent's entry alone.
+func TestObservePolicyProgrammingLatency_KeyedByParent(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClient := mock_client.NewMockClient(mockCtrl)
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).Return(nil).AnyTimes()
+
+	now := time.Now()
+	r := &PolicyEndpointsReconciler{k8sClient: mockClient, trackerStartTime: now.Add(-1 * time.Hour)}
+	fresh := now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
+	alpha := newPEWithTriggerTime("pe-1", "ns", fresh)
+	alpha.Spec.PolicyRef.Name = "alpha"
+	beta := alpha.DeepCopy()
+	beta.Spec.PolicyRef.Name = "beta"
+
+	before := histSampleCount(t, policyProgrammingLatency)
+	r.observePolicyProgrammingLatency(alpha, programmingLanded)
+	r.observePolicyProgrammingLatency(beta, programmingLanded)
+	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before)
+
+	assert.NoError(t, r.cleanUpPolicyEndpoint(context.TODO(), peRequestOf(alpha)))
+	r.observePolicyProgrammingLatency(beta, programmingLanded)
+	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before, "beta's entry must survive alpha's cleanup")
+}
+
+func TestObserveClusterPolicyProgrammingLatency_KeyedByParent(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClient := mock_client.NewMockClient(mockCtrl)
+	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.ClusterPolicyEndpointList{}), gomock.Any()).Return(nil).AnyTimes()
+
+	now := time.Now()
+	r := &ClusterPolicyEndpointsReconciler{k8sClient: mockClient, trackerStartTime: now.Add(-1 * time.Hour)}
+	alpha := &policyendpoint.ClusterPolicyEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "cpe-1",
+		Annotations: map[string]string{LastChangeTriggerTimeAnnotation: now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)}}}
+	alpha.Spec.PolicyRef.Name = "alpha"
+	beta := alpha.DeepCopy()
+	beta.Spec.PolicyRef.Name = "beta"
+
+	before := histSampleCount(t, clusterPolicyProgrammingLatency)
+	r.observeClusterPolicyProgrammingLatency(alpha, programmingLanded)
+	r.observeClusterPolicyProgrammingLatency(beta, programmingLanded)
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
+
+	assert.NoError(t, r.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(alpha.Name, "alpha")))
+	r.observeClusterPolicyProgrammingLatency(beta, programmingLanded)
+	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before, "beta's entry must survive alpha's cleanup")
 }

@@ -270,6 +270,7 @@ func runRandomizedPolicy(t *testing.T, seed int64) {
 			if !st[s].present {
 				continue
 			}
+			fx.markDeleting(apiName(s))
 			_ = reconcile("D:" + apiName(s))
 			st[s].present = false
 			logf("present %s=false after deletion in progress (%s)", s, apiName(s))
@@ -461,8 +462,8 @@ func runRandomizedPolicy(t *testing.T, seed int64) {
 
 	// Nothing is tracked for PEs or parents that no longer exist.
 	fx.r.policyEndpointSelectorMap.Range(func(k, _ interface{}) bool {
-		name, _, _ := splitPolicyEndpointIdentifier(k.(string))
-		if _, ok := fx.store[name]; !ok {
+		key := k.(EndpointRequest)
+		if pe, ok := fx.store[key.Endpoint.Name]; !ok || pe.Spec.PolicyRef.Name != key.Parent {
 			t.Errorf("selector map still tracks deleted PE %s", k)
 		}
 		return true
@@ -485,15 +486,4 @@ func runRandomizedPolicy(t *testing.T, seed int64) {
 		}
 	}
 	check("after resync")
-}
-
-// splitPolicyEndpointIdentifier reverses utils.GetPolicyEndpointIdentifier, which joins the
-// PolicyEndpoint name and namespace with "/".
-func splitPolicyEndpointIdentifier(id string) (name, namespace string, ok bool) {
-	for i := len(id) - 1; i >= 0; i-- {
-		if id[i] == '/' {
-			return id[:i], id[i+1:], true
-		}
-	}
-	return id, "", false
 }
