@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -79,36 +80,48 @@ func TestDeriveStalePodIdentifiers(t *testing.T) {
 
 func TestUpdatePodIdentifierToPolicyEndpointMap(t *testing.T) {
 	const podIdentifier = "rs1@ns"
+	ref := func(name, parent string) PolicyEndpointRef { return PolicyEndpointRef{Name: name, Parent: parent} }
 
 	tests := []struct {
 		name     string
-		tracked  []string
+		tracked  []PolicyEndpointRef
+		parent   string
 		incoming []string
-		want     []string
+		want     []PolicyEndpointRef
 	}{
 		{
 			name:     "first insert for a new identifier",
-			tracked:  nil,
+			parent:   "np",
 			incoming: []string{"np-abcd"},
-			want:     []string{"np-abcd"},
+			want:     []PolicyEndpointRef{ref("np-abcd", "np")},
 		},
 		{
 			name:     "already-tracked slice is not duplicated",
-			tracked:  []string{"np-abcd"},
-			incoming: []string{"np-abcd"},
-			want:     []string{"np-abcd"},
+			tracked:  []PolicyEndpointRef{ref("np-abcd", "np")},
+			parent:   "np",
+			incoming: []string{"np-abcd", "np-abcd"},
+			want:     []PolicyEndpointRef{ref("np-abcd", "np")},
 		},
 		{
-			name:     "new sibling slice is appended alongside the existing one",
-			tracked:  []string{"np-abcd"},
-			incoming: []string{"np-abcd", "np-efgh"},
-			want:     []string{"np-abcd", "np-efgh"},
+			name:     "new sibling slice is added alongside the existing one",
+			tracked:  []PolicyEndpointRef{ref("np-abcd", "np")},
+			parent:   "np",
+			incoming: []string{"np-efgh", "np-abcd"},
+			want:     []PolicyEndpointRef{ref("np-abcd", "np"), ref("np-efgh", "np")},
 		},
 		{
 			name:     "another NP's slice is preserved",
-			tracked:  []string{"other-np-xyz"},
+			tracked:  []PolicyEndpointRef{ref("other-np-xyz", "other-np")},
+			parent:   "np",
 			incoming: []string{"np-abcd"},
-			want:     []string{"other-np-xyz", "np-abcd"},
+			want:     []PolicyEndpointRef{ref("np-abcd", "np"), ref("other-np-xyz", "other-np")},
+		},
+		{
+			name:     "a name reused under another parent is tracked separately",
+			tracked:  []PolicyEndpointRef{ref("np-abcd", "np-a")},
+			parent:   "np-b",
+			incoming: []string{"np-abcd"},
+			want:     []PolicyEndpointRef{ref("np-abcd", "np-a"), ref("np-abcd", "np-b")},
 		},
 	}
 
@@ -120,11 +133,11 @@ func TestUpdatePodIdentifierToPolicyEndpointMap(t *testing.T) {
 				m.Store(podIdentifier, tt.tracked)
 			}
 
-			UpdatePodIdentifierToPolicyEndpointMap(&m, &mu, podIdentifier, tt.incoming)
+			UpdatePodIdentifierToPolicyEndpointMap(&m, &mu, podIdentifier, tt.parent, tt.incoming)
 
 			got, ok := m.Load(podIdentifier)
-			assert.True(t, ok)
-			assert.ElementsMatch(t, tt.want, got.([]string))
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got.([]PolicyEndpointRef), "stored sorted by name, then parent")
 		})
 	}
 }
@@ -186,4 +199,68 @@ func TestGetPodListToBeCleanedUp(t *testing.T) {
 			assert.ElementsMatch(t, tt.want, names)
 		})
 	}
+}
+
+func TestDeletePolicyEndpointFromPodIdentifierMap(t *testing.T) {
+	const podIdentifier = "rs1@ns"
+	a := PolicyEndpointRef{Name: "np-abcd", Parent: "np-a"}
+	b := PolicyEndpointRef{Name: "np-abcd", Parent: "np-b"}
+	other := PolicyEndpointRef{Name: "np-efgh", Parent: "np-a"}
+
+	t.Run("removes only the entry with the same parent", func(t *testing.T) {
+		var m sync.Map
+		var mu sync.Mutex
+		m.Store(podIdentifier, []PolicyEndpointRef{a, b, other})
+
+		DeletePolicyEndpointFromPodIdentifierMap(&m, &mu, podIdentifier, a)
+
+		got, ok := m.Load(podIdentifier)
+		require.True(t, ok)
+		assert.Equal(t, []PolicyEndpointRef{b, other}, got.([]PolicyEndpointRef))
+	})
+
+	t.Run("drops the identifier once nothing is left", func(t *testing.T) {
+		var m sync.Map
+		var mu sync.Mutex
+		m.Store(podIdentifier, []PolicyEndpointRef{a})
+
+		DeletePolicyEndpointFromPodIdentifierMap(&m, &mu, podIdentifier, a)
+
+		_, ok := m.Load(podIdentifier)
+		assert.False(t, ok)
+	})
+
+	t.Run("an untracked entry or identifier is a no-op", func(t *testing.T) {
+		var m sync.Map
+		var mu sync.Mutex
+		m.Store(podIdentifier, []PolicyEndpointRef{b})
+
+		DeletePolicyEndpointFromPodIdentifierMap(&m, &mu, podIdentifier, a)
+		DeletePolicyEndpointFromPodIdentifierMap(&m, &mu, "absent@ns", a)
+
+		got, _ := m.Load(podIdentifier)
+		assert.Equal(t, []PolicyEndpointRef{b}, got.([]PolicyEndpointRef))
+		_, ok := m.Load("absent@ns")
+		assert.False(t, ok)
+	})
+}
+
+func TestDeleteParentFromPodIdentifierMap(t *testing.T) {
+	const podIdentifier = "rs1@ns"
+	a1 := PolicyEndpointRef{Name: "np-abcd", Parent: "np-a"}
+	a2 := PolicyEndpointRef{Name: "np-efgh", Parent: "np-a"}
+	b := PolicyEndpointRef{Name: "np-abcd", Parent: "np-b"}
+
+	var m sync.Map
+	var mu sync.Mutex
+	m.Store(podIdentifier, []PolicyEndpointRef{a1, b, a2})
+
+	DeleteParentFromPodIdentifierMap(&m, &mu, podIdentifier, "np-a")
+	got, ok := m.Load(podIdentifier)
+	require.True(t, ok)
+	assert.Equal(t, []PolicyEndpointRef{b}, got.([]PolicyEndpointRef), "a reused name under another parent is kept")
+
+	DeleteParentFromPodIdentifierMap(&m, &mu, podIdentifier, "np-b")
+	_, ok = m.Load(podIdentifier)
+	assert.False(t, ok)
 }

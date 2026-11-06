@@ -125,7 +125,7 @@ func TestClusterPolicySlices_DeleteFlowProgrammingFailure(t *testing.T) {
 	require.ErrorIs(t, fx.reconcileDeleted("cnp-1-aaaaa"), writeFailed,
 		"the failure must be returned so the request requeues")
 
-	_, tracked := fx.r.ClusterPolicyEndpointSelectorMap.Load("cnp-1-aaaaa")
+	_, tracked := fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest("cnp-1-aaaaa", "cnp-1"))
 	assert.False(t, tracked,
 		"with no failed cleanups to retry, the deleted CPE's entry must be removed, not stored empty")
 
@@ -133,7 +133,7 @@ func TestClusterPolicySlices_DeleteFlowProgrammingFailure(t *testing.T) {
 	fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 	fx.reset()
 	require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
-	_, tracked = fx.r.ClusterPolicyEndpointSelectorMap.Load("cnp-1-aaaaa")
+	_, tracked = fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest("cnp-1-aaaaa", "cnp-1"))
 	assert.False(t, tracked)
 }
 
@@ -157,7 +157,7 @@ func TestClusterPolicySlices_PriorPodsDedupedByIdentity(t *testing.T) {
 	// reconciles that did -- each with the address it had at the time.
 	web0 := types.NamespacedName{Name: "web-0", Namespace: fixtureNamespace}
 	for name, ip := range map[string]string{"cnp-1-aaaaa": "10.1.1.5", "cnp-1-bbbbb": "10.1.1.7"} {
-		fx.r.ClusterPolicyEndpointSelectorMap.Store(name,
+		fx.r.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(name, "cnp-1"),
 			[]npatypes.Pod{{NamespacedName: web0, PodIP: policyk8sawsv1.NetworkAddress(ip)}})
 	}
 
