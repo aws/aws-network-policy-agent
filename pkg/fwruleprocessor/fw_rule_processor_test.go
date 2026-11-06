@@ -951,3 +951,30 @@ func TestComputeMapEntries_SameFamilyExceptRetained(t *testing.T) {
 	_, ok := got[wantKey]
 	assert.Truef(t, ok, "same-family except 10.10.0.0/16 was not added to the map")
 }
+
+// Rules decoded separately carry distinct Protocol pointers. The dedupe key must
+// use the protocol value, not the pointer address (issue #722).
+func TestFWRuleProcessor_RemoveDuplicateL4Rules_SeparatePointers(t *testing.T) {
+newTCP := func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }
+newUDP := func() *corev1.Protocol { p := corev1.ProtocolUDP; return &p }
+port := func(v int32) *int32 { return &v }
+
+rule := func(proto *corev1.Protocol, p int32) utils.L4Rule {
+return utils.L4Rule{
+L4PortProtocolInfo: v1alpha1.Port{Protocol: proto, Port: port(p)},
+Action:             v1alpha1.ClusterNetworkPolicyRuleAction("Accept"),
+Priority:           1,
+}
+}
+
+f := NewFirewallRuleProcessor("10.1.1.1", "/32", false)
+
+got := f.removeDuplicateL4Rules([]utils.L4Rule{rule(newTCP(), 80), rule(newTCP(), 80), rule(newTCP(), 80)})
+assert.Len(t, got, 1)
+
+got = f.removeDuplicateL4Rules([]utils.L4Rule{rule(newTCP(), 80), rule(newUDP(), 80), rule(newTCP(), 80), rule(newUDP(), 80)})
+assert.Len(t, got, 2)
+
+got = f.removeDuplicateL4Rules([]utils.L4Rule{rule(newTCP(), 80), rule(nil, 80)})
+assert.Len(t, got, 1)
+}
