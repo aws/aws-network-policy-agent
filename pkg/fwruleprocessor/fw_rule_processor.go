@@ -65,7 +65,8 @@ func NewFirewallRuleProcessor(nodeIP string, hostMask string, enableIPv6 bool) *
 //      that CIDR's "except" list, we inherit the broader rule's ports into the current one.
 //      This ensures that the specific CIDR behaves consistently with the broader scope's intent.
 //   5. We then handle all `except` CIDRs at the end.
-//        - If not already in the map, each `except` CIDR is added explicitly with a deny-all L4 entry.
+//        - If not already in the map, each `except` CIDR is added explicitly. It keeps the ports of other
+//          rules that cover the whole except range, and gets a deny-all L4 entry only when none do.
 //        - This ensures specific excluded IP ranges override broader allow rules correctly in the LPM match tree.
 //   6. Finally, all CIDRs are encoded into trie keys and their corresponding merged/derived L4 info is encoded
 //      into the values, forming the output map.
@@ -75,7 +76,13 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	firewallMap := make(map[string][]byte)
 	cidrsMap := make(map[string]EbpfFirewallRules)
 	exceptCidrs := make(map[string]struct{})
-	nonHostCIDRs := make(map[string]EbpfFirewallRules)
+	// nonHostCIDRs maps a canonical non-host CIDR to the list of individual rules
+	// that contributed to it. We keep the contributions separate (rather than a
+	// single merged rule) so that each rule's Except list stays paired with the
+	// exact ports that rule allowed. This matters when two rules canonicalize to
+	// the same CIDR (e.g. 10.0.0.0/8 and 10.161.0.0/8): one rule's except must not
+	// suppress another rule's ports when a narrower CIDR inherits coverage.
+	nonHostCIDRs := make(map[string][]EbpfFirewallRules)
 	containmentTrie := newCIDRTrie()
 
 	//Traffic from the local node should always be allowed. Add NodeIP by default to map entries.
@@ -122,9 +129,21 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			addCatchAllL4Entry(&firewallRule)
 		}
 
+		// Capture this rule's own ports/except before any merging so the
+		// contribution we record for inheritance keeps its Except paired with
+		// exactly the ports this rule allowed.
+		contribution := firewallRule
+
 		if existingFirewallRuleInfo, ok := cidrsMap[string(firewallRule.IPCidr)]; ok {
+			// Two rules canonicalize to the same CIDR. The broad CIDR's own entry
+			// allows the union of both port sets. We intentionally do NOT union
+			// the Except lists here: an except expresses "this rule does not cover
+			// that sub-range", and that statement belongs only to the rule it came
+			// from. Unioning excepts would let one rule's except suppress another
+			// rule's ports when a narrower CIDR inherits coverage (issue #743),
+			// which fails OPEN in some cases and OVER-restricts in others. Each
+			// rule's (ports, except) pair is kept separately in nonHostCIDRs.
 			firewallRule.L4Info = append(firewallRule.L4Info, existingFirewallRuleInfo.L4Info...)
-			firewallRule.Except = append(firewallRule.Except, existingFirewallRuleInfo.Except...)
 		} else {
 			cidrL4Info = checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(string(firewallRule.IPCidr), containmentTrie, nonHostCIDRs)
 			if len(cidrL4Info) > 0 {
@@ -134,7 +153,10 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 		cidrsMap[string(firewallRule.IPCidr)] = firewallRule
 		if utils.IsNonHostCIDR(string(firewallRule.IPCidr)) {
 			_, alreadyInTrie := nonHostCIDRs[string(firewallRule.IPCidr)]
-			nonHostCIDRs[string(firewallRule.IPCidr)] = firewallRule
+			// Append this rule as a distinct contribution rather than overwriting,
+			// so every rule that shares this canonical CIDR keeps its own except
+			// scope for inheritance decisions.
+			nonHostCIDRs[string(firewallRule.IPCidr)] = append(nonHostCIDRs[string(firewallRule.IPCidr)], contribution)
 			if !alreadyInTrie {
 				containmentTrie.insert(string(firewallRule.IPCidr))
 			}
@@ -153,7 +175,14 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 				Except: []v1alpha1.NetworkAddress{},
 				L4Info: []v1alpha1.Port{},
 			}
-			addDenyAllL4Entry(&exceptFirewall)
+			// An except only removes the ports of the rule that declared it. Other
+			// rules covering the whole except range still allow their ports there
+			// (issue #743), so carry those over and deny-all only when none remain.
+			if inherited := checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(canonicalExcept, containmentTrie, nonHostCIDRs); len(inherited) > 0 {
+				exceptFirewall.L4Info = append(exceptFirewall.L4Info, inherited...)
+			} else {
+				addDenyAllL4Entry(&exceptFirewall)
+			}
 			cidrsMap[canonicalExcept] = exceptFirewall
 		}
 		log().Debugf("Parsed Except CIDR: %s (canonical: %s)", exceptCidr, canonicalExcept)
@@ -216,8 +245,18 @@ func addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
 	firewallRule.L4Info = append(firewallRule.L4Info, denyAllL4Entry)
 }
 
+// checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie returns the ports a narrower CIDR
+// should inherit from every broader non-host CIDR that contains it.
+//
+// Each broader CIDR may have been built from several ipBlock rules that
+// canonicalize to the same key. Those rules are kept as separate contributions
+// in nonHostCIDRs, and each contribution's Except list is evaluated on its own:
+// a contribution's ports are inherited only when the target is NOT inside that
+// contribution's except. This keeps an except scoped to the rule it came from,
+// so one rule excepting a sub-range cannot suppress a different rule's ports for
+// the same canonical CIDR (issue #743).
 func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule string,
-	trie *cidrTrie, nonHostCIDRs map[string]EbpfFirewallRules) []v1alpha1.Port {
+	trie *cidrTrie, nonHostCIDRs map[string][]EbpfFirewallRules) []v1alpha1.Port {
 	var matchingCIDRL4Info []v1alpha1.Port
 
 	_, ipToCheck, err := net.ParseCIDR(firewallRule)
@@ -226,22 +265,35 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule string,
 	}
 
 	containingKeys := trie.findContainingKeys(ipToCheck.IP)
+	targetOnes, _ := ipToCheck.Mask.Size()
 
 	for _, cidrKey := range containingKeys {
-		cidrFirewallInfo, ok := nonHostCIDRs[cidrKey]
+		contributions, ok := nonHostCIDRs[cidrKey]
 		if !ok {
 			continue
 		}
-		foundInExcept := false
-		for _, except := range cidrFirewallInfo.Except {
-			_, exceptEntry, _ := net.ParseCIDR(string(except))
-			if exceptEntry != nil && exceptEntry.Contains(ipToCheck.IP) {
-				foundInExcept = true
-				break
+		// Only CIDRs at least as broad as the target cover all of it. During the
+		// main pass rules are sorted by prefix length, so this always holds; the
+		// except pass runs after every rule is in the trie and needs the guard so
+		// a narrower rule (e.g. a /24 at the start of an excepted /16) does not
+		// spread its ports across the whole except range.
+		if _, keyNet, err := net.ParseCIDR(cidrKey); err == nil {
+			if keyOnes, _ := keyNet.Mask.Size(); keyOnes > targetOnes {
+				continue
 			}
 		}
-		if !foundInExcept {
-			matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
+		for _, cidrFirewallInfo := range contributions {
+			foundInExcept := false
+			for _, except := range cidrFirewallInfo.Except {
+				_, exceptEntry, _ := net.ParseCIDR(string(except))
+				if exceptEntry != nil && exceptEntry.Contains(ipToCheck.IP) {
+					foundInExcept = true
+					break
+				}
+			}
+			if !foundInExcept {
+				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
+			}
 		}
 	}
 	return matchingCIDRL4Info
