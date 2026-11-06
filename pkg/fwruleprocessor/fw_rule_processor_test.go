@@ -2,8 +2,11 @@ package fwruleprocessor
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
+	"net/netip"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -1015,5 +1018,182 @@ func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
 	ports32 := decodeTrieValuePorts(got[key32])
 	if len(ports32) != 1 || !containsInt(ports32, 80) {
 		t.Fatalf("2001:db8::/32 ports = %v, want [80]", ports32)
+	}
+}
+
+// decodeFirewallMap renders a map from ComputeMapEntriesFromEndpointRules as
+// "prefix" -> sorted entries ("tcp/80", "any", "deny"), so a test can compare
+// the exact set of keys. IPv4-mapped 16-byte keys print as ::ffff:a.b.c.d/N.
+func decodeFirewallMap(t *testing.T, got map[string][]byte) map[string]string {
+	t.Helper()
+	out := make(map[string]string, len(got))
+	for k, v := range got {
+		b := []byte(k)
+		addr, ok := netip.AddrFromSlice(b[4:])
+		if !ok {
+			t.Fatalf("key has invalid address length %d: %x", len(b)-4, b)
+		}
+		prefix := netip.PrefixFrom(addr, int(binary.LittleEndian.Uint32(b[0:4])))
+		var entries []string
+		for off := 0; off+12 <= len(v); off += 12 {
+			switch protocol := int(binary.LittleEndian.Uint32(v[off : off+4])); protocol {
+			case 0:
+			case utils.ANY_IP_PROTOCOL:
+				entries = append(entries, "any")
+			case utils.RESERVED_IP_PROTOCOL_NUMBER:
+				entries = append(entries, "deny")
+			case utils.TCP_PROTOCOL_NUMBER:
+				entries = append(entries, fmt.Sprintf("tcp/%d", binary.LittleEndian.Uint32(v[off+4:off+8])))
+			default:
+				entries = append(entries, fmt.Sprintf("proto%d/%d", protocol, binary.LittleEndian.Uint32(v[off+4:off+8])))
+			}
+		}
+		sort.Strings(entries)
+		out[prefix.String()] = strings.Join(entries, ",")
+	}
+	return out
+}
+
+// TestComputeMapEntries_ExceptFamilyHandling covers except CIDRs whose text
+// form or address family differs from the cluster's (issue #742): IPv4-mapped
+// excepts in both families, cross-family excepts, bare addresses and
+// unparseable input. Each case compares the exact set of map keys.
+func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	tcp := func(port int32) []v1alpha1.Port {
+		return []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port}}
+	}
+	except := func(cidrs ...string) []v1alpha1.NetworkAddress {
+		out := make([]v1alpha1.NetworkAddress, 0, len(cidrs))
+		for _, c := range cidrs {
+			out = append(out, v1alpha1.NetworkAddress(c))
+		}
+		return out
+	}
+
+	const v4Node, v6Node = "10.255.0.1", "2001:db8::1"
+	tests := []struct {
+		name       string
+		enableIPv6 bool
+		rules      []EbpfFirewallRules
+		want       map[string]string
+	}{
+		{
+			name:       "ipv6 mapped except ::ffff:0:0/96 does not collide with ::/0",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "::/0", Except: except("::ffff:0:0/96"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "::/0": "tcp/80", "::ffff:0.0.0.0/96": "deny"},
+		},
+		{
+			name:       "ipv6 mapped except keeps its 16-byte form and mask",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "::/0", Except: except("::ffff:10.0.0.0/104"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "::/0": "tcp/80", "::ffff:10.0.0.0/104": "deny"},
+		},
+		{
+			name:       "ipv6 native IPv4 except is skipped",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "::/0", Except: except("10.0.0.0/8"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "::/0": "tcp/80"},
+		},
+		{
+			name:       "ipv6 native except is unchanged",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "2001:db8::/32", Except: except("2001:db8:1::/48"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "2001:db8::/32": "tcp/80", "2001:db8:1::/48": "deny"},
+		},
+		{
+			name:       "ipv6 mapped-range prefix shorter than /96 is native IPv6",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "::/0", Except: except("::ffff:0:0/80"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "::/0": "tcp/80", "::/80": "deny"},
+		},
+		{
+			name:       "ipv6 bare mapped except is a /128 host",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "::/0", Except: except("::ffff:10.1.2.3"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "::/0": "tcp/80", "::ffff:10.1.2.3/128": "deny"},
+		},
+		{
+			name:       "ipv6 bare except is a /128 host",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "2001:db8::/32", Except: except("2001:db8::5"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any", "2001:db8::/32": "tcp/80", "2001:db8::5/128": "deny"},
+		},
+		{
+			name:  "ipv4 mapped except denies its IPv4 range",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("::ffff:10.1.0.0/112"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.0.0/16": "deny"},
+		},
+		{
+			name:  "ipv4 mapped parent with mapped except",
+			rules: []EbpfFirewallRules{{IPCidr: "::ffff:10.0.0.0/104", Except: except("::ffff:10.1.0.0/112"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.0.0/16": "deny"},
+		},
+		{
+			name:  "ipv4 mapped and native forms of one except share a key",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("10.1.0.0/16", "::ffff:10.1.0.0/112"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.0.0/16": "deny"},
+		},
+		{
+			name: "ipv4 mapped except blocks port inheritance into its range",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: except("::ffff:10.1.0.0/112"), L4Info: tcp(80)},
+				{IPCidr: "10.1.2.0/24", L4Info: tcp(443)},
+			},
+			want: map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.0.0/16": "deny", "10.1.2.0/24": "tcp/443"},
+		},
+		{
+			name:  "ipv4 native IPv6 except is skipped",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("2001:db8::/64"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80"},
+		},
+		{
+			name:  "ipv4 bare except is a /32 host",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("10.1.2.3"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.2.3/32": "deny"},
+		},
+		{
+			name:  "ipv4 bare mapped except is a /32 host",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("::ffff:10.1.2.3"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.2.3/32": "deny"},
+		},
+		{
+			name:  "unparseable except is skipped",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("not-a-cidr"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80"},
+		},
+		{
+			name:  "unparseable rule is skipped",
+			rules: []EbpfFirewallRules{{IPCidr: "not-a-cidr", L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeIP, hostMask := v4Node, "/32"
+			if tt.enableIPv6 {
+				nodeIP, hostMask = v6Node, "/128"
+			}
+			var origExcepts [][]v1alpha1.NetworkAddress
+			for _, r := range tt.rules {
+				origExcepts = append(origExcepts, append([]v1alpha1.NetworkAddress(nil), r.Except...))
+			}
+			// Map iteration order is random; repeat so a key collision cannot pass by luck.
+			for i := 0; i < 100; i++ {
+				got, err := NewFirewallRuleProcessor(nodeIP, hostMask, tt.enableIPv6).
+					ComputeMapEntriesFromEndpointRules(append([]EbpfFirewallRules(nil), tt.rules...))
+				if err != nil {
+					t.Fatalf("iteration %d: unexpected error: %v", i, err)
+				}
+				if decoded := decodeFirewallMap(t, got); !assert.Equal(t, tt.want, decoded, "iteration %d", i) {
+					return
+				}
+			}
+			for i, r := range tt.rules {
+				assert.Equal(t, origExcepts[i], r.Except, "caller's except slice for rule %d was modified", i)
+			}
+		})
 	}
 }
