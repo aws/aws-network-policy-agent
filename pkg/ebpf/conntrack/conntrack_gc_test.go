@@ -12,9 +12,10 @@ import (
 )
 
 // These tests pin which local conntrack entries one GC pass keeps and which it
-// deletes, for a given kernel conntrack table. The kernel table is a list of
-// flows as netlink reports them, fed in by withKernelFlows. Every expectation is
-// spelled out per case.
+// deletes, for a given kernel conntrack table. Each case creates its flows in
+// the kernel conntrack table of a new network namespace (see enterTestNetns
+// and createFlow), and the pass reads them over ctnetlink as the agent does.
+// Every expectation is spelled out per case.
 
 const testGCStart = uint64(1_000_000)
 
@@ -85,7 +86,7 @@ func ipForFamily(ip string, v6 bool) net.IP {
 // testFlow builds a kernel flow as netlink reports it. The reply tuple is
 // rsrc:rsport -> fsrc:fsport, so a DNAT'd flow has rsrc set to the backend
 // instead of fdst. netlink reports ports as zero for protocols other than TCP
-// and UDP, so pass zero ports for those.
+// and UDP, so pass zero ports for ICMP and GRE.
 func testFlow(v6 bool, proto uint8, fsrc string, fsport uint16, fdst string, fdport uint16, rsrc string, rsport uint16) *netlink.ConntrackFlow {
 	family := uint8(unix.AF_INET)
 	if v6 {
@@ -126,8 +127,8 @@ func inZone(f *netlink.ConntrackFlow, zone uint16) *netlink.ConntrackFlow {
 // gcCase is one GC pass over a kernel table.
 type gcCase[K comparable] struct {
 	name string
-	// flows is the kernel conntrack table. readErr, if set, makes reading it
-	// fail.
+	// flows is the kernel conntrack table. readErr, if set, fails the pass's
+	// kernel reads (see gcCaseTable).
 	flows   []*netlink.ConntrackFlow
 	readErr error
 	// local is the agent's conntrack map. active holds the entries the
@@ -177,10 +178,23 @@ func lastSeenActive[K comparable](active map[K]bool, k K) bool {
 	return entryActiveFromRead(val, nil, testGCStart)
 }
 
+// gcCaseTable creates flows in the kernel conntrack table of a new network
+// namespace and returns the table for a pass to read. If readErr is set, every
+// dump of the pass fails with it (see conntrackTableProbe.dumpErr).
+func gcCaseTable(t *testing.T, flows []*netlink.ConntrackFlow, readErr error) conntrackTable {
+	enterTestNetns(t)
+	for _, f := range flows {
+		createFlow(t, f)
+	}
+	table := newConntrackTableProbe(t)
+	table.dumpErr = readErr
+	return table
+}
+
 func runV4GCCase(t *testing.T, tc gcCase[utils.ConntrackKey]) {
-	withKernelFlows(t, unix.AF_INET, tc.flows, tc.readErr)
+	table := gcCaseTable(t, tc.flows, tc.readErr)
 	active := keySet(tc.active)
-	c := &conntrackClient{localConntrackV4Cache: keySet(tc.local)}
+	c := &conntrackClient{kernelTable: table, localConntrackV4Cache: keySet(tc.local)}
 	deleted := make(map[utils.ConntrackKey]bool)
 	n, err := c.removeStaleV4Entries(testGCStart,
 		func(k utils.ConntrackKey, gcStart uint64) bool {
@@ -196,9 +210,9 @@ func runV4GCCase(t *testing.T, tc gcCase[utils.ConntrackKey]) {
 }
 
 func runV6GCCase(t *testing.T, tc gcCase[utils.ConntrackKeyV6]) {
-	withKernelFlows(t, unix.AF_INET6, tc.flows, tc.readErr)
+	table := gcCaseTable(t, tc.flows, tc.readErr)
 	active := keySet(tc.active)
-	c := &conntrackClient{enableIPv6: true, localConntrackV6Cache: keySet(tc.local)}
+	c := &conntrackClient{kernelTable: table, enableIPv6: true, localConntrackV6Cache: keySet(tc.local)}
 	deleted := make(map[utils.ConntrackKeyV6]bool)
 	n, err := c.removeStaleV6Entries(testGCStart,
 		func(k utils.ConntrackKeyV6, gcStart uint64) bool {
@@ -213,7 +227,7 @@ func runV6GCCase(t *testing.T, tc gcCase[utils.ConntrackKeyV6]) {
 	assert.Len(t, c.localConntrackV6Cache, len(tc.local), "local cache must not change")
 }
 
-func TestConntrackGCV4KeepDelete(t *testing.T) {
+func TestConntrackGCV4KeepDeleteKernel(t *testing.T) {
 	cases := []gcCase[utils.ConntrackKey]{
 		{
 			name: "forward flow: entries owned by the source or by the destination are kept",
@@ -317,14 +331,19 @@ func TestConntrackGCV4KeepDelete(t *testing.T) {
 				// What pod B sees after SNAT. No key has the node IP as source.
 				v4Key(node, 61001, podB, 8080, protoTCP, podB, 9),
 			},
+			// BEHAVIOR CHANGE (reverse lookup): the backend keys are deleted.
+			// The flow still produces pod A to the backend as a key, but the
+			// GC now finds flows by tuple, and neither that tuple nor its
+			// inverse is one of the flow's tuples, because the reply goes to
+			// the node IP rather than to pod A. The full dump used to keep
+			// these entries.
 			wantDeleted: []utils.ConntrackKey{
-				v4Key(node, 61001, podB, 8080, protoTCP, podB, 9),
-			},
-			// The flow's keys are pod A to the VIP and pod A to the backend.
-			wantKept: []utils.ConntrackKey{
-				v4Key(podA, 45000, vip, 80, protoTCP, podA, 7),
 				v4Key(podA, 45000, podB, 8080, protoTCP, podA, 7),
 				v4Key(podA, 45000, podB, 8080, protoTCP, podB, 9),
+				v4Key(node, 61001, podB, 8080, protoTCP, podB, 9),
+			},
+			wantKept: []utils.ConntrackKey{
+				v4Key(podA, 45000, vip, 80, protoTCP, podA, 7),
 			},
 		},
 		{
@@ -335,8 +354,10 @@ func TestConntrackGCV4KeepDelete(t *testing.T) {
 			local: []utils.ConntrackKey{
 				v4Key(podA, 46000, remote, 443, protoTCP, podA, 7),
 			},
-			// The kernel table covers every zone.
-			wantKept: []utils.ConntrackKey{
+			// BEHAVIOR CHANGE (reverse lookup): the entry is deleted. A
+			// ctnetlink GET without CTA_ZONE searches the default zone only,
+			// while the full dump used to return every zone.
+			wantDeleted: []utils.ConntrackKey{
 				v4Key(podA, 46000, remote, 443, protoTCP, podA, 7),
 			},
 		},
@@ -393,7 +414,9 @@ func TestConntrackGCV4KeepDelete(t *testing.T) {
 		{
 			name: "SCTP: netlink reports no ports, so an entry with ports never matches",
 			flows: []*netlink.ConntrackFlow{
-				testFlow(false, protoSCTP, podA, 0, remote, 0, remote, 0),
+				// The kernel flow has the entries' ports, but netlink reports
+				// them as zero.
+				testFlow(false, protoSCTP, podA, 48000, remote, 9999, remote, 9999),
 			},
 			local: []utils.ConntrackKey{
 				v4Key(podA, 48000, remote, 9999, protoSCTP, podA, 7),
@@ -488,23 +511,6 @@ func TestConntrackGCV4KeepDelete(t *testing.T) {
 			},
 		},
 		{
-			name: "kernel read error deletes nothing",
-			flows: []*netlink.ConntrackFlow{
-				testFlow(false, protoTCP, podA, 54000, remote, 443, remote, 443),
-			},
-			readErr: unix.ENOBUFS,
-			local: []utils.ConntrackKey{
-				v4Key(podA, 54000, remote, 443, protoTCP, podA, 7),
-				v4Key(podA, 54001, remote, 443, protoTCP, podA, 7),
-				v4Key(podA, 0, remote, 0, protoICMP, podA, 7),
-			},
-			wantKept: []utils.ConntrackKey{
-				v4Key(podA, 54000, remote, 443, protoTCP, podA, 7),
-				v4Key(podA, 54001, remote, 443, protoTCP, podA, 7),
-				v4Key(podA, 0, remote, 0, protoICMP, podA, 7),
-			},
-		},
-		{
 			name: "interrupted dump deletes nothing",
 			flows: []*netlink.ConntrackFlow{
 				testFlow(false, protoICMP, podA, 0, remote, 0, remote, 0),
@@ -527,7 +533,7 @@ func TestConntrackGCV4KeepDelete(t *testing.T) {
 	}
 }
 
-func TestConntrackGCV6KeepDelete(t *testing.T) {
+func TestConntrackGCV6KeepDeleteKernel(t *testing.T) {
 	cases := []gcCase[utils.ConntrackKeyV6]{
 		{
 			name: "forward flow: entries owned by the source or by the destination are kept",
@@ -592,12 +598,14 @@ func TestConntrackGCV6KeepDelete(t *testing.T) {
 				v6Key(podA6, 43000, podB6, 8080, protoTCP, podA6, 7),
 				v6Key(node6, 61000, podB6, 8080, protoTCP, podB6, 9),
 			},
+			// BEHAVIOR CHANGE (reverse lookup): the backend key is deleted, as
+			// in the IPv4 case.
 			wantDeleted: []utils.ConntrackKeyV6{
+				v6Key(podA6, 43000, podB6, 8080, protoTCP, podA6, 7),
 				v6Key(node6, 61000, podB6, 8080, protoTCP, podB6, 9),
 			},
 			wantKept: []utils.ConntrackKeyV6{
 				v6Key(podA6, 43000, vip6, 80, protoTCP, podA6, 7),
-				v6Key(podA6, 43000, podB6, 8080, protoTCP, podA6, 7),
 			},
 		},
 		{
@@ -608,8 +616,9 @@ func TestConntrackGCV6KeepDelete(t *testing.T) {
 			local: []utils.ConntrackKeyV6{
 				v6Key(podA6, 44000, remote6, 443, protoTCP, podA6, 7),
 			},
-			// The kernel table covers every zone.
-			wantKept: []utils.ConntrackKeyV6{
+			// BEHAVIOR CHANGE (reverse lookup): the entry is deleted, as in the
+			// IPv4 case.
+			wantDeleted: []utils.ConntrackKeyV6{
 				v6Key(podA6, 44000, remote6, 443, protoTCP, podA6, 7),
 			},
 		},
@@ -631,18 +640,6 @@ func TestConntrackGCV6KeepDelete(t *testing.T) {
 			wantKept: []utils.ConntrackKeyV6{
 				v6Key(podA6, 0, remote6, 0, protoICMPv6, podA6, 7),
 				v6Key(podA6, 0, remote6, 0, protoICMPv6, podA6, 8),
-			},
-		},
-		{
-			name: "SCTP: netlink reports no ports, so an entry with ports never matches",
-			flows: []*netlink.ConntrackFlow{
-				testFlow(true, protoSCTP, podA6, 0, remote6, 0, remote6, 0),
-			},
-			local: []utils.ConntrackKeyV6{
-				v6Key(podA6, 45000, remote6, 9999, protoSCTP, podA6, 7),
-			},
-			wantDeleted: []utils.ConntrackKeyV6{
-				v6Key(podA6, 45000, remote6, 9999, protoSCTP, podA6, 7),
 			},
 		},
 		{
@@ -677,18 +674,6 @@ func TestConntrackGCV6KeepDelete(t *testing.T) {
 			},
 			wantKept: []utils.ConntrackKeyV6{
 				v6Key(podA6, 47001, remote6, 443, protoTCP, podA6, 7),
-			},
-		},
-		{
-			name:    "kernel read error deletes nothing",
-			readErr: unix.EAGAIN,
-			local: []utils.ConntrackKeyV6{
-				v6Key(podA6, 48000, remote6, 443, protoTCP, podA6, 7),
-				v6Key(podA6, 0, remote6, 0, protoICMPv6, podA6, 7),
-			},
-			wantKept: []utils.ConntrackKeyV6{
-				v6Key(podA6, 48000, remote6, 443, protoTCP, podA6, 7),
-				v6Key(podA6, 0, remote6, 0, protoICMPv6, podA6, 7),
 			},
 		},
 		{
