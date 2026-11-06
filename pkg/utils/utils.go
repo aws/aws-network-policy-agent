@@ -343,7 +343,7 @@ func ComputeTrieValueForCPE(l4Info []L4Rule) []byte {
 		action := deriveActionValueForCPE(l4Entry.Action)
 		priority := l4Entry.Priority*10 + action
 
-		log().Infof("L4 values: protocol: %v startPort: %v endPort: %v action: %v, priority: %v", protocol, startPort, endPort, l4Entry.Action, priority)
+		log().Debugf("L4 values: protocol: %v startPort: %v endPort: %v action: %v, priority: %v", protocol, startPort, endPort, l4Entry.Action, priority)
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(protocol))
 		startOffset += 4
 		binary.LittleEndian.PutUint32(value[startOffset:startOffset+4], uint32(priority))
