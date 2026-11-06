@@ -57,4 +57,25 @@ struct bpf_map_def_pvt SEC("maps") policy_events = {
     .pinning = PIN_GLOBAL_NS,
 };
 
+// policy_events_scope_map: --policy-event-logs-scope (key 0: 0 = all, 1 = deny).
+// Created here so it exists at startup; shared with TC programs via PIN_GLOBAL_NS.
+struct bpf_map_def_pvt SEC("maps") policy_events_scope_map = {
+    .type = BPF_MAP_TYPE_ARRAY,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(__u32),
+    .max_entries = 1,
+    .pinning = PIN_GLOBAL_NS,
+};
+
+// policy_events_drop_count_map: failed bpf_ringbuf_output for DENY events.
+// key 0 = ingress, key 1 = egress; per-CPU u64, summed by userspace.
+// Created here so it exists at startup; shared with TC programs via PIN_GLOBAL_NS.
+struct bpf_map_def_pvt SEC("maps") policy_events_drop_count_map = {
+    .type = BPF_MAP_TYPE_PERCPU_ARRAY,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(__u64),
+    .max_entries = 2,
+    .pinning = PIN_GLOBAL_NS,
+};
+
 char _license[] SEC("license") = "GPL";
