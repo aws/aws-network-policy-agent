@@ -558,6 +558,9 @@ func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
 		{"IPv4 mode: skip IPv6 fully qualified", "10.0.0.1", "/32", false, "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", true},
 		{"IPv4 mode: allow IPv4", "10.0.0.1", "/32", false, "192.168.1.0/24", false},
 		{"IPv4 mode: skip node IP", "10.0.0.1", "/32", false, "10.0.0.1/32", true},
+		{"IPv4 mode: aligned /24 with node IP as network address is not the node", "10.0.1.0", "/32", false, "10.0.1.77/24", false},
+		{"IPv4 mode: /24 whose network equals node IP is not the node", "10.0.1.0", "/32", false, "10.0.1.0/24", false},
+		{"IPv4 mode: /24 containing node IP as host address is not the node", "192.168.0.1", "/32", false, "192.168.0.1/24", false},
 
 		// IPv6 mode
 		{"IPv6 mode: skip IPv4", "2001:db8::1", "/128", true, "10.0.0.1/32", true},
@@ -1016,4 +1019,38 @@ func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
 	if len(ports32) != 1 || !containsInt(ports32, 80) {
 		t.Fatalf("2001:db8::/32 ports = %v, want [80]", ports32)
 	}
+}
+
+func TestFWRuleProcessor_NodeIPNetworkAddressRuleNotSkipped(t *testing.T) {
+	nodeIP := "10.0.1.0"
+	_, nodeCIDR, _ := net.ParseCIDR(nodeIP + "/32")
+	_, ruleCIDR, _ := net.ParseCIDR("10.0.1.77/24")
+	want := []string{
+		string(utils.ComputeTrieKey(*nodeCIDR, false)),
+		string(utils.ComputeTrieKey(*ruleCIDR, false)),
+	}
+	sort.Strings(want)
+
+	keys := func(m map[string][]byte) []string {
+		var out []string
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	t.Run("pod policy", func(t *testing.T) {
+		got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeMapEntriesFromEndpointRules(
+			[]EbpfFirewallRules{{IPCidr: "10.0.1.77/24"}})
+		assert.NoError(t, err)
+		assert.Equal(t, want, keys(got))
+	})
+
+	t.Run("cluster policy", func(t *testing.T) {
+		got, err := NewFirewallRuleProcessor(nodeIP, "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(
+			[]EbpfFirewallRules{{IPCidr: "10.0.1.77/24", Action: "Deny", Priority: 10}})
+		assert.NoError(t, err)
+		assert.Equal(t, want, keys(got))
+	})
 }
