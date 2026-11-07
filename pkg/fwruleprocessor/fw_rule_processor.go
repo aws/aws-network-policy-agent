@@ -449,7 +449,9 @@ func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) [
 		if p.L4PortProtocolInfo.Protocol == nil {
 			key = fmt.Sprintf("%s-%d-%d-%d-%s", "TCP", portKey, endPortKey, p.Priority, p.Action)
 		} else {
-			key = fmt.Sprintf("%v-%d-%d-%d-%s", p.L4PortProtocolInfo.Protocol, portKey, endPortKey, p.Priority, p.Action)
+			// Dereference the pointer so equal protocols share a key regardless of
+			// pointer identity; %v on a *corev1.Protocol alone prints its address.
+			key = fmt.Sprintf("%v-%d-%d-%d-%s", *p.L4PortProtocolInfo.Protocol, portKey, endPortKey, p.Priority, p.Action)
 		}
 
 		if _, ok := uniquePorts[key]; ok {
