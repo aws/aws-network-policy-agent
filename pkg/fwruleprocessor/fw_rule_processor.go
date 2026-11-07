@@ -285,7 +285,49 @@ func mergeDuplicateL4Info(ports []v1alpha1.Port) []v1alpha1.Port {
 		result = append(result, port)
 	}
 
+	// Map iteration order is random. ComputeTrieValue keeps the first 24
+	// entries, so an unsorted list encodes a different port set on every
+	// reconcile once a CIDR has more than 24 unique ports.
+	sort.Slice(result, func(i, j int) bool {
+		return portLess(result[i], result[j])
+	})
+
 	return result
+}
+
+// portLess orders L4 entries by protocol, port, then endPort. Nil fields sort
+// as zero, matching the key mergeDuplicateL4Info uses to deduplicate.
+func portLess(a, b v1alpha1.Port) bool {
+	var ap, bp string
+	if a.Protocol != nil {
+		ap = string(*a.Protocol)
+	}
+	if b.Protocol != nil {
+		bp = string(*b.Protocol)
+	}
+	if ap != bp {
+		return ap < bp
+	}
+
+	var aport, bport int32
+	if a.Port != nil {
+		aport = *a.Port
+	}
+	if b.Port != nil {
+		bport = *b.Port
+	}
+	if aport != bport {
+		return aport < bport
+	}
+
+	var aend, bend int32
+	if a.EndPort != nil {
+		aend = *a.EndPort
+	}
+	if b.EndPort != nil {
+		bend = *b.EndPort
+	}
+	return aend < bend
 }
 
 func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(firewallRules []EbpfFirewallRules) (map[string][]byte, error) {
