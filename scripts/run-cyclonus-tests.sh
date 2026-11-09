@@ -27,6 +27,7 @@ set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
 GINKGO_TEST_BUILD_DIR="$DIR/../test/build"
 
+source "${DIR}/lib/common.sh"
 source "${DIR}/lib/cleanup.sh"
 source "${DIR}/lib/network-policy.sh"
 source "${DIR}/lib/tests.sh"
@@ -75,9 +76,9 @@ K8S_VERSION: $K8S_VERSION
 "
 
 echo "Nodes AMI version for cluster: $CLUSTER_NAME"
-kubectl get nodes -owide
+kubectl_retry get nodes -owide
 
-PROVIDER_ID=$(kubectl get nodes -ojson | jq -r '.items[0].spec.providerID')
+PROVIDER_ID=$(kubectl_retry get nodes -ojson | jq -r '.items[0].spec.providerID')
 AMI_ID=$(aws ec2 describe-instances --instance-ids ${PROVIDER_ID##*/} --region $REGION | jq -r '.Reservations[].Instances[].ImageId')
 echo "Nodes AMI ID: $AMI_ID"
 
