@@ -9,7 +9,9 @@ function generate_manifest_and_apply(){
         CYCLONUS_IMAGE_REPOSITORY=${TEST_IMAGE_REGISTRY}/networking-e2e-test-images
     fi
 
-cat <<EOF | kubectl apply -n netpol -f -
+    local manifest
+    manifest=$(mktemp)
+cat <<EOF > "$manifest"
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -29,6 +31,8 @@ spec:
             - --retries=2
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
+    kubectl_retry apply -n netpol -f "$manifest"
+    rm -f "$manifest"
 }
 
 function run_cyclonus_tests(){
@@ -36,28 +40,29 @@ function run_cyclonus_tests(){
     TIMEOUT=$((5 * 60 * 60))  # 5 hours timeout in seconds
     START_TIME=$(date +%s)
 
-    kubectl create ns netpol
-    kubectl create clusterrolebinding cyclonus --clusterrole=cluster-admin --serviceaccount=netpol:cyclonus
-    kubectl create sa cyclonus -n netpol
+    # Applied rather than created, so a retried call or a reused cluster doesn't fail on AlreadyExists.
+    local setup
+    setup=$(mktemp)
+    {
+      kubectl create ns netpol --dry-run=client -o yaml
+      echo "---"
+      kubectl create clusterrolebinding cyclonus --clusterrole=cluster-admin --serviceaccount=netpol:cyclonus --dry-run=client -o yaml
+      echo "---"
+      kubectl create sa cyclonus -n netpol --dry-run=client -o yaml
+    } > "$setup"
+    kubectl_retry apply -f "$setup"
+    rm -f "$setup"
 
     generate_manifest_and_apply
 
     echo "Executing cyclonus suite"
 
-    local poll_errors=0 max_poll_errors=5
-
     while true; do
-      if ! STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}'); then
-        poll_errors=$((poll_errors + 1))
-        echo "kubectl get job failed (${poll_errors}/${max_poll_errors} consecutive), retrying"
-        if [ "$poll_errors" -ge "$max_poll_errors" ]; then
-          echo "Giving up after ${max_poll_errors} consecutive kubectl errors."
-          return 1
-        fi
-        sleep 10
-        continue
+      if ! STATUS=$(kubectl_retry get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}'); then
+        echo "Could not read the cyclonus job status. Marking the run failed."
+        TEST_FAILED=true
+        break
       fi
-      poll_errors=0
 
       if [ "$STATUS" == "True" ]; then
         echo "Job cyclonus has failed. Exiting."
@@ -74,17 +79,27 @@ function run_cyclonus_tests(){
       kubectl wait --for=condition=complete job.batch/cyclonus -n netpol --timeout=60s > /dev/null 2>&1 && break
     done
 
-    kubectl_retry logs -n netpol job/cyclonus > ${DIR}/results.log
-    kubectl_retry get pods -A -owide
+    local have_results=true
+    if kubectl_retry logs -n netpol job/cyclonus > ${DIR}/results.log.tmp; then
+      mv ${DIR}/results.log.tmp ${DIR}/results.log
+    else
+      echo "Could not fetch the cyclonus job logs. Marking the run failed."
+      rm -f ${DIR}/results.log.tmp
+      have_results=false
+      TEST_FAILED=true
+    fi
 
-    # Cleanup after test finishes
-    kubectl_retry delete clusterrolebinding cyclonus
-    kubectl_retry delete ns netpol x y z
+    if [[ $have_results == "true" ]]; then
+      cat ${DIR}/results.log
 
-    cat ${DIR}/results.log
+      echo "Verify results against expected"
+      python3 ${DIR}/lib/verify_test_results.py -f ${DIR}/results.log -ip $IP_FAMILY || TEST_FAILED=true
+    fi
 
-    echo "Verify results against expected"
-    python3 ${DIR}/lib/verify_test_results.py -f ${DIR}/results.log -ip $IP_FAMILY || TEST_FAILED=true
+    # Diagnostics and cleanup are best-effort so they can't discard a finished result.
+    kubectl_retry get pods -A -owide || echo "warn: could not list pods"
+    kubectl_retry delete clusterrolebinding cyclonus --ignore-not-found || echo "warn: could not delete clusterrolebinding cyclonus"
+    kubectl_retry delete ns netpol x y z --ignore-not-found || echo "warn: could not delete the cyclonus namespaces"
 }
 
 function run_performance_tests(){
