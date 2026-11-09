@@ -16,3 +16,17 @@ is_installed() {
         return 1
     fi
 }
+
+function kubectl_retry() {
+  local attempts=${KUBECTL_RETRIES:-5} delay=${KUBECTL_RETRY_DELAY:-10} i
+  for ((i = 1; i <= attempts; i++)); do
+    local out
+    if out=$(kubectl "$@"); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    echo "kubectl $* failed (attempt ${i}/${attempts}), retrying in ${delay}s" >&2
+    sleep "$delay"
+  done
+  return 1
+}

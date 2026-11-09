@@ -44,8 +44,21 @@ function run_cyclonus_tests(){
 
     echo "Executing cyclonus suite"
 
+    local poll_errors=0 max_poll_errors=5
+
     while true; do
-      STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
+      if ! STATUS=$(kubectl get job.batch/cyclonus -n netpol  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}'); then
+        poll_errors=$((poll_errors + 1))
+        echo "kubectl get job failed (${poll_errors}/${max_poll_errors} consecutive), retrying"
+        if [ "$poll_errors" -ge "$max_poll_errors" ]; then
+          echo "Giving up after ${max_poll_errors} consecutive kubectl errors."
+          return 1
+        fi
+        sleep 10
+        continue
+      fi
+      poll_errors=0
+
       if [ "$STATUS" == "True" ]; then
         echo "Job cyclonus has failed. Exiting."
         break
@@ -61,12 +74,12 @@ function run_cyclonus_tests(){
       kubectl wait --for=condition=complete job.batch/cyclonus -n netpol --timeout=60s > /dev/null 2>&1 && break
     done
 
-    kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
-    kubectl get pods -A -owide
+    kubectl_retry logs -n netpol job/cyclonus > ${DIR}/results.log
+    kubectl_retry get pods -A -owide
 
     # Cleanup after test finishes
-    kubectl delete clusterrolebinding cyclonus
-    kubectl delete ns netpol x y z
+    kubectl_retry delete clusterrolebinding cyclonus
+    kubectl_retry delete ns netpol x y z
 
     cat ${DIR}/results.log
 
