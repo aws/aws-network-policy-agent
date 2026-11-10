@@ -141,7 +141,11 @@ func buildChurnCronJob() *batchv1.CronJob {
 			Namespace: namespace,
 		},
 		Spec: batchv1.CronJobSpec{
-			Schedule:                   cronSchedule,
+			Schedule: cronSchedule,
+			// One Job at a time. With overlapping Jobs, pods of newer Jobs compete for the
+			// nodes' pod slots and IPs with the tail of older ones, so no Job finishes and the
+			// churn stalls on capacity rather than on the agent.
+			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
 			SuccessfulJobsHistoryLimit: &successfulJobsHistory,
 			FailedJobsHistoryLimit:     &failedJobsHistory,
 			JobTemplate: batchv1.JobTemplateSpec{
@@ -251,26 +255,28 @@ func assertNoChurnPodLeaks(output, nodeName string) {
 	}
 }
 
+// waitForChurnOrBail runs the churn for churnDuration and fails early only if it stops making
+// progress: no churn pod completes for jobStuckTimeout. Completed pods, not finished Jobs, are
+// the measure, because a Job can take longer than jobStuckTimeout to finish on nodes with few
+// pod slots or IPs while its pods still churn.
 func waitForChurnOrBail(jobStuckTimeout time.Duration) {
 	deadline := time.Now().Add(churnDuration)
-	start := time.Now()
+	lastProgress := time.Now()
+	completed := map[string]int32{}
 	for time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 
-		cj := &batchv1.CronJob{}
-		Expect(fw.K8sClient.Get(ctx, client.ObjectKey{
-			Name:      cronJobName,
-			Namespace: namespace,
-		}, cj)).ToNot(HaveOccurred())
-
-		if cj.Status.LastSuccessfulTime != nil {
-			if time.Since(cj.Status.LastSuccessfulTime.Time) > jobStuckTimeout {
-				Fail(fmt.Sprintf("CronJob last succeeded %v ago, stuck for > %v, bailing early",
-					time.Since(cj.Status.LastSuccessfulTime.Time), jobStuckTimeout))
+		jobs := &batchv1.JobList{}
+		Expect(fw.K8sClient.List(ctx, jobs, client.InNamespace(namespace))).ToNot(HaveOccurred())
+		for _, job := range jobs.Items {
+			if job.Status.Succeeded > completed[job.Name] {
+				completed[job.Name] = job.Status.Succeeded
+				lastProgress = time.Now()
 			}
-			continue
-		} else if time.Since(start) > jobStuckTimeout {
-			Fail(fmt.Sprintf("CronJob has never succeeded after %v, bailing early", jobStuckTimeout))
+		}
+
+		if time.Since(lastProgress) > jobStuckTimeout {
+			Fail(fmt.Sprintf("no churn pod completed for %v, bailing early", jobStuckTimeout))
 		}
 	}
 }
