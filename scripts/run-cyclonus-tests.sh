@@ -122,7 +122,7 @@ run_ginkgo_suite policy.test 15m
 
 if [[ $RUN_EBPF_TESTS == "true" ]]; then
     # Specs that need one IP family skip on the other.
-    run_ginkgo_suite ebpf.test 15m
+    run_suite_restoring_agent_args ebpf.test 15m
 fi
 
 if [[ $RUN_CLUSTER_NETWORK_POLICY_TESTS == "true" ]]; then
@@ -134,7 +134,7 @@ if [[ $RUN_RESTART_TESTS == "true" ]]; then
 fi
 
 if [[ $RUN_AGENT_FLAGS_TESTS == "true" ]]; then
-    run_agent_flags_suite 15m
+    run_suite_restoring_agent_args agentflags.test 15m
 fi
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
