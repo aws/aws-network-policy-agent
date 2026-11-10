@@ -2690,3 +2690,27 @@ func TestRecoverBPFStatePolicyEventMaps(t *testing.T) {
 	_, ok = client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, "/sys/fs/bpf/globals/aws/maps/does_not_exist")
 	assert.False(t, ok)
 }
+
+// The datapath skips ACCEPT events when the scope flag is deny or when the
+// agent would not consume them; otherwise it keeps emitting them.
+func TestPolicyEventDatapathScope(t *testing.T) {
+	tests := []struct {
+		name           string
+		denyOnly       bool
+		acceptConsumed bool
+		wantVal        uint32
+		wantMsg        string
+	}{
+		{"scope all at debug", false, true, POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"},
+		{"scope all above debug", false, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"},
+		{"scope deny at debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+		{"scope deny above debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVal, gotMsg := policyEventDatapathScope(tt.denyOnly, tt.acceptConsumed)
+			assert.Equal(t, tt.wantVal, gotVal)
+			assert.Equal(t, tt.wantMsg, gotMsg)
+		})
+	}
+}

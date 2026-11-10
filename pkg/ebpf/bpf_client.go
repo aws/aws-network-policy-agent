@@ -174,6 +174,21 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
+// policyEventDatapathScope returns the value to write to the policy events
+// scope map and the startup log line. ACCEPT events are skipped in the
+// datapath when --policy-event-logs-scope=deny is set, or when nothing in the
+// agent consumes them (the log level is above debug).
+func policyEventDatapathScope(denyOnly, acceptConsumed bool) (uint32, string) {
+	switch {
+	case denyOnly:
+		return POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"
+	case !acceptConsumed:
+		return POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"
+	default:
+		return POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"
+	}
+}
+
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string, policyEventsDenyOnly bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
@@ -351,27 +366,21 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
-		// Write --policy-event-logs-scope into the datapath on every start, so a
-		// changed value applies on a warm restart too. Fails open: if the map is
-		// missing or the write fails, the datapath keeps emitting ACCEPT events.
+		// Write the datapath scope on every start, so a changed flag or log level
+		// applies on a warm restart too. Fails open: if the map is missing or the
+		// write fails, the datapath keeps emitting ACCEPT events.
+		scopeVal, scopeMsg := policyEventDatapathScope(policyEventsDenyOnly, events.AcceptEventsConsumed(policyEventsDenyOnly))
 		scopeMap, haveScopeMap := ebpfClient.resolveGlobalMap(policyEventsScopeMap, policyEventsScopeMapPresent, POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
 		if haveScopeMap {
-			key, val := uint32(0), uint32(POLICY_EVENT_SCOPE_ALL)
-			if policyEventsDenyOnly {
-				val = POLICY_EVENT_SCOPE_DENY
-			}
-			if err := scopeMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&val)), 0); err != nil {
-				log().Errorf("Failed to write policy event scope (denyOnly=%v): %v", policyEventsDenyOnly, err)
+			key := uint32(0)
+			if err := scopeMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&scopeVal)), 0); err != nil {
+				log().Errorf("Failed to write policy event scope %d: %v", scopeVal, err)
 				sdkAPIErr.WithLabelValues("WritePolicyEventScope").Inc()
 			}
 		} else {
-			log().Warnf("Policy events scope map not found; datapath keeps its current scope (requested denyOnly=%v)", policyEventsDenyOnly)
+			log().Warnf("Policy events scope map not found; datapath keeps its current scope (requested %d)", scopeVal)
 		}
-		if policyEventsDenyOnly {
-			log().Info("Policy event logs scope: deny (ACCEPT events are not emitted)")
-		} else {
-			log().Info("Policy event logs scope: all")
-		}
+		log().Info(scopeMsg)
 		// Export the kernel's failed-DENY-write counter. Read only at /metrics
 		// scrape time on the existing controller-runtime registry; no new
 		// listener. Non-fatal if the map is absent.
