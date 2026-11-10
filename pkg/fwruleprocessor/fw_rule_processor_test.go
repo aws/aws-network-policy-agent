@@ -3,6 +3,7 @@ package fwruleprocessor
 import (
 	"encoding/binary"
 	"net"
+	"runtime"
 	"sort"
 	"testing"
 
@@ -1016,4 +1017,36 @@ func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
 	if len(ports32) != 1 || !containsInt(ports32, 80) {
 		t.Fatalf("2001:db8::/32 ports = %v, want [80]", ports32)
 	}
+}
+
+// TestClusterPolicy_RepeatedCIDRNotExponential verifies that N rules sharing the
+// same CIDR are processed in linear time and memory. Previously each repeat copied
+// the CIDR's own accumulated L4 rules onto itself, doubling the list per rule (O(2^N)).
+func TestClusterPolicy_RepeatedCIDRNotExponential(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	const n = 20
+
+	rules := make([]EbpfFirewallRules, 0, n)
+	for i := 0; i < n; i++ {
+		port := int32(1000 + i)
+		rules = append(rules, EbpfFirewallRules{
+			IPCidr:   "10.0.0.0/8",
+			L4Info:   []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port}},
+			Action:   v1alpha1.ClusterNetworkPolicyRuleActionAccept,
+			Priority: 100,
+		})
+	}
+
+	_, cidrNet, _ := net.ParseCIDR("10.0.0.0/8")
+	key := string(utils.ComputeTrieKey(*cidrNet, false))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, err := NewFirewallRuleProcessor("192.168.0.1", "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(rules)
+	runtime.ReadMemStats(&after)
+
+	assert.NoError(t, err)
+	assert.Len(t, decodeCPETrieValuePorts(got[key]), n)
+	// Linear processing allocates a few KB; the exponential version allocates hundreds of MB at n=20.
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(10<<20), "allocations grew exponentially with repeated CIDR")
 }
