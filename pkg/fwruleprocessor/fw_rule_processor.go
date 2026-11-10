@@ -363,7 +363,9 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 		overlappingCIDR := f.findMostSpecificOverlap(cidr, processedCIDRs)
 
 		// Copy L4 rules from overlapping CIDR if found
-		if overlappingCIDR != "" {
+		// A CIDR that was already processed (same CIDR in several rules) already holds its own rules;
+		// copying them onto itself would double the list on every repeat.
+		if overlappingCIDR != "" && overlappingCIDR != cidr {
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], cidrL4Rules[overlappingCIDR]...)
 		}
 
