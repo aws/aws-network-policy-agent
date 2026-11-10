@@ -42,8 +42,23 @@ func trackFailedCleanups(targetPods, failedCleanups []npatypes.Pod,
 	return trackedPods, trackedPodIdentifiers
 }
 
+// attachOutcome counts what attachProbesForIdentifier did, so a caller can tell a pass that
+// only skipped from one that attached nothing at all.
+type attachOutcome struct {
+	// attached is the number of pods whose probes are now in place.
+	attached int
+	// skipped is the number of pods whose attach cannot be retried into success.
+	skipped int
+}
+
 // attachProbesForIdentifier attaches eBPF probes for every pod in targetPods that belongs to
-// podIdentifier, and returns the joined failures.
+// podIdentifier. It returns what it did and the joined failures, counting skips in the outcome
+// rather than returning them as an error.
+//
+// Skips are kept out of the error on purpose. ErrProbeAttachSkipped marks an attach no retry
+// can resolve, but errors.Is matches when any arm of a join carries it, so returning a skip
+// alongside a real failure would let one skipped pod convince the caller that a map-write
+// ENOMEM or a sibling pod's genuine attach failure also needs no retry.
 //
 // A failure is recorded and the loop continues rather than returning: GetPodIdentifier strips
 // the last name segment, so replicas of one workload share this identifier and the single pair
@@ -54,8 +69,9 @@ func trackFailedCleanups(targetPods, failedCleanups []npatypes.Pod,
 // Callers must still check HasBPFContext before programming: AttacheBPFProbes skips pods
 // already deleted from the node, so an endpoint can list a pod that has no programs here.
 func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
-	targetPods []npatypes.Pod) error {
+	targetPods []npatypes.Pod) (attachOutcome, error) {
 
+	var outcome attachOutcome
 	var attachErr error
 	for _, pod := range targetPods {
 		if utils.GetPodIdentifier(pod.Name, pod.Namespace) != podIdentifier {
@@ -67,12 +83,19 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 		// podConfirmedLive=false: endpoints can still list pods already deleted from this node.
 		if _, err := ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier,
 			ebpf.INTERFACE_COUNT_UNKNOWN, false); err != nil {
+			if errors.Is(err, ebpf.ErrProbeAttachSkipped) {
+				outcome.skipped++
+				log().Warnf("Skipped eBPF probe attach for pod %s namespace %s: %v",
+					pod.Name, pod.Namespace, err)
+				continue
+			}
 			attachErr = errors.Join(attachErr, fmt.Errorf(
 				"failed to attach eBPF probes for pod %s namespace %s : %w", pod.Name, pod.Namespace, err))
 			continue
 		}
 
+		outcome.attached++
 		log().Debugf("eBPF probes in place for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
-	return attachErr
+	return outcome, attachErr
 }

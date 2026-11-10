@@ -84,28 +84,31 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	value := utils.ComputeTrieValue([]v1alpha1.Port{}, true, false)
 	firewallMap[string(key)] = value
 
+	// Canonicalize each CIDR (mask off host bits) before sorting and before it is
+	// used as the cidrsMap key. A rule expressed with host bits set - e.g.
+	// 10.161.0.0/8, which a /8 mask reduces to the network 10.0.0.0/8 - would
+	// otherwise be keyed by its raw string and treated as distinct from
+	// 10.0.0.0/8. Their L4 (port) sets would never be merged, and because both
+	// encode to the identical LPM trie key, the final map write silently
+	// overwrites one with the other in Go's randomized map-iteration order,
+	// producing non-deterministic port enforcement across reconciliations.
+	// It must happen before the sort: an IPv4-mapped IPv6 CIDR such as
+	// ::ffff:10.0.0.0/104 canonicalizes to 10.0.0.0/8, and sorting on the raw
+	// /104 would place it after narrower rules.
+	for i := range firewallRules {
+		if !strings.Contains(string(firewallRules[i].IPCidr), "/") {
+			firewallRules[i].IPCidr += v1alpha1.NetworkAddress(f.hostMask)
+		}
+		if _, ipNet, err := net.ParseCIDR(string(firewallRules[i].IPCidr)); err == nil {
+			firewallRules[i].IPCidr = v1alpha1.NetworkAddress(ipNet.String())
+		}
+	}
+
 	//Sort the rules
 	sortFirewallRulesByPrefixLength(firewallRules, f.hostMask)
 
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
-
-		if !strings.Contains(string(firewallRule.IPCidr), "/") {
-			firewallRule.IPCidr += v1alpha1.NetworkAddress(f.hostMask)
-		}
-
-		// Canonicalize the CIDR (mask off host bits) before it is used as the
-		// cidrsMap key. A rule expressed with host bits set - e.g. 10.161.0.0/8,
-		// which a /8 mask reduces to the network 10.0.0.0/8 - would otherwise be
-		// keyed by its raw string and treated as distinct from 10.0.0.0/8. Their
-		// L4 (port) sets would never be merged, and because both encode to the
-		// identical LPM trie key, the final map write silently overwrites one
-		// with the other in Go's randomized map-iteration order, producing
-		// non-deterministic port enforcement across reconciliations. Masking here
-		// makes such rules share a key so their ports are merged deterministically.
-		if _, ipNet, err := net.ParseCIDR(string(firewallRule.IPCidr)); err == nil {
-			firewallRule.IPCidr = v1alpha1.NetworkAddress(ipNet.String())
-		}
 
 		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
@@ -318,7 +321,9 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 		overlappingCIDR := f.findMostSpecificOverlap(cidr, processedCIDRs)
 
 		// Copy L4 rules from overlapping CIDR if found
-		if overlappingCIDR != "" {
+		// A CIDR that was already processed (same CIDR in several rules) already holds its own rules;
+		// copying them onto itself would double the list on every repeat.
+		if overlappingCIDR != "" && overlappingCIDR != cidr {
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], cidrL4Rules[overlappingCIDR]...)
 		}
 

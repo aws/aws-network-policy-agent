@@ -71,6 +71,12 @@ var (
 	TC_V6_INGRESS_CT_DENY_BINARY = "tc.v6ingress.ctdeny.bpf.o"
 )
 
+// ErrProbeAttachSkipped marks a probe attach that could not be performed yet
+// and will not succeed on retry without new input. Reconcilers log it and move
+// on; CNI ADD must keep failing on it, since there a skip means the pod comes
+// up with no policy.
+var ErrProbeAttachSkipped = errors.New("skipping probe attach")
+
 // ctDenyKfuncs are the kernel functions the ct-deny ingress binaries call.
 var ctDenyKfuncs = []string{"bpf_skb_ct_lookup", "bpf_ct_change_timeout", "bpf_ct_release"}
 
@@ -669,6 +675,10 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		state = DEFAULT_DENY
 	}
 
+	// The ClusterNetworkPolicy tier is only ever POLICIES_APPLIED (a CNP applied) or DEFAULT_ALLOW (no CNP), it is never DEFAULT_DENY (even in strict mode).
+	// Thus: Seed the cluster-policy pod-state key with DEFAULT_ALLOW.
+	cpState := DEFAULT_ALLOW
+
 	for interfaceName, pinPath := range l.interfaceNametoIngressPinPath {
 		podIdentifier, _ := utils.GetPodIdentifierFromBPFPinPath(pinPath)
 		log().Infof("ReattachEbpfProbes attaching ingress for %s interface %s", podIdentifier, interfaceName)
@@ -686,7 +696,7 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
-		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, true, false)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, cpState, true, false)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
@@ -712,7 +722,7 @@ func (l *bpfClient) ReAttachEbpfProbes() error {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
 
-		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, state, false, true)
+		err = l.UpdatePodStateEbpfMaps(podIdentifier, CLUSTER_POLICY_POD_STATE_MAP_KEY, cpState, false, true)
 		if err != nil {
 			log().Errorf("Map update(s) failed for podIdentifier %s error: %v", podIdentifier, err)
 		}
@@ -785,7 +795,7 @@ func (l *bpfClient) getInterfaceCountForPod(pod types.NamespacedName, podIdentif
 	}
 
 	// No interface count available and multi-NIC enabled - skip attachment
-	return 0, errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown")
+	return 0, fmt.Errorf("%w: multiNIC enabled and interface count is unknown", ErrProbeAttachSkipped)
 }
 
 func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (_ bool, err error) {
@@ -849,7 +859,8 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 		// Note: The below naming convention is tied to VPC CNI and isn't meant to be generic
 		hostVethNames[index], err = utils.GetHostVethName(pod.Name, pod.Namespace, index, []string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
 		if err != nil {
-			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted", pod.Name, pod.Namespace)
+			// A multiple-prefix match is not a missing pod, so the error matters here.
+			log().Warnf("Failed to attach ebpf probes for pod %s in namespace %s. Pod might have been deleted: %v", pod.Name, pod.Namespace, err)
 			return false, err
 		}
 	}
@@ -948,7 +959,7 @@ func (l *bpfClient) attachIngressBPFProbe(hostVethName string, podIdentifier str
 
 	log().Infof("Attempting to do an Ingress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCEgressAttach(hostVethName, progFD, utils.TC_INGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale ingress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCEgressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Ingress TC detach failed on %s: %v", hostVethName, detachErr)
@@ -972,7 +983,7 @@ func (l *bpfClient) attachEgressBPFProbe(hostVethName string, podIdentifier stri
 
 	log().Infof("Attempting to do an Egress Attach with progFD: %d", progFD)
 	err = l.bpfTCClient.TCIngressAttach(hostVethName, progFD, utils.TC_EGRESS_PROG)
-	if err != nil && utils.IsFileExistsError(err.Error()) {
+	if err != nil && utils.IsFileExistsError(err) {
 		log().Warnf("Stale egress TC filter on %s; detaching before re-attach", hostVethName)
 		if detachErr := l.bpfTCClient.TCIngressDetach(hostVethName); detachErr != nil {
 			log().Errorf("Egress TC detach failed on %s: %v", hostVethName, detachErr)

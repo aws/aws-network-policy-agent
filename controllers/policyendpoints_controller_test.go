@@ -22,7 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -71,12 +70,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 			},
 		).AnyTimes()
 
-		_, err := policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      policyEndpoint.GetName(),
-				Namespace: policyEndpoint.GetNamespace(),
-			},
-		})
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), peRequestOf(&policyEndpoint))
 
 		assert.Nil(t, err)
 		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("allow-all-egress", "my-namespace"))
@@ -85,9 +79,9 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
 		assert.True(t, ok)
-		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+		assert.Contains(t, val.([]utils.PolicyEndpointRef), utils.PolicyEndpointRef{Name: "allow-all-egress-abcd", Parent: "allow-all-egress"})
 
-		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcd/my-namespace")
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load(peRequestOf(&policyEndpoint))
 		assert.True(t, ok)
 		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 	})
@@ -117,12 +111,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 			},
 		).MaxTimes(1)
 
-		_, err := policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      policyEndpoint.GetName(),
-				Namespace: policyEndpoint.GetNamespace(),
-			},
-		})
+		_, err := policyEndpointReconciler.Reconcile(context.TODO(), peRequestOf(&policyEndpoint))
 
 		assert.Nil(t, err)
 		val, ok := policyEndpointReconciler.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier("allow-all-egress", "my-namespace"))
@@ -131,9 +120,9 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 		val, ok = policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Load("deployment1rs@my-namespace")
 		assert.True(t, ok)
-		assert.True(t, lo.Contains(val.([]string), "allow-all-egress-abcd"))
+		assert.Contains(t, val.([]utils.PolicyEndpointRef), utils.PolicyEndpointRef{Name: "allow-all-egress-abcd", Parent: "allow-all-egress"})
 
-		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load("allow-all-egress-abcd/my-namespace")
+		val, ok = policyEndpointReconciler.policyEndpointSelectorMap.Load(peRequestOf(&policyEndpoint))
 		assert.True(t, ok)
 		assert.Equal(t, 2, len(val.([]npatypes.Pod)))
 
@@ -153,12 +142,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 			},
 		).AnyTimes()
 
-		_, err = policyEndpointReconciler.Reconcile(context.TODO(), controllerruntime.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      policyEndpoint.GetName(),
-				Namespace: policyEndpoint.GetNamespace(),
-			},
-		})
+		_, err = policyEndpointReconciler.Reconcile(context.TODO(), peRequestOf(&policyEndpoint))
 		assert.Nil(t, err)
 		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.networkPolicyToPodIdentifierMap))
 		assert.Equal(t, 0, sizeOfSyncMap(&policyEndpointReconciler.podIdentifierToPolicyEndpointMap))
@@ -267,12 +251,7 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 		currentPE = getPolicyEndpoint("allow-all-egress", namespace,
 			[]policyendpoint.PodEndpoint{localPod, stableRemotePod, churnPod})
 
-		_, err := r.Reconcile(context.TODO(), controllerruntime.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      currentPE.GetName(),
-				Namespace: currentPE.GetNamespace(),
-			},
-		})
+		_, err := r.Reconcile(context.TODO(), peRequestOf(&currentPE))
 		assert.Nil(t, err)
 	}
 
@@ -328,7 +307,7 @@ func TestPolicyEndpointReconcile_StaleDeletedPodDoesNotBlockLiveProgramming(t *t
 		},
 	).AnyTimes()
 
-	req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: namespace}}
+	req := peRequestOf(&currentPE)
 	_, err := r.Reconcile(context.Background(), req)
 	assert.NoError(t, err)
 
@@ -376,7 +355,7 @@ func TestPolicyEndpointReconcile_LiveDeselectionPurgesMapsAndRestoresBaseline(t 
 		},
 	).AnyTimes()
 
-	req := controllerruntime.Request{NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: namespace}}
+	req := peRequestOf(&currentPE)
 	_, err := r.Reconcile(context.Background(), req)
 	assert.NoError(t, err)
 
@@ -431,21 +410,21 @@ func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T)
 		},
 	).AnyTimes()
 
-	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPE.Name})
+	deletedReq := EndpointRequest{Endpoint: types.NamespacedName{Name: deletedPEName, Namespace: namespace}, Parent: deletedPolicy}
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []utils.PolicyEndpointRef{
+		{Name: deletedPEName, Parent: deletedPolicy}, {Name: survivingPE.Name, Parent: survivingPolicy}})
 	r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(deletedPolicy, namespace), []string{podIdentifier})
-	r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+	r.policyEndpointSelectorMap.Store(deletedReq, []npatypes.Pod{targetPod})
 
-	_, err := r.Reconcile(context.Background(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
-	})
+	_, err := r.Reconcile(context.Background(), deletedReq)
 	assert.NoError(t, err)
 
 	mappedPEs, found := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
 	assert.True(t, found, "MAP1 key must survive while another NP still selects the identifier")
-	assert.ElementsMatch(t, []string{survivingPE.Name}, mappedPEs.([]string))
+	assert.Equal(t, refsOf(survivingPolicy, survivingPE.Name), mappedPEs.([]utils.PolicyEndpointRef))
 	_, found = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(deletedPolicy, namespace))
 	assert.False(t, found, "the deleted policy's MAP3 snapshot must be removed")
-	_, found = r.policyEndpointSelectorMap.Load(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace))
+	_, found = r.policyEndpointSelectorMap.Load(deletedReq)
 	assert.False(t, found, "the deleted PE's MAP2 entry must be removed")
 	assert.Contains(t, mockBpf.CallLog, "UpdateEbpfMaps", "cleanup must reapply the surviving policy's rules")
 	assert.Contains(t, mockBpf.LastIngressRules, fwrp.EbpfFirewallRules{IPCidr: "10.0.0.0/8"})
@@ -521,13 +500,12 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 				},
 			).AnyTimes()
 
-			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{deletedPEName, survivingPEName})
+			deletedReq := EndpointRequest{Endpoint: types.NamespacedName{Name: deletedPEName, Namespace: namespace}, Parent: policyName}
+			r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(policyName, deletedPEName, survivingPEName))
 			r.networkPolicyToPodIdentifierMap.Store(utils.GetNetworkPolicyIdentifier(policyName, namespace), []string{podIdentifier})
-			r.policyEndpointSelectorMap.Store(utils.GetPolicyEndpointIdentifier(deletedPEName, namespace), []npatypes.Pod{targetPod})
+			r.policyEndpointSelectorMap.Store(deletedReq, []npatypes.Pod{targetPod})
 
-			_, err := r.Reconcile(context.Background(), controllerruntime.Request{
-				NamespacedName: types.NamespacedName{Name: deletedPEName, Namespace: namespace},
-			})
+			_, err := r.Reconcile(context.Background(), deletedReq)
 			assert.NoError(t, err)
 
 			mappedPEs, found := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
@@ -535,7 +513,7 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 				assert.False(t, found)
 			} else {
 				assert.True(t, found)
-				assert.ElementsMatch(t, tt.wantMAP1, mappedPEs.([]string))
+				assert.ElementsMatch(t, tt.wantMAP1, refNames(mappedPEs.([]utils.PolicyEndpointRef)))
 			}
 
 			_, found = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(policyName, namespace))
@@ -588,9 +566,7 @@ func TestDeriveTargetPodsForParentNP_StaleIdentifierIsPurgedAndSelectedForCleanu
 		},
 	).AnyTimes()
 
-	_, err := r.Reconcile(context.Background(), controllerruntime.Request{
-		NamespacedName: types.NamespacedName{Name: currentPE.Name, Namespace: currentPE.Namespace},
-	})
+	_, err := r.Reconcile(context.Background(), peRequestOf(&currentPE))
 	assert.NoError(t, err)
 
 	previousIdentifier := utils.GetPodIdentifier(previousEndpoint.Name, namespace)
@@ -675,9 +651,7 @@ func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testi
 	).AnyTimes()
 
 	for _, pe := range []policyendpoint.PolicyEndpoint{policyEndpointA, policyEndpointB} {
-		_, err := r.Reconcile(context.Background(), controllerruntime.Request{
-			NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace},
-		})
+		_, err := r.Reconcile(context.Background(), peRequestOf(&pe))
 		assert.NoError(t, err)
 	}
 
@@ -698,7 +672,7 @@ func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testi
 		policyEndpoints, ok := r.podIdentifierToPolicyEndpointMap.Load(want.podIdentifier)
 		assert.True(t, ok, "missing forward mapping for namespace %s", want.namespace)
 		if ok {
-			assert.Contains(t, policyEndpoints.([]string), want.peName)
+			assert.Contains(t, refNames(policyEndpoints.([]utils.PolicyEndpointRef)), want.peName)
 		}
 	}
 
@@ -1017,9 +991,14 @@ func TestDeriveIngressAndEgressFirewallRules(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
-		var policyEndpointsList []string
-		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
-		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
+		parent := ""
+		for _, call := range tt.policyendpointGetCall {
+			if call.pe != nil {
+				parent = call.pe.Spec.PolicyRef.Name
+			}
+		}
+		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier,
+			[]utils.PolicyEndpointRef{{Name: tt.policyEndpointName, Parent: parent}})
 		for _, item := range tt.policyendpointGetCall {
 			call := item
 			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any(), gomock.Any()).DoAndReturn(
@@ -1298,13 +1277,12 @@ func TestDeriveTargetPods(t *testing.T) {
 		}
 
 		if tt.currentPods != nil {
-			policyEndpointReconciler.policyEndpointSelectorMap.Store(tt.policyendpoint.ObjectMeta.Name+tt.policyendpoint.ObjectMeta.Namespace,
-				tt.currentPods)
+			policyEndpointReconciler.policyEndpointSelectorMap.Store(peRequestOf(&tt.policyendpoint), tt.currentPods)
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
 			gotActivePods, _, _ := policyEndpointReconciler.deriveTargetPods(context.Background(),
-				&tt.policyendpoint, tt.parentPEList)
+				&tt.policyendpoint, tt.policyendpoint.Spec.PolicyRef.Name, tt.parentPEList)
 			assert.Equal(t, tt.want.activePods, gotActivePods)
 		})
 	}
@@ -1514,9 +1492,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
-		var policyEndpointsList []string
-		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName...)
-		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
+		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, refsOf("np", tt.policyEndpointName...))
 
 		t.Run(tt.name, func(t *testing.T) {
 			activePoliciesAvailable := policyEndpointReconciler.ArePoliciesAvailableInLocalCache(tt.podIdentifier)
@@ -1759,9 +1735,14 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 
 		mockClient := mock_client.NewMockClient(ctrl)
 		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
-		var policyEndpointsList []string
-		policyEndpointsList = append(policyEndpointsList, tt.policyEndpointName)
-		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, policyEndpointsList)
+		parent := ""
+		for _, call := range tt.policyendpointGetCall {
+			if call.pe != nil {
+				parent = call.pe.Spec.PolicyRef.Name
+			}
+		}
+		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier,
+			[]utils.PolicyEndpointRef{{Name: tt.policyEndpointName, Parent: parent}})
 		for _, item := range tt.policyendpointGetCall {
 			call := item
 			mockClient.EXPECT().Get(gomock.Any(), call.peRef, gomock.Any(), gomock.Any()).DoAndReturn(
@@ -1929,7 +1910,7 @@ func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
-	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
@@ -1943,7 +1924,7 @@ func TestCleanupPod_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -1985,7 +1966,7 @@ func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
-	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
@@ -1999,7 +1980,7 @@ func TestCleanupPod_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -2046,7 +2027,7 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
 	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
-	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, []string{remainingPE})
+	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
 	mockClient.EXPECT().Get(gomock.Any(), types.NamespacedName{Name: remainingPE, Namespace: namespace}, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
@@ -2060,7 +2041,7 @@ func TestCleanupPod_BothDirectionsActiveNoCatchAll(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
+	_, err := r.cleanupPod(context.Background(), targetPod, cleanedUpPE, true)
 	assert.NoError(t, err)
 
 	catchAll := fwrp.EbpfFirewallRules{IPCidr: "0.0.0.0/0"}
@@ -2097,7 +2078,7 @@ func TestCleanupPod_PodAlreadyTornDownSkipsWrites(t *testing.T) {
 		PodIP:          "10.3.3.3",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	// No eBPF map writes should have been attempted.
@@ -2127,7 +2108,7 @@ func TestCleanupPod_DeselectedLivePodRestoresBaseline(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	// Baseline restore writes the maps (updateeBPFMaps -> UpdateEbpfMaps + UpdatePodStateEbpfMaps).
@@ -2155,7 +2136,7 @@ func TestCleanupPod_DeselectedLivePodRestoresStrictModeBaseline(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.NoError(t, err)
 
 	assert.Contains(t, mockBpf.CallLog, "UpdatePodStateEbpfMaps")
@@ -2185,7 +2166,7 @@ func TestCleanupPod_BaselineRestoreFailureRequeues(t *testing.T) {
 		PodIP:          "10.1.1.1",
 	}
 
-	err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
+	_, err := r.cleanupPod(context.Background(), targetPod, "some-pe-abcd", true)
 	assert.Error(t, err, "a failed baseline restore must requeue so the restore is retried")
 
 	// The restore was genuinely attempted - this is not the already-torn-down skip path.

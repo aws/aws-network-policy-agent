@@ -44,6 +44,17 @@ jobs:
         run: make build-linux
       - name: Unit test
         run: make test
+      - name: Kernel conntrack tests
+        # These tests create a network namespace and conntrack flows, so they
+        # need root and skip under make test. Build as the runner user and run
+        # the binary with sudo, so no root-owned files land in the Go caches.
+        env:
+          CONNTRACK_KERNEL_TESTS: required
+        run: |
+          sudo modprobe nf_conntrack
+          go test -c -o "$RUNNER_TEMP/conntrack.test" ./pkg/ebpf/conntrack/
+          cd pkg/ebpf/conntrack
+          sudo --preserve-env=CONNTRACK_KERNEL_TESTS "$RUNNER_TEMP/conntrack.test" -test.run 'Kernel$' -test.v
       - name: Upload code coverage
         uses: codecov/codecov-action@v4
         with:

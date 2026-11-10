@@ -453,7 +453,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			podIdentifier:     "test-pod-skip",
 			numInterfaces:     0,
 			isMultiNICEnabled: true,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErr:           ErrProbeAttachSkipped,
 			wantTCAttachCalls: 0,
 		},
 		{
@@ -534,7 +534,7 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			}
 
 			_, gotError := testBpfClient.AttacheBPFProbes(tt.testPod, tt.podIdentifier, tt.numInterfaces, false)
-			assert.Equal(t, tt.wantErr, gotError)
+			assert.ErrorIs(t, gotError, tt.wantErr)
 		})
 	}
 }
@@ -830,7 +830,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 			providedCount:     0,
 			isMultiNICEnabled: true,
 			wantCount:         0,
-			wantErr:           errors.New("Skipping probe attach: multiNIC enabled and interface count is unknown"),
+			wantErr:           ErrProbeAttachSkipped,
 		},
 	}
 
@@ -847,7 +847,7 @@ func TestBpfClient_getInterfaceCountForPod(t *testing.T) {
 
 			gotCount, gotErr := testBpfClient.getInterfaceCountForPod(testPod, "test-pod-id", tt.providedCount)
 			assert.Equal(t, tt.wantCount, gotCount)
-			assert.Equal(t, tt.wantErr, gotErr)
+			assert.ErrorIs(t, gotErr, tt.wantErr)
 		})
 	}
 }
@@ -2152,11 +2152,11 @@ func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T
 				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 			)
 			if direction == "ingress" {
-				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(syscall.EEXIST)
 				mockTCClient.EXPECT().TCEgressDetach("mockedveth0").Return(errors.New("detach failed"))
 			} else {
 				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New(utils.ErrFileExists))
+				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(syscall.EEXIST)
 				mockTCClient.EXPECT().TCIngressDetach("mockedveth0").Return(errors.New("detach failed"))
 			}
 			wantUnpinned := concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress"))

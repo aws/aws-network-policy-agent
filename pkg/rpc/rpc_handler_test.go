@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -245,7 +244,8 @@ func reconcilerWithCachedPolicy(t *testing.T, ebpfClient *ebpf.MockBpfClient) *c
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pe).Build()
 	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", ebpfClient, false)
-	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}})
+	_, err := reconciler.Reconcile(context.Background(), controllers.EndpointRequest{
+		Endpoint: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}, Parent: pe.Spec.PolicyRef.Name})
 	require.NoError(t, err)
 	assert.True(t, reconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: policy cached")
 	return reconciler
@@ -318,7 +318,8 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 	mockBpfClient := &ebpf.MockBpfClient{}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cpe).Build()
 	clusterReconciler := controllers.NewClusterPolicyEndpointsReconciler(k8sClient, "10.0.0.1", mockBpfClient)
-	_, err := clusterReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: cpe.Name}})
+	_, err := clusterReconciler.Reconcile(context.Background(), controllers.EndpointRequest{
+		Endpoint: types.NamespacedName{Name: cpe.Name}, Parent: cpe.Spec.PolicyRef.Name})
 	require.NoError(t, err)
 	require.True(t, clusterReconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: cluster policy cached")
 

@@ -3,6 +3,7 @@ package fwruleprocessor
 import (
 	"encoding/binary"
 	"net"
+	"runtime"
 	"sort"
 	"testing"
 
@@ -950,4 +951,102 @@ func TestComputeMapEntries_SameFamilyExceptRetained(t *testing.T) {
 	wantKey := string(utils.ComputeTrieKey(*exceptNet, false))
 	_, ok := got[wantKey]
 	assert.Truef(t, ok, "same-family except 10.10.0.0/16 was not added to the map")
+}
+
+// TestFWRuleProcessor_IPv4MappedCIDRSortedByCanonicalPrefix covers an IPv4-mapped
+// IPv6 ipBlock in an IPv4 cluster. "::ffff:10.0.0.0/104" canonicalizes to
+// 10.0.0.0/8, so it must be ordered as a /8 (before the /24) for port
+// inheritance to run from the broader CIDR to the narrower one.
+func TestFWRuleProcessor_IPv4MappedCIDRSortedByCanonicalPrefix(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80, port443 int32 = 80, 443
+
+	rules := []EbpfFirewallRules{
+		{IPCidr: "10.0.0.0/24", L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port80}}},
+		{IPCidr: "::ffff:10.0.0.0/104", L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}}},
+	}
+
+	_, net8, _ := net.ParseCIDR("10.0.0.0/8")
+	_, net24, _ := net.ParseCIDR("10.0.0.0/24")
+	key8 := string(utils.ComputeTrieKey(*net8, false))
+	key24 := string(utils.ComputeTrieKey(*net24, false))
+
+	for i := 0; i < 50; i++ {
+		got, err := NewFirewallRuleProcessor("10.255.0.1", "/32", false).ComputeMapEntriesFromEndpointRules(append([]EbpfFirewallRules(nil), rules...))
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+		ports8 := decodeTrieValuePorts(got[key8])
+		ports24 := decodeTrieValuePorts(got[key24])
+		if len(ports8) != 1 || !containsInt(ports8, 443) {
+			t.Fatalf("iteration %d: 10.0.0.0/8 ports = %v, want [443]", i, ports8)
+		}
+		if len(ports24) != 2 || !containsInt(ports24, 80) || !containsInt(ports24, 443) {
+			t.Fatalf("iteration %d: 10.0.0.0/24 ports = %v, want 80 and 443", i, ports24)
+		}
+	}
+}
+
+// TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode is the IPv6-cluster
+// counterpart of the test above. "::ffff:10.0.0.0/104" canonicalizes to the IPv4
+// network 10.0.0.0/8, so in an IPv6 cluster it is skipped like any other IPv4
+// rule and must not contribute its port to the IPv6 entries or create an entry
+// of its own.
+func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	var port80, port443 int32 = 80, 443
+
+	rules := []EbpfFirewallRules{
+		{IPCidr: "2001:db8::/32", L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port80}}},
+		{IPCidr: "::ffff:10.0.0.0/104", L4Info: []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port443}}},
+	}
+
+	_, net32, _ := net.ParseCIDR("2001:db8::/32")
+	_, net8, _ := net.ParseCIDR("10.0.0.0/8")
+	key32 := string(utils.ComputeTrieKey(*net32, true))
+	key8 := string(utils.ComputeTrieKey(*net8, false))
+
+	got, err := NewFirewallRuleProcessor("fd00::1", "/128", true).ComputeMapEntriesFromEndpointRules(rules)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := got[key8]; ok {
+		t.Fatalf("IPv4-mapped rule created a 10.0.0.0/8 entry in an IPv6 cluster")
+	}
+	ports32 := decodeTrieValuePorts(got[key32])
+	if len(ports32) != 1 || !containsInt(ports32, 80) {
+		t.Fatalf("2001:db8::/32 ports = %v, want [80]", ports32)
+	}
+}
+
+// TestClusterPolicy_RepeatedCIDRNotExponential verifies that N rules sharing the
+// same CIDR are processed in linear time and memory. Previously each repeat copied
+// the CIDR's own accumulated L4 rules onto itself, doubling the list per rule (O(2^N)).
+func TestClusterPolicy_RepeatedCIDRNotExponential(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	const n = 20
+
+	rules := make([]EbpfFirewallRules, 0, n)
+	for i := 0; i < n; i++ {
+		port := int32(1000 + i)
+		rules = append(rules, EbpfFirewallRules{
+			IPCidr:   "10.0.0.0/8",
+			L4Info:   []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port}},
+			Action:   v1alpha1.ClusterNetworkPolicyRuleActionAccept,
+			Priority: 100,
+		})
+	}
+
+	_, cidrNet, _ := net.ParseCIDR("10.0.0.0/8")
+	key := string(utils.ComputeTrieKey(*cidrNet, false))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, err := NewFirewallRuleProcessor("192.168.0.1", "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(rules)
+	runtime.ReadMemStats(&after)
+
+	assert.NoError(t, err)
+	assert.Len(t, decodeCPETrieValuePorts(got[key]), n)
+	// Linear processing allocates a few KB; the exponential version allocates hundreds of MB at n=20.
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(10<<20), "allocations grew exponentially with repeated CIDR")
 }
