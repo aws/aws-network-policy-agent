@@ -274,11 +274,23 @@ func publishDataToCloudwatch(ctx context.Context, message string) {
 
 // consumeNonDeny reports whether a non-DENY event produces any output.
 // Non-DENY flow lines are Debug lines and CloudWatch publishes non-DENY only at
-// debug, so below debug nothing uses them. With --policy-event-logs-scope=deny
-// they are dropped too: the datapath should not emit them, and this backstop
-// drops any that still arrive.
+// debug, so above debug nothing uses them. With --policy-event-logs-scope=deny
+// they are not used either.
 func consumeNonDeny(debugEnabled, denyOnly bool) bool {
 	return debugEnabled && !denyOnly
+}
+
+// flowDebugEnabled reports whether the flow logger writes Debug lines.
+func flowDebugEnabled() bool {
+	return logger.GetFlowLogger().Core().Enabled(zapcore.DebugLevel)
+}
+
+// AcceptEventsConsumed reports whether the agent uses ACCEPT events at all,
+// given the configured log level and --policy-event-logs-scope. When it
+// returns false the datapath is told not to emit them; the event loop applies
+// the same rule to any that still arrive.
+func AcceptEventsConsumed(denyOnly bool) bool {
+	return consumeNonDeny(flowDebugEnabled(), denyOnly)
 }
 
 func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool, denyOnly bool) {
@@ -286,7 +298,7 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 	// dedicated non-sugared logger without caller capture for the hot path
 	flowLog := logger.GetFlowLogger()
 	// Gate ACCEPT logging on the core's level rather than the raw flag string.
-	debugEnabled := flowLog.Core().Enabled(zapcore.DebugLevel)
+	debugEnabled := flowDebugEnabled()
 	go func() {
 		// Hold ringMap for the reader's lifetime: cilium/ebpf closes the
 		// underlying FD once the Map is garbage collected, and the reader
