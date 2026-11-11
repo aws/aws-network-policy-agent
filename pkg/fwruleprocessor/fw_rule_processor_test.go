@@ -1098,7 +1098,7 @@ func TestFWRuleProcessor_RemoveDuplicateL4Rules_CatchAllKept(t *testing.T) {
 		want int
 	}{
 		{
-			name: "explicit protocol-less TCP rule before empty catch-all keeps both",
+			name: "explicit port-less TCP rule before empty catch-all keeps both",
 			l4: []utils.L4Rule{
 				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
 				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
@@ -1106,7 +1106,7 @@ func TestFWRuleProcessor_RemoveDuplicateL4Rules_CatchAllKept(t *testing.T) {
 			want: 2,
 		},
 		{
-			name: "empty catch-all before explicit protocol-less TCP rule keeps both",
+			name: "empty catch-all before explicit port-less TCP rule keeps both",
 			l4: []utils.L4Rule{
 				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
 				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
