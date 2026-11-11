@@ -20,8 +20,8 @@ discovery and deduplication logic without AWS credentials.
 through manual dispatch. It builds the default-branch image, creates one cluster
 for every selected kernel and IP family, verifies the AMI and exact kernel on
 all nodes, and runs `scripts/run-kernel-smoke-tests.sh` — the kernel-sensitive
-suites that behave identically on IPv4 and IPv6 (`policy.test` and
-`strict.test`). Upstream Cyclonus conformance
+suites that behave identically on IPv4 and IPv6 (`policy.test`, `ebpf.test`,
+`agentflags.test` and `strict.test`). Upstream Cyclonus conformance
 already runs nightly in `e2e-conformance.yaml` and per change in the PR bot, so
 it is intentionally not repeated per kernel. Clusters are deleted in separate
 retrying cleanup jobs.
