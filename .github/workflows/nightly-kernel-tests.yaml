@@ -119,7 +119,7 @@ jobs:
     needs: [discover, build, test]
     if: always() && needs.discover.result == 'success' && needs.test.result != 'skipped'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -144,7 +144,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: ${{ env.REGION }}
-          role-duration-seconds: 7200
+          role-duration-seconds: 10800
       - name: Delete cluster
         run: |
           export CLUSTER_NAME=npa-nightly-k${KERNEL_LINE//./-}-${IP_FAMILY,,}-${GITHUB_RUN_ID}
