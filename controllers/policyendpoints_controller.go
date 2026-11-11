@@ -302,7 +302,6 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	policyEndpoint *policyk8sawsv1.PolicyEndpoint) error {
 	log().Infof("Processing Policy Endpoint  Name: %s Namespace %s", policyEndpoint.Name, policyEndpoint.Namespace)
-	start := time.Now()
 
 	// Identify pods local to the node. PolicyEndpoint resource will include `HostIP` field and
 	// network policy agent relies on it to filter local pods
@@ -336,6 +335,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	var programmingErr error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
+		start := time.Now()
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
 			policyEndpoint.Namespace, parentNP, false)
 		if err != nil {
