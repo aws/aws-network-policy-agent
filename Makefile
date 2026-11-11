@@ -164,8 +164,8 @@ EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v4events.bpf.c
 EBPF_EVENTS_BINARY_TC := ./pkg/ebpf/c/v4events.bpf.o
 EBPF_V6_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v6events.bpf.c
 EBPF_V6_EVENTS_BINARY_TC := ./pkg/ebpf/c/v6events.bpf.o
-# Node-wide maps the TC programs share; see pkg/ebpf/c/tc_shared.h. One binary
-# for both address families.
+# Node-wide maps the TC programs share (config and pending TCP resets); see
+# pkg/ebpf/c/tc_shared.h. One binary for both address families.
 EBPF_SHARED_SOURCE_TC := ./pkg/ebpf/c/tc.shared.bpf.c
 EBPF_SHARED_BINARY_TC := ./pkg/ebpf/c/tc.shared.bpf.o
 

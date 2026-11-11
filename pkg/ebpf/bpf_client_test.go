@@ -1794,7 +1794,16 @@ func recordClosedFDs(t *testing.T) *[]int {
 }
 
 func TestChooseIngressBinary(t *testing.T) {
+	// Distinct fake FDs, only so the test can tell which FDs the probe
+	// closed. Nothing is opened: the SDK is mocked and closeFD records.
 	globalMaps := map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:         {MapFD: 50},
+		POLICY_EVENTS_MAP_PIN_PATH:     {MapFD: 51},
+		TC_CONFIG_MAP_PIN_PATH:         {MapFD: 52},
+		TCP_RESET_PENDING_MAP_PIN_PATH: {MapFD: 53},
+	}
+	// What an agent from before the shared TC maps leaves on the node.
+	eventsMapsOnly := map[string]goebpfmaps.BpfMap{
 		CONNTRACK_MAP_PIN_PATH:     {MapFD: 50},
 		POLICY_EVENTS_MAP_PIN_PATH: {MapFD: 51},
 	}
@@ -1850,6 +1859,14 @@ func TestChooseIngressBinary(t *testing.T) {
 		},
 		{
 			name:           "no global maps yet: probe later",
+			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
+			wantProbeLater: true,
+		},
+		{
+			// The probe would fail to relocate against the missing maps.
+			// The recovered ones are kept for recoverBPFState.
+			name:           "shared TC maps missing: probe later",
+			globalMaps:     eventsMapsOnly,
 			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
 			wantProbeLater: true,
 		},
@@ -2199,17 +2216,18 @@ func TestRecoverBPFState_ReusesProbeGlobalMaps(t *testing.T) {
 }
 
 // loadTCSharedMaps reuses only the shared maps recoverBPFState stored. If they
-// weren't stored, every restart would create new ones, and programs loaded
-// against the old ones would keep the old config.
+// weren't stored, every restart would create new ones, and the programs pods
+// already run would keep the old config.
 func TestRecoverBPFState_StoresSharedTCMaps(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	// A fake FD, only so the test can tell the stored map is the recovered
-	// one. Nothing is opened: the SDK is mocked.
+	// Distinct fake FDs, only so the test can tell which map was stored under
+	// which pin path. Nothing is opened: the SDK is mocked.
 	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
-		TC_CONFIG_MAP_PIN_PATH: {MapFD: 60},
+		TC_CONFIG_MAP_PIN_PATH:         {MapFD: 60},
+		TCP_RESET_PENDING_MAP_PIN_PATH: {MapFD: 61},
 	}, nil)
 	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
 
@@ -2217,7 +2235,7 @@ func TestRecoverBPFState_StoresSharedTCMaps(t *testing.T) {
 	globalMaps := new(sync.Map)
 	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), globalMaps, false, false, false)
 	require.NoError(t, err)
-	for pinPath, fd := range map[string]uint32{TC_CONFIG_MAP_PIN_PATH: 60} {
+	for pinPath, fd := range map[string]uint32{TC_CONFIG_MAP_PIN_PATH: 60, TCP_RESET_PENDING_MAP_PIN_PATH: 61} {
 		stored, ok := globalMaps.Load(pinPath)
 		require.True(t, ok, pinPath)
 		assert.Equal(t, fd, stored.(goebpfmaps.BpfMap).MapFD, pinPath)
@@ -2701,10 +2719,9 @@ func TestLoadTCSharedMaps(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			// Programs keep the maps they were loaded with, so the pinned
-			// ones are kept.
+			// Pods' programs reference the pinned maps, so they are kept.
 			name:      "recovered: reused",
-			recovered: []string{TC_CONFIG_MAP_PIN_PATH},
+			recovered: []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH},
 			want:      recoveredConfig,
 		},
 		{
@@ -2714,15 +2731,23 @@ func TestLoadTCSharedMaps(t *testing.T) {
 			want:     loadedConfig,
 		},
 		{
-			// The shared binary changed, so the maps may have another
-			// layout: new ones are loaded, and the recovered ones closed.
-			name:       "reload: loaded, recovered closed",
+			name:       "only one map recovered: loaded",
 			recovered:  []string{TC_CONFIG_MAP_PIN_PATH},
-			reloadMaps: true,
 			loadMaps:   map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
 			wantLoad:   true,
 			want:       loadedConfig,
 			wantClosed: []int{int(recoveredConfig.MapFD)},
+		},
+		{
+			// The caller reloads every pod's programs, so new maps are
+			// safe, and the recovered ones are closed.
+			name:       "reload: loaded, recovered closed",
+			recovered:  []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH},
+			reloadMaps: true,
+			loadMaps:   map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredConfig.MapFD)},
 		},
 		{
 			name:     "load fails",

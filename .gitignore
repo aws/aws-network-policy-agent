@@ -2,6 +2,7 @@
 coverage.txt
 *.h
 !pkg/ebpf/c/ct_deny.h
+!pkg/ebpf/c/rst_on_deny.h
 !pkg/ebpf/c/tc_shared.h
 *.o
 aws-eks-na-cli

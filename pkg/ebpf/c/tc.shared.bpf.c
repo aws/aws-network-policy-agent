@@ -6,8 +6,8 @@
 
 // aws-ebpf-sdk-go's EBPFPinType for a node-wide pin (0 none, 1 object, 2
 // global). The agent and every pod's programs must share one copy of each map,
-// so the config it writes is the one the programs see; the pin also keeps the
-// maps across agent restarts.
+// so the flag it writes and the RSTs ingress records are the ones the programs
+// see; the pin also keeps them across agent restarts.
 #define PIN_GLOBAL_NS 2
 
 // The map definition layout the agent's loader (aws-ebpf-sdk-go) reads, as in
@@ -27,6 +27,15 @@ struct bpf_map_def_pvt SEC("maps") aws_tc_config = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_config),
 	.max_entries = 1,
+	.pinning = PIN_GLOBAL_NS,
+};
+
+struct bpf_map_def_pvt SEC("maps") aws_tcp_reset_pending = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct tcp_reset_pending_key),
+	// Only the key's presence matters; a hash map still needs a value.
+	.value_size = sizeof(__u8),
+	.max_entries = TCP_RESET_PENDING_MAX_ENTRIES,
 	.pinning = PIN_GLOBAL_NS,
 };
 
