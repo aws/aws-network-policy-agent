@@ -1088,3 +1088,47 @@ func TestFWRuleProcessor_RemoveDuplicateL4Rules_ProtocolValue(t *testing.T) {
 		})
 	}
 }
+
+func TestFWRuleProcessor_RemoveDuplicateL4Rules_CatchAllKept(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+
+	tests := []struct {
+		name string
+		l4   []utils.L4Rule
+		want int
+	}{
+		{
+			name: "explicit protocol-less TCP rule before empty catch-all keeps both",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+			},
+			want: 2,
+		},
+		{
+			name: "empty catch-all before explicit protocol-less TCP rule keeps both",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
+			},
+			want: 2,
+		},
+		{
+			name: "two empty catch-alls with same priority/action deduplicate",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+			},
+			want: 1,
+		},
+	}
+
+	f := NewFirewallRuleProcessor("10.0.0.1", "/32", false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := f.removeDuplicateL4Rules(tt.l4); len(got) != tt.want {
+				t.Fatalf("removeDuplicateL4Rules() kept %d rules, want %d", len(got), tt.want)
+			}
+		})
+	}
+}

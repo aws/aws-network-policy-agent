@@ -446,7 +446,13 @@ func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) [
 			endPortKey = int(*p.L4PortProtocolInfo.EndPort)
 		}
 
-		if p.L4PortProtocolInfo.Protocol == nil {
+		if utils.IsL4RuleEmpty(p) {
+			// An empty L4 rule is a catch-all: ComputeTrieValueForCPE evaluates it
+			// with protocol ANY, so it must not share a key with an explicit
+			// protocol-less rule (which defaults to TCP) or deduplication could
+			// drop it and remove an intended deny for non-TCP traffic.
+			key = fmt.Sprintf("%s-%d-%d-%d-%s", "ANY", portKey, endPortKey, p.Priority, p.Action)
+		} else if p.L4PortProtocolInfo.Protocol == nil {
 			key = fmt.Sprintf("%s-%d-%d-%d-%s", "TCP", portKey, endPortKey, p.Priority, p.Action)
 		} else {
 			// Dereference the pointer so equal protocols share a key regardless of
