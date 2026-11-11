@@ -1,6 +1,12 @@
 package strict
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
@@ -10,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	network "k8s.io/api/networking/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const serverPort = 8080
@@ -51,6 +58,7 @@ var _ = Describe("Strict Mode Test Cases", func() {
 			serverPod           *v1.Pod
 			clientDeployment    *appsv1.Deployment
 			serverPodIP         string
+			dadWatchers         map[string]*v1.Pod
 			serverName          = "serverpod"
 			clientName          = "clientdeploy"
 			serverNetworkPolicy *network.NetworkPolicy
@@ -128,11 +136,27 @@ var _ = Describe("Strict Mode Test Cases", func() {
 					"first replica should reach the server once the egress policy is programmed")
 			})
 
+			// On IPv6 the new host veth's link-local address is tentative for ~1-2s while the node
+			// runs duplicate address detection, and the pod's first connection can fail in that
+			// window with no policy involved. Watchers are started on every node before the
+			// scale-up so the wait below adds only the remaining DAD time, not a pod start.
+			if fw.Options.IpFamily == "IPv6" {
+				By("starting a host-network DAD watcher on each node", func() {
+					dadWatchers = deployDADWatchers(namespace)
+				})
+			}
+
 			By("scaling the client deployment to 2", func() {
 				err := fw.DeploymentManager.ScaleDeploymentAndWaitTillReady(ctx, namespace, clientName, 2)
 				Expect(err).ToNot(HaveOccurred())
 				secondPod = podNameForReplica(namespace, clientName, firstPod)
 			})
+
+			if fw.Options.IpFamily == "IPv6" {
+				By("waiting for the second replica's host veth to finish DAD", func() {
+					waitForHostVethDAD(dadWatchers, namespace, secondPod)
+				})
+			}
 
 			// Second replica shares the pod identifier's already-programmed maps, so it must be
 			// allowed from its first packet with no cold-start deny. podNameForReplica returns it
@@ -155,6 +179,10 @@ var _ = Describe("Strict Mode Test Cases", func() {
 		})
 
 		AfterEach(func() {
+			for _, w := range dadWatchers {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, w)
+			}
+			dadWatchers = nil
 			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, serverPod)
 			fw.DeploymentManager.DeleteAndWaitUntilDeploymentDeleted(ctx, clientDeployment)
 			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, serverNetworkPolicy)
@@ -228,4 +256,68 @@ func podNameForReplica(ns, name, excludeName string) string {
 		return false
 	}, utils.ProbeTimeout, utils.ProbeInterval).Should(BeTrue(), "expected a running client replica with app=%s", name)
 	return podName
+}
+
+// deployDADWatchers starts one idle host-network pod per node and returns them by node name.
+func deployDADWatchers(ns string) map[string]*v1.Pod {
+	nodes := &v1.NodeList{}
+	Expect(fw.K8sClient.List(ctx, nodes)).To(Succeed())
+	watchers := map[string]*v1.Pod{}
+	for _, node := range nodes.Items {
+		// Client pods only land on schedulable nodes without NoSchedule/NoExecute taints.
+		if node.Spec.Unschedulable || slices.ContainsFunc(node.Spec.Taints, func(t v1.Taint) bool {
+			return t.Effect == v1.TaintEffectNoSchedule || t.Effect == v1.TaintEffectNoExecute
+		}) {
+			continue
+		}
+		ctnr := manifest.NewBusyBoxContainerBuilder().
+			ImageRepository(fw.Options.TestImageRegistry).
+			Command([]string{"/bin/sh", "-c"}).
+			Args([]string{"sleep 1000000"}).
+			Build()
+		pod := manifest.NewDefaultPodBuilder().
+			Name("dad-watch-" + node.Name).
+			Namespace(ns).
+			Container(ctnr).
+			NodeName(node.Name).
+			Build()
+		pod.Spec.HostNetwork = true
+		created, err := fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, pod, 2*time.Minute)
+		Expect(err).ToNot(HaveOccurred())
+		watchers[node.Name] = created
+	}
+	return watchers
+}
+
+// waitForHostVethDAD waits until the host side of podName's veth has a link-local address
+// that is no longer tentative. The veth name is a prefix plus the first 11 hex characters of
+// sha1("<namespace>.<pod>"), so the hash identifies it in /proc/net/if_inet6.
+func waitForHostVethDAD(watchers map[string]*v1.Pod, ns, podName string) {
+	pod := &v1.Pod{}
+	Expect(fw.K8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: podName}, pod)).To(Succeed())
+	watcher, ok := watchers[pod.Spec.NodeName]
+	Expect(ok).To(BeTrue(), "no DAD watcher on node %s", pod.Spec.NodeName)
+	h := sha1.Sum([]byte(fmt.Sprintf("%s.%s", ns, podName)))
+	hash := hex.EncodeToString(h[:])[:11]
+
+	Eventually(func() (bool, error) {
+		out, err := fw.PodManager.ExecInPod(ns, watcher.Name, []string{"cat", "/proc/net/if_inet6"})
+		if err != nil {
+			return false, err
+		}
+		for _, line := range strings.Split(out, "\n") {
+			// address ifindex prefixlen scope flags ifname
+			f := strings.Fields(line)
+			if len(f) != 6 || !strings.HasSuffix(f[5], hash) || f[3] != "20" {
+				continue
+			}
+			flags, err := strconv.ParseUint(f[4], 16, 32)
+			if err != nil {
+				return false, err
+			}
+			return flags&0x40 == 0, nil // IFA_F_TENTATIVE
+		}
+		return false, nil
+	}, 10*time.Second, 200*time.Millisecond).Should(BeTrue(),
+		"host veth of %s should leave IPv6 DAD within 10s", podName)
 }
