@@ -7,7 +7,7 @@ Guidance for coding agents and human contributors working in this repository.
 The AWS Network Policy Agent enforces Kubernetes NetworkPolicy and ClusterNetworkPolicy on EKS nodes with eBPF. It runs on each node as a container in the `aws-node` DaemonSet.
 
 - `main.go`: agent entry point. `controllers/`: reconcilers for PolicyEndpoint and ClusterPolicyEndpoint objects.
-- `pkg/ebpf/`: loads, attaches and recovers the BPF programs through `github.com/aws/aws-ebpf-sdk-go`. `pkg/ebpf/c/`: the BPF C sources, four tc programs and two events programs, v4 and v6. The two ingress sources are also built with `-DNPA_CT_SHORTEN_ON_DENY` into the ct-deny objects (code in `ct_deny.h`), so the image ships six tc objects and two events objects. The agent picks the ct-deny or the regular ingress object once at startup.
+- `pkg/ebpf/`: loads, attaches and recovers the BPF programs through `github.com/aws/aws-ebpf-sdk-go`. `pkg/ebpf/c/`: the BPF C sources, four tc programs and two events programs, v4 and v6. The two ingress sources are also built with `-DNPA_CT_SHORTEN_ON_DENY` into the ct-deny objects (code in `ct_deny.h`), so the image ships six tc objects and two events objects, plus `tc.shared.bpf.o`, which holds no programs, only node-wide maps the tc programs share (`tc_shared.h`). The agent picks the ct-deny or the regular ingress object once at startup.
 - `pkg/fwruleprocessor/`: turns policy rules into BPF map entries. `pkg/rpc/`: the gRPC server the VPC CNI calls on pod add and delete.
 - `cmd/cli`, `cmd/cliv6`: the `aws-eks-na-cli` node tools. `test/`: ginkgo integration suites and framework.
 

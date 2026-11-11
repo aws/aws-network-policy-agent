@@ -164,10 +164,15 @@ EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v4events.bpf.c
 EBPF_EVENTS_BINARY_TC := ./pkg/ebpf/c/v4events.bpf.o
 EBPF_V6_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v6events.bpf.c
 EBPF_V6_EVENTS_BINARY_TC := ./pkg/ebpf/c/v6events.bpf.o
+# Node-wide maps the TC programs share; see pkg/ebpf/c/tc_shared.h. One binary
+# for both address families.
+EBPF_SHARED_SOURCE_TC := ./pkg/ebpf/c/tc.shared.bpf.c
+EBPF_SHARED_BINARY_TC := ./pkg/ebpf/c/tc.shared.bpf.o
 
 build-bpf: ## Build BPF.
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_EVENTS_SOURCE_TC) -o $(EBPF_EVENTS_BINARY_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_V6_EVENTS_SOURCE_TC) -o $(EBPF_V6_EVENTS_BINARY_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SHARED_SOURCE_TC) -o $(EBPF_SHARED_BINARY_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_EGRESS_TC) -o $(EBPF_BINARY_EGRESS_TC)
 	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC)

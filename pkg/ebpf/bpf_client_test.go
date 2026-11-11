@@ -2198,6 +2198,32 @@ func TestRecoverBPFState_ReusesProbeGlobalMaps(t *testing.T) {
 	assert.Equal(t, uint32(50), conntrackMap.(goebpfmaps.BpfMap).MapFD)
 }
 
+// loadTCSharedMaps reuses only the shared maps recoverBPFState stored. If they
+// weren't stored, every restart would create new ones, and programs loaded
+// against the old ones would keep the old config.
+func TestRecoverBPFState_StoresSharedTCMaps(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	// A fake FD, only so the test can tell the stored map is the recovered
+	// one. Nothing is opened: the SDK is mocked.
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
+		TC_CONFIG_MAP_PIN_PATH: {MapFD: 60},
+	}, nil)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	c := NewMockBpfClient()
+	globalMaps := new(sync.Map)
+	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), globalMaps, false, false, false)
+	require.NoError(t, err)
+	for pinPath, fd := range map[string]uint32{TC_CONFIG_MAP_PIN_PATH: 60} {
+		stored, ok := globalMaps.Load(pinPath)
+		require.True(t, ok, pinPath)
+		assert.Equal(t, fd, stored.(goebpfmaps.BpfMap).MapFD, pinPath)
+	}
+}
+
 // The probe that runs after the events binary created the global maps.
 func TestCtDenyBinaryLoads(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -2653,4 +2679,111 @@ func TestBpfClient_deleteBPFProgramAndMaps_FailedSDKCloseIsNotRepeated(t *testin
 			assert.Empty(t, bpffs.closed)
 		})
 	}
+}
+
+func TestLoadTCSharedMaps(t *testing.T) {
+	// Distinct fake FDs, only so the test can tell a reused map from a loaded
+	// one, and which were closed. Nothing is opened: the SDK is mocked and
+	// closeFD records.
+	recoveredConfig := goebpfmaps.BpfMap{MapFD: 70}
+	loadedConfig := goebpfmaps.BpfMap{MapFD: 80}
+	sharedBinary := goelf.BpfCustomData{FilePath: TC_SHARED_BINARY, CustomPinPath: globalMapsPinPrefix}
+
+	tests := []struct {
+		name       string
+		recovered  []string // pin paths recoverBPFState stored
+		reloadMaps bool
+		loadMaps   map[string]goebpfmaps.BpfMap
+		loadErr    error
+		wantLoad   bool
+		want       goebpfmaps.BpfMap
+		wantClosed []int
+		wantErr    bool
+	}{
+		{
+			// Programs keep the maps they were loaded with, so the pinned
+			// ones are kept.
+			name:      "recovered: reused",
+			recovered: []string{TC_CONFIG_MAP_PIN_PATH},
+			want:      recoveredConfig,
+		},
+		{
+			name:     "first start: loaded",
+			loadMaps: map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			wantLoad: true,
+			want:     loadedConfig,
+		},
+		{
+			// The shared binary changed, so the maps may have another
+			// layout: new ones are loaded, and the recovered ones closed.
+			name:       "reload: loaded, recovered closed",
+			recovered:  []string{TC_CONFIG_MAP_PIN_PATH},
+			reloadMaps: true,
+			loadMaps:   map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantClosed: []int{int(recoveredConfig.MapFD)},
+		},
+		{
+			name:     "load fails",
+			loadErr:  errors.New("failed to create map"),
+			wantLoad: true,
+			wantErr:  true,
+		},
+		{
+			name:     "binary has no config map",
+			loadMaps: map[string]goebpfmaps.BpfMap{},
+			wantLoad: true,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			if tt.wantLoad {
+				mockBpfClient.EXPECT().LoadBpfFileWithCustomData(sharedBinary).Return(nil, tt.loadMaps, tt.loadErr).Times(1)
+			}
+			c := &bpfClient{bpfSDKClient: mockBpfClient, globalMaps: new(sync.Map)}
+			for _, pinPath := range tt.recovered {
+				c.globalMaps.Store(pinPath, recoveredConfig)
+			}
+			closed := recordClosedFDs(t)
+
+			got, err := c.loadTCSharedMaps(tt.reloadMaps)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantClosed, *closed, "recovered maps closed")
+		})
+	}
+}
+
+func TestBinaryChanged(t *testing.T) {
+	// binaryChanged reads the binary relative to the working directory, as
+	// the agent does from the image's root.
+	t.Chdir(t.TempDir())
+	binary := TC_SHARED_BINARY
+	require.NoError(t, os.WriteFile(binary, []byte("new"), 0o644))
+	hostDir := "host/"
+	require.NoError(t, os.Mkdir(hostDir, 0o755))
+
+	// No copy on the host yet, as on the first start after an upgrade.
+	assert.True(t, binaryChanged(binary, hostDir), "missing host copy")
+
+	require.NoError(t, os.WriteFile(hostDir+TC_SHARED_BINARY, []byte("new"), 0o644))
+	assert.False(t, binaryChanged(binary, hostDir), "same contents")
+
+	require.NoError(t, os.WriteFile(hostDir+TC_SHARED_BINARY, []byte("old"), 0o644))
+	assert.True(t, binaryChanged(binary, hostDir), "different contents")
+
+	// Neither copy readable compares as unchanged, as the agent has always
+	// treated it, so the node keeps running on its recovered state rather
+	// than reloading every pod's programs from a binary it can't read.
+	require.NoError(t, os.Remove(binary))
+	require.NoError(t, os.Remove(hostDir+TC_SHARED_BINARY))
+	assert.False(t, binaryChanged(binary, hostDir), "both copies missing")
 }
