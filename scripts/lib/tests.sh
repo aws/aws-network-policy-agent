@@ -115,14 +115,22 @@ function run_ginkgo_suite(){
     : "${GINKGO_TEST_BUILD_DIR:?run_ginkgo_suite requires GINKGO_TEST_BUILD_DIR}"
     : "${CLUSTER_NAME:?run_ginkgo_suite requires CLUSTER_NAME}"
     : "${KUBE_CONFIG_PATH:?run_ginkgo_suite requires KUBE_CONFIG_PATH}"
-    : "${TEST_IMAGE_REGISTRY:?run_ginkgo_suite requires TEST_IMAGE_REGISTRY}"
     : "${IP_FAMILY:?run_ginkgo_suite requires IP_FAMILY}"
+    # registry.k8s.io is the scripts' default for cyclonus, which pulls upstream images. The
+    # ginkgo suites need the networking-e2e-test-images mirror (busybox is not on
+    # registry.k8s.io), so for that default they use the framework's own registry.
+    local registry_flag=()
+    if [[ -n "${TEST_IMAGE_REGISTRY:-}" && "$TEST_IMAGE_REGISTRY" != "registry.k8s.io" ]]; then
+        registry_flag=(--test-image-registry="$TEST_IMAGE_REGISTRY")
+    else
+        echo "TEST_IMAGE_REGISTRY is ${TEST_IMAGE_REGISTRY:-unset}; using the test framework's default registry"
+    fi
     echo "Running ${suite_binary} (timeout ${timeout})"
     CGO_ENABLED=0 ginkgo -v -timeout "$timeout" --no-color --fail-on-pending \
         "$GINKGO_TEST_BUILD_DIR/$suite_binary" -- \
         --cluster-kubeconfig="$KUBE_CONFIG_PATH" \
         --cluster-name="$CLUSTER_NAME" \
-        --test-image-registry="$TEST_IMAGE_REGISTRY" \
+        ${registry_flag[@]+"${registry_flag[@]}"} \
         --ip-family="$IP_FAMILY" || TEST_FAILED="true"
 }
 

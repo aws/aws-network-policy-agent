@@ -45,6 +45,18 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
+		By("Anchoring each worker node so autoscalers keep it for the whole test")
+		// Between the churn and the check the nodes sit idle, and an autoscaler such as Karpenter
+		// can remove one (Auto Mode consolidates after 30s). Its check pod then never starts and
+		// any leak on it goes unchecked. An annotated pod on each node prevents voluntary removal.
+		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
+			anchor := buildNodeAnchorPod(node.Name)
+			Expect(fw.K8sClient.Create(ctx, anchor)).To(Succeed())
+			DeferCleanup(func() {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, anchor)
+			})
+		})
+
 		By("Creating a default deny network policy")
 		defaultDenyPolicy = buildDefaultDenyNetworkPolicy()
 		err = fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, defaultDenyPolicy)
@@ -176,6 +188,38 @@ func buildChurnCronJob() *batchv1.CronJob {
 									},
 								},
 							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildNodeAnchorPod returns a pod pinned to nodeName that autoscalers will not evict, so the
+// node stays in the cluster until the BPF check has run on it.
+func buildNodeAnchorPod(nodeName string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("leak-anchor-%s", nodeName),
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"karpenter.sh/do-not-disrupt":                    "true",
+				"cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+			},
+		},
+		Spec: v1.PodSpec{
+			NodeName:      nodeName,
+			RestartPolicy: v1.RestartPolicyNever,
+			Containers: []v1.Container{
+				{
+					Name:    "anchor",
+					Image:   "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
+					Command: []string{"sleep", "7200"},
+					Resources: v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("1m"),
+							v1.ResourceMemory: resource.MustParse("4Mi"),
 						},
 					},
 				},

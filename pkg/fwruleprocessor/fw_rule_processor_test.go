@@ -3,6 +3,7 @@ package fwruleprocessor
 import (
 	"encoding/binary"
 	"net"
+	"runtime"
 	"sort"
 	"testing"
 
@@ -1015,5 +1016,119 @@ func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
 	ports32 := decodeTrieValuePorts(got[key32])
 	if len(ports32) != 1 || !containsInt(ports32, 80) {
 		t.Fatalf("2001:db8::/32 ports = %v, want [80]", ports32)
+	}
+}
+
+// TestClusterPolicy_RepeatedCIDRNotExponential verifies that N rules sharing the
+// same CIDR are processed in linear time and memory. Previously each repeat copied
+// the CIDR's own accumulated L4 rules onto itself, doubling the list per rule (O(2^N)).
+func TestClusterPolicy_RepeatedCIDRNotExponential(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+	const n = 20
+
+	rules := make([]EbpfFirewallRules, 0, n)
+	for i := 0; i < n; i++ {
+		port := int32(1000 + i)
+		rules = append(rules, EbpfFirewallRules{
+			IPCidr:   "10.0.0.0/8",
+			L4Info:   []v1alpha1.Port{{Protocol: &protocolTCP, Port: &port}},
+			Action:   v1alpha1.ClusterNetworkPolicyRuleActionAccept,
+			Priority: 100,
+		})
+	}
+
+	_, cidrNet, _ := net.ParseCIDR("10.0.0.0/8")
+	key := string(utils.ComputeTrieKey(*cidrNet, false))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, err := NewFirewallRuleProcessor("192.168.0.1", "/32", false).ComputeClusterPolicyMapEntriesFromEndpointRules(rules)
+	runtime.ReadMemStats(&after)
+
+	assert.NoError(t, err)
+	assert.Len(t, decodeCPETrieValuePorts(got[key]), n)
+	// Linear processing allocates a few KB; the exponential version allocates hundreds of MB at n=20.
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(10<<20), "allocations grew exponentially with repeated CIDR")
+}
+
+func TestFWRuleProcessor_RemoveDuplicateL4Rules_ProtocolValue(t *testing.T) {
+	protocolTCP1 := corev1.ProtocolTCP
+	protocolTCP2 := corev1.ProtocolTCP
+	protocolUDP := corev1.ProtocolUDP
+
+	tests := []struct {
+		name string
+		l4   []utils.L4Rule
+		want int
+	}{
+		{
+			name: "same protocol through distinct pointers is deduplicated",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP1, Port: Int32Ptr(80)}, Action: "Accept", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP2, Port: Int32Ptr(80)}, Action: "Accept", Priority: 100},
+			},
+			want: 1,
+		},
+		{
+			name: "different protocols are kept",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP1, Port: Int32Ptr(80)}, Action: "Accept", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolUDP, Port: Int32Ptr(80)}, Action: "Accept", Priority: 100},
+			},
+			want: 2,
+		},
+	}
+
+	f := NewFirewallRuleProcessor("10.0.0.1", "/32", false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := f.removeDuplicateL4Rules(tt.l4); len(got) != tt.want {
+				t.Fatalf("removeDuplicateL4Rules() kept %d rules, want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestFWRuleProcessor_RemoveDuplicateL4Rules_CatchAllKept(t *testing.T) {
+	protocolTCP := corev1.ProtocolTCP
+
+	tests := []struct {
+		name string
+		l4   []utils.L4Rule
+		want int
+	}{
+		{
+			name: "explicit port-less TCP rule before empty catch-all keeps both",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+			},
+			want: 2,
+		},
+		{
+			name: "empty catch-all before explicit port-less TCP rule keeps both",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{Protocol: &protocolTCP}, Action: "Deny", Priority: 100},
+			},
+			want: 2,
+		},
+		{
+			name: "two empty catch-alls with same priority/action deduplicate",
+			l4: []utils.L4Rule{
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+				{L4PortProtocolInfo: v1alpha1.Port{}, Action: "Deny", Priority: 100},
+			},
+			want: 1,
+		},
+	}
+
+	f := NewFirewallRuleProcessor("10.0.0.1", "/32", false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := f.removeDuplicateL4Rules(tt.l4); len(got) != tt.want {
+				t.Fatalf("removeDuplicateL4Rules() kept %d rules, want %d", len(got), tt.want)
+			}
+		})
 	}
 }
