@@ -635,6 +635,33 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 	return true, nil
 }
 
+// podIdentifierTargetGroups returns the spec.targetGroup values this podIdentifier belongs to. A
+// pod belongs to a group when a PolicyEndpoint carrying that group lists it. An empty result means
+// the pod only appears in ungrouped PolicyEndpoints, which is every cluster whose controller does
+// not group and every policy whose pods agree on their named ports.
+func (r *PolicyEndpointsReconciler) podIdentifierTargetGroups(ctx context.Context,
+	refs []utils.PolicyEndpointRef, podIdentifier, resourceNamespace string) map[string]struct{} {
+	groups := make(map[string]struct{})
+	pe := &policyk8sawsv1.PolicyEndpoint{}
+	for _, ref := range refs {
+		peNamespacedName := types.NamespacedName{Name: ref.Name, Namespace: resourceNamespace}
+		if err := r.k8sClient.Get(ctx, peNamespacedName, pe, client.UnsafeDisableDeepCopy); err != nil {
+			continue
+		}
+		// Same guard as the rule loop: the name may have been reused under another parent.
+		if pe.Spec.TargetGroup == "" || pe.Spec.PolicyRef.Name != ref.Parent {
+			continue
+		}
+		for _, p := range pe.Spec.PodSelectorEndpoints {
+			if utils.GetPodIdentifier(p.Name, p.Namespace) == podIdentifier {
+				groups[pe.Spec.TargetGroup] = struct{}{}
+				break
+			}
+		}
+	}
+	return groups
+}
+
 func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
 	podIdentifier string, resourceNamespace string, parentNP string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, bool, bool, error) {
 	var ingressRules, egressRules []fwrp.EbpfFirewallRules
@@ -642,8 +669,12 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
 	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(policyEndpointList.([]utils.PolicyEndpointRef)))
-		for _, ref := range policyEndpointList.([]utils.PolicyEndpointRef) {
+		refs := policyEndpointList.([]utils.PolicyEndpointRef)
+		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(refs))
+		// Derived fresh every time rather than tracked, so a stale map entry for a group this pod
+		// has since left cannot contribute rules.
+		targetGroups := r.podIdentifierTargetGroups(ctx, refs, podIdentifier, resourceNamespace)
+		for _, ref := range refs {
 			peNamespacedName := types.NamespacedName{
 				Name:      ref.Name,
 				Namespace: resourceNamespace,
@@ -664,6 +695,17 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 			if isDeleteFlow && ref.Parent == parentNP {
 				log().Debugf("PE belongs to same NP. Ignore and move on since it's a delete flow parentNP %s currentPE %s", parentNP, ref.Name)
 				continue
+			}
+
+			// A grouped PolicyEndpoint carries the rules of one resolved-port group and applies
+			// only to that group's pods. Ungrouped ones always apply, so a controller that does
+			// not set the field behaves exactly as before.
+			if currentPE.Spec.TargetGroup != "" {
+				if _, ok := targetGroups[currentPE.Spec.TargetGroup]; !ok {
+					log().Debugf("Skipping PE %s: target group %s does not contain podIdentifier %s",
+						ref.Name, currentPE.Spec.TargetGroup, podIdentifier)
+					continue
+				}
 			}
 
 			// currentPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
