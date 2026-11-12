@@ -146,10 +146,15 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
 	for exceptCidr := range exceptCidrs {
-		canonicalExcept := exceptCidr
-		if _, ipNet, err := net.ParseCIDR(exceptCidr); err == nil {
-			canonicalExcept = ipNet.String()
+		if !strings.Contains(exceptCidr, "/") {
+			exceptCidr += f.hostMask
 		}
+		_, ipNet, err := net.ParseCIDR(exceptCidr)
+		if err != nil {
+			log().Errorf("Skipping invalid Except CIDR: %s: %v", exceptCidr, err)
+			continue
+		}
+		canonicalExcept := ipNet.String()
 		if _, ok := cidrsMap[canonicalExcept]; !ok {
 			exceptFirewall := EbpfFirewallRules{
 				IPCidr: v1alpha1.NetworkAddress(canonicalExcept),
