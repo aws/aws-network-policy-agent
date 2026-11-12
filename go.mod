@@ -3,7 +3,7 @@ module github.com/aws/aws-network-policy-agent
 go 1.27.3
 
 require (
-	github.com/aws/amazon-network-policy-controller-k8s v1.1.10
+	github.com/aws/amazon-network-policy-controller-k8s v1.1.11
 	github.com/aws/amazon-vpc-cni-k8s v1.22.4
 	github.com/aws/aws-ebpf-sdk-go v1.0.20
 	github.com/aws/aws-sdk-go-v2 v1.47.5
@@ -18,8 +18,8 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-multierror v1.1.1
-	github.com/onsi/ginkgo/v2 v2.28.1
-	github.com/onsi/gomega v1.39.1
+	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/onsi/gomega v1.42.1
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.24.0
 	github.com/prometheus/client_model v0.6.2
@@ -81,7 +81,7 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.27.1 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
-	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
+	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
