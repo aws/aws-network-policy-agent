@@ -76,7 +76,7 @@ func BuildBPFCheckPod(namespace, nodeName string) *v1.Pod {
 		Spec: v1.PodSpec{
 			NodeName: nodeName, HostPID: true, HostNetwork: true, RestartPolicy: v1.RestartPolicyNever,
 			Containers: []v1.Container{{
-				Name: "check", Image: "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
+				Name: "check", Image: AmazonLinuxMinimalImage,
 				Command:         []string{"sleep", "300"},
 				SecurityContext: &v1.SecurityContext{Privileged: &privileged},
 				VolumeMounts:    []v1.VolumeMount{{Name: "host-root", MountPath: "/host"}},
