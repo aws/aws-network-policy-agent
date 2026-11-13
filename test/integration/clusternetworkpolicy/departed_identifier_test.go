@@ -35,14 +35,9 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 	)
 
 	// reachable reports whether a pod in the subject namespace can reach a server on 8080.
-	reachable := func(podName, ip string) bool {
-		format := "http://%s:8080"
-		if fw.Options.IpFamily == "IPv6" {
-			format = "http://[%s]:8080"
-		}
-		_, err := fw.PodManager.ExecInPod(subjectNamespace, podName,
-			[]string{"wget", "-qO-", "--timeout=5", fmt.Sprintf(format, ip)})
-		return err == nil
+	// An exec failure is returned as an error, never as "not reachable".
+	reachable := func(podName, ip string) (bool, error) {
+		return reachableOn8080(subjectNamespace, podName, ip)
 	}
 
 	hostCIDR := func(ip string) string {
@@ -188,7 +183,7 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 		})
 
 		By("Waiting for enforcement on the first node", func() {
-			Eventually(func() bool { return reachable(resident.Name, server1IP) }, 90*time.Second, 5*time.Second).
+			Eventually(func() (bool, error) { return reachable(resident.Name, server1IP) }, 90*time.Second, 5*time.Second).
 				Should(BeFalse(), "resident must be denied server-1")
 			Expect(reachable(resident.Name, server2IP)).To(BeTrue(), "server-2 is not denied yet")
 		})
@@ -214,9 +209,9 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 
 		By("Scheduling a new workload on the first node", func() {
 			newcomer = sleeper("newcomer", nodeA, map[string]string{"departed-a": "yes"})
-			// reachable is false on any exec failure, so prove the pod can reach server-2,
-			// which no rule denies yet, before relying on it being unreachable.
-			Eventually(func() bool { return reachable(newcomer.Name, server2IP) }, 60*time.Second, 5*time.Second).
+			// Prove the pod can reach server-2, which no rule denies yet, before relying on
+			// it being unreachable.
+			Eventually(func() (bool, error) { return reachable(newcomer.Name, server2IP) }, 60*time.Second, 5*time.Second).
 				Should(BeTrue())
 		})
 
@@ -228,12 +223,12 @@ var _ = Describe("ClusterNetworkPolicy cleanup after a workload's last pod leave
 		})
 
 		By("Verifying the new workload is enforced", func() {
-			Eventually(func() bool { return reachable(newcomer.Name, server1IP) }, 90*time.Second, 5*time.Second).
+			Eventually(func() (bool, error) { return reachable(newcomer.Name, server1IP) }, 90*time.Second, 5*time.Second).
 				Should(BeFalse(), "a pod scheduled after the departure must not be left default-allow")
 		})
 
 		By("Verifying the policy change reached the pod already running there", func() {
-			Eventually(func() bool { return reachable(resident.Name, server2IP) }, 90*time.Second, 5*time.Second).
+			Eventually(func() (bool, error) { return reachable(resident.Name, server2IP) }, 90*time.Second, 5*time.Second).
 				Should(BeFalse(), "a rule added after the departure must reach existing pods on the node")
 			Expect(reachable(newcomer.Name, server2IP)).To(BeFalse())
 		})

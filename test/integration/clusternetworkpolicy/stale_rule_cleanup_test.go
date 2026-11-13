@@ -2,10 +2,12 @@ package clusternetworkpolicy
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	policyk8sawsv1alpha1 "github.com/aws/amazon-network-policy-controller-k8s/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
+	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -44,15 +46,11 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 			clientPodName    string
 		)
 
-		// reachable reports whether the client pod can reach the server pod on 8080.
-		reachable := func() bool {
-			formatString := "http://%s:8080"
-			if fw.Options.IpFamily == "IPv6" {
-				formatString = "http://[%s]:8080"
-			}
-			_, err := fw.PodManager.ExecInPod(clientNamespace, clientPodName,
-				[]string{"wget", "-qO-", "--timeout=5", fmt.Sprintf(formatString, serverPodIP)})
-			return err == nil
+		// reachable reports whether the client pod can reach the server pod on 8080. An exec
+		// failure is returned as an error, never as "not reachable", so Consistently(...BeFalse())
+		// cannot pass on a transient exec failure.
+		reachable := func() (bool, error) {
+			return reachableOn8080(clientNamespace, clientPodName, serverPodIP)
 		}
 
 		// listCPEsForParent returns the names of ClusterPolicyEndpoints sliced from the given parent CNP.
@@ -276,3 +274,44 @@ var _ = Describe("ClusterNetworkPolicy Stale Rule Cleanup", Ordered, func() {
 		})
 	})
 })
+
+const (
+	probeConnected    = "CONNECTED"
+	probeBlocked      = "BLOCKED"
+	probeExecAttempts = 3
+)
+
+// reachableOn8080 reports whether a pod can reach a server on ip:8080.
+//
+// The wget outcome is printed, not returned as the exec exit status, so a non-nil error
+// means the exec itself failed and is never a policy verdict. The exec reaches the kubelet
+// through the apiserver and fails transiently, so it is retried. If every attempt fails the
+// error is returned: Eventually keeps polling and Consistently fails, instead of either one
+// reading the failure as a Deny.
+func reachableOn8080(namespace, podName, ip string) (bool, error) {
+	format := "http://%s:8080"
+	if fw.Options.IpFamily == "IPv6" {
+		format = "http://[%s]:8080"
+	}
+	script := fmt.Sprintf("if wget -qO- --timeout=5 %s >/dev/null 2>&1; then echo %s; else echo %s; fi",
+		fmt.Sprintf(format, ip), probeConnected, probeBlocked)
+
+	var err error
+	for attempt := 1; attempt <= probeExecAttempts; attempt++ {
+		var out string
+		out, err = fw.PodManager.ExecInPod(namespace, podName, []string{"/bin/sh", "-c", script})
+		if err == nil {
+			switch {
+			case strings.Contains(out, probeConnected):
+				return true, nil
+			case strings.Contains(out, probeBlocked):
+				return false, nil
+			}
+			err = fmt.Errorf("unexpected probe output %q", out)
+		}
+		GinkgoWriter.Printf("reachability probe %s/%s -> %s attempt %d/%d failed: %v\n",
+			namespace, podName, ip, attempt, probeExecAttempts, err)
+		time.Sleep(utils.PollIntervalShort)
+	}
+	return false, err
+}

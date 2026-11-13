@@ -137,7 +137,8 @@ struct bpf_map_def_pvt SEC("maps") ingress_pod_state_map = {
 };
 
 struct bpf_map_def_pvt aws_conntrack_map;
-struct bpf_map_def_pvt policy_events;
+#include "policy_events.h"
+
 
 static __always_inline int evaluateClusterPolicyByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, __u32 *admin_tier_priority, __u8 *baseline_tier_action) {
 
@@ -246,7 +247,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			case ACTION_DENY: {
 				evt->verdict = 0;
 				evt->tier = ADMIN_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				emit_deny_event(evt);
 				return BPF_DROP;
 			}
 			case ACTION_ALLOW: {
@@ -276,7 +277,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 		case ACTION_DENY:{
 			evt->verdict = 0;
 			evt->tier = NETWORK_POLICY_TIER;
-			bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+			emit_deny_event(evt);
 			return BPF_DROP;
 		}
 		case ACTION_PASS:
@@ -284,7 +285,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			case ACTION_DENY: {
 				evt->verdict = 0;
 				evt->tier = BASELINE_TIER;
-				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+				emit_deny_event(evt);
 				return BPF_DROP;
 			}
 			case ACTION_ALLOW: {
@@ -308,7 +309,7 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 				case DEFAULT_DENY: {
 					evt->verdict = 0;
 					evt->tier = DEFAULT_TIER;
-					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
+					emit_deny_event(evt);
 					return BPF_DROP;
 					}
 				}
@@ -420,7 +421,7 @@ int handle_ingress(struct __sk_buff *skb)
 		if ((pst == NULL) || (clusterpolicy_pst == NULL)) {
 			evt.verdict = 0;
 			evt.tier = ERROR_TIER;
-			bpf_ringbuf_output(&policy_events, &evt, sizeof(evt), 0);
+			emit_deny_event(&evt);
 #ifdef NPA_CT_SHORTEN_ON_DENY
 			shorten_denied_syn_v4(skb);
 #endif
