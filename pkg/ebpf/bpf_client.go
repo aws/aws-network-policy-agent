@@ -1343,6 +1343,14 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
 	}
 
+	for _, name := range utils.NamespacedBPFMaps {
+		if _, ok := bpfData.Maps[name]; !ok {
+			sdkAPIErr.WithLabelValues("LoadBpfFile-MissingMap").Inc()
+			closeLoadedObjects(progInfo, loadedMaps)
+			return nil, -1, fmt.Errorf("program loaded missing map %s for pod %s direction %s", name, podIdentifier, direction)
+		}
+	}
+
 	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
 
 	return progInfo, progFD, nil
