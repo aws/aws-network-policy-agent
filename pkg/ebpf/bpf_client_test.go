@@ -2654,3 +2654,63 @@ func TestBpfClient_deleteBPFProgramAndMaps_FailedSDKCloseIsNotRepeated(t *testin
 		})
 	}
 }
+
+// On warm restart recoverBPFState stores the scope and drop-count maps so
+// NewBpfClient can rewrite the scope and export the drop metric; with a fresh
+// events load the fresh map wins.
+func TestRecoverBPFStatePolicyEventMaps(t *testing.T) {
+	scopeMap := goebpfmaps.BpfMap{MapFD: 41}
+	dropMap := goebpfmaps.BpfMap{MapFD: 42}
+	freshScope := goebpfmaps.BpfMap{MapFD: 77}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:                {MapFD: 2},
+		POLICY_EVENTS_SCOPE_MAP_PIN_PATH:      scopeMap,
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: dropMap,
+	}, nil).AnyTimes()
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	client := NewMockBpfClient()
+	_, _, _, _, _, err := client.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), client.globalMaps, false, false, false)
+	assert.NoError(t, err)
+
+	got, ok := client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, scopeMap, got)
+	got, ok = client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, dropMap, got)
+	got, ok = client.resolveGlobalMap(freshScope, true, POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, freshScope, got)
+	_, ok = client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, "/sys/fs/bpf/globals/aws/maps/does_not_exist")
+	assert.False(t, ok)
+}
+
+// The datapath skips ACCEPT events when the scope flag is deny or when the
+// agent would not consume them; otherwise it keeps emitting them.
+func TestPolicyEventDatapathScope(t *testing.T) {
+	tests := []struct {
+		name           string
+		denyOnly       bool
+		acceptConsumed bool
+		wantVal        uint32
+		wantMsg        string
+	}{
+		{"scope all at debug", false, true, POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"},
+		{"scope all above debug", false, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"},
+		{"scope deny at debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+		{"scope deny above debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVal, gotMsg := policyEventDatapathScope(tt.denyOnly, tt.acceptConsumed)
+			assert.Equal(t, tt.wantVal, gotVal)
+			assert.Equal(t, tt.wantMsg, gotMsg)
+		})
+	}
+}

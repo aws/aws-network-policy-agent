@@ -36,21 +36,26 @@ import (
 )
 
 var (
-	TC_INGRESS_BINARY                                = "tc.v4ingress.bpf.o"
-	TC_EGRESS_BINARY                                 = "tc.v4egress.bpf.o"
-	TC_V6_INGRESS_BINARY                             = "tc.v6ingress.bpf.o"
-	TC_V6_EGRESS_BINARY                              = "tc.v6egress.bpf.o"
-	EVENTS_BINARY                                    = "v4events.bpf.o"
-	EVENTS_V6_BINARY                                 = "v6events.bpf.o"
-	AWS_CONNTRACK_MAP                                = "aws_conntrack_map"
-	AWS_EVENTS_MAP                                   = "policy_events"
-	EKS_CLI_BINARY                                   = "aws-eks-na-cli"
-	EKS_V6_CLI_BINARY                                = "aws-eks-na-cli-v6"
-	hostBinaryPath                                   = "/host/opt/cni/bin/"
-	IPv4_HOST_MASK                                   = "/32"
-	IPv6_HOST_MASK                                   = "/128"
-	CONNTRACK_MAP_PIN_PATH                           = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
-	POLICY_EVENTS_MAP_PIN_PATH                       = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
+	TC_INGRESS_BINARY                = "tc.v4ingress.bpf.o"
+	TC_EGRESS_BINARY                 = "tc.v4egress.bpf.o"
+	TC_V6_INGRESS_BINARY             = "tc.v6ingress.bpf.o"
+	TC_V6_EGRESS_BINARY              = "tc.v6egress.bpf.o"
+	EVENTS_BINARY                    = "v4events.bpf.o"
+	EVENTS_V6_BINARY                 = "v6events.bpf.o"
+	AWS_CONNTRACK_MAP                = "aws_conntrack_map"
+	AWS_EVENTS_MAP                   = "policy_events"
+	EKS_CLI_BINARY                   = "aws-eks-na-cli"
+	EKS_V6_CLI_BINARY                = "aws-eks-na-cli-v6"
+	hostBinaryPath                   = "/host/opt/cni/bin/"
+	IPv4_HOST_MASK                   = "/32"
+	IPv6_HOST_MASK                   = "/128"
+	CONNTRACK_MAP_PIN_PATH           = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
+	POLICY_EVENTS_MAP_PIN_PATH       = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
+	AWS_EVENTS_SCOPE_MAP             = "policy_events_scope_map"
+	POLICY_EVENTS_SCOPE_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_policy_events_scope_map"
+	// Values of policy_events_scope_map key 0; must match the datapath.
+	POLICY_EVENT_SCOPE_ALL           uint32          = 0
+	POLICY_EVENT_SCOPE_DENY          uint32          = 1
 	CATCH_ALL_PROTOCOL               corev1.Protocol = "ANY_IP_PROTOCOL"
 	POD_VETH_PREFIX                                  = "eni"
 	POLICIES_APPLIED                                 = 0
@@ -169,11 +174,28 @@ type BPFContext struct {
 	conntrackMapInfo goebpfmaps.BpfMap
 }
 
+// policyEventDatapathScope returns the value to write to the policy events
+// scope map and the startup log line. ACCEPT events are skipped in the
+// datapath when --policy-event-logs-scope=deny is set, or when nothing in the
+// agent consumes them (the log level is above debug).
+func policyEventDatapathScope(denyOnly, acceptConsumed bool) (uint32, string) {
+	switch {
+	case denyOnly:
+		return POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"
+	case !acceptConsumed:
+		return POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"
+	default:
+		return POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"
+	}
+}
+
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string, policyEventsDenyOnly bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 	var policyEventsDropCountMap goebpfmaps.BpfMap
 	var policyEventsDropCountMapPresent bool
+	var policyEventsScopeMap goebpfmaps.BpfMap
+	var policyEventsScopeMapPresent bool
 
 	ebpfClient := &bpfClient{
 		// Maps PolicyEndpoint resource to it's eBPF context
@@ -305,6 +327,10 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			if mapName == AWS_EVENTS_MAP {
 				eventBufferFD = int(mapInfo.MapFD)
 			}
+			if mapName == AWS_EVENTS_SCOPE_MAP {
+				policyEventsScopeMap = mapInfo
+				policyEventsScopeMapPresent = true
+			}
 			if mapName == AWS_EVENTS_DROP_COUNT_MAP {
 				policyEventsDropCountMap = mapInfo
 				policyEventsDropCountMapPresent = true
@@ -340,6 +366,21 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
+		// Write the datapath scope on every start, so a changed flag or log level
+		// applies on a warm restart too. Fails open: if the map is missing or the
+		// write fails, the datapath keeps emitting ACCEPT events.
+		scopeVal, scopeMsg := policyEventDatapathScope(policyEventsDenyOnly, events.AcceptEventsConsumed(policyEventsDenyOnly))
+		scopeMap, haveScopeMap := ebpfClient.resolveGlobalMap(policyEventsScopeMap, policyEventsScopeMapPresent, POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
+		if haveScopeMap {
+			key := uint32(0)
+			if err := scopeMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&scopeVal)), 0); err != nil {
+				log().Errorf("Failed to write policy event scope %d: %v", scopeVal, err)
+				sdkAPIErr.WithLabelValues("WritePolicyEventScope").Inc()
+			}
+		} else {
+			log().Warnf("Policy events scope map not found; datapath keeps its current scope (requested %d)", scopeVal)
+		}
+		log().Info(scopeMsg)
 		// Export the kernel's failed-DENY-write counter. Read only at /metrics
 		// scrape time on the existing controller-runtime registry; no new
 		// listener. Non-fatal if the map is absent.
@@ -349,7 +390,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		} else {
 			log().Warn("Policy events drop count map not found; ring buffer DENY drop metric disabled")
 		}
-		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6)
+		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, policyEventsDenyOnly)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
 			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
@@ -558,6 +599,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				isPolicyEventsMapPresent = true
 				eventsMapFD = int(globalMap.MapFD)
 				log().Infof("Policy event Map is already present on the node Recovered FD: %d", eventsMapFD)
+			}
+			if globalMapName == POLICY_EVENTS_SCOPE_MAP_PIN_PATH {
+				// Store so the scope can be rewritten on warm restart.
+				globalMaps.Store(globalMapName, globalMap)
+				log().Info("Policy events scope map recovered")
 			}
 			if globalMapName == POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH {
 				// Store so the DENY drop counter can be exported on warm restart.

@@ -18,6 +18,18 @@ struct bpf_map_def_pvt policy_events_drop_count_map;
 #define POLICY_EVENTS_DROP_KEY_INGRESS 0
 #define POLICY_EVENTS_DROP_KEY_EGRESS  1
 
+// policy_events_scope_map: --policy-event-logs-scope, written by userspace on
+// every agent start. Key 0: 0 = all (ACCEPT and DENY), 1 = deny (DENY only).
+// Missing map or entry fails open: ACCEPT events are still emitted.
+#define POLICY_EVENT_SCOPE_DENY 1
+struct bpf_map_def_pvt policy_events_scope_map;
+
+static __always_inline int policy_scope_allows_accept(void) {
+	__u32 key = 0;
+	__u32 *scope = bpf_map_lookup_elem(&policy_events_scope_map, &key);
+	return !(scope && *scope == POLICY_EVENT_SCOPE_DENY);
+}
+
 // Writes a DENY record to the ring buffer; on failure counts the drop per
 // direction. A missing map entry fails open (no count). Takes the record as
 // void * because the record layout differs between the v4 and v6 programs.

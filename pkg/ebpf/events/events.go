@@ -92,7 +92,7 @@ type ringBufferDataV6_t struct {
 	Tier       uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, denyOnly bool) error {
 	// Enable logging and setup ring buffer
 	ctx := context.Background()
 	if mapFD <= 0 {
@@ -132,7 +132,7 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 		}
 	}
 	log().Debug("Configure Event loop ... ")
-	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6)
+	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6, denyOnly)
 	return nil
 }
 
@@ -272,12 +272,33 @@ func publishDataToCloudwatch(ctx context.Context, message string) {
 	}
 }
 
-func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool) {
+// consumeNonDeny reports whether a non-DENY event produces any output.
+// Non-DENY flow lines are Debug lines and CloudWatch publishes non-DENY only at
+// debug, so above debug nothing uses them. With --policy-event-logs-scope=deny
+// they are not used either.
+func consumeNonDeny(debugEnabled, denyOnly bool) bool {
+	return debugEnabled && !denyOnly
+}
+
+// flowDebugEnabled reports whether the flow logger writes Debug lines.
+func flowDebugEnabled() bool {
+	return logger.GetFlowLogger().Core().Enabled(zapcore.DebugLevel)
+}
+
+// AcceptEventsConsumed reports whether the agent uses ACCEPT events at all,
+// given the configured log level and --policy-event-logs-scope. When it
+// returns false the datapath is told not to emit them; the event loop applies
+// the same rule to any that still arrive.
+func AcceptEventsConsumed(denyOnly bool) bool {
+	return consumeNonDeny(flowDebugEnabled(), denyOnly)
+}
+
+func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool, denyOnly bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// dedicated non-sugared logger without caller capture for the hot path
 	flowLog := logger.GetFlowLogger()
 	// Gate ACCEPT logging on the core's level rather than the raw flag string.
-	debugEnabled := flowLog.Core().Enabled(zapcore.DebugLevel)
+	debugEnabled := flowDebugEnabled()
 	go func() {
 		// Hold ringMap for the reader's lifetime: cilium/ebpf closes the
 		// underlying FD once the Map is garbage collected, and the reader
@@ -296,49 +317,57 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 				continue
 			}
 
-			var isDenyVerdict bool
-			direction := "egress"
-
-			var srcIP, destIP string
 			var srcPort, destPort uint32
 			var protocolNum, verdictNum, packetSz uint32
 			var isEgress, tierNum uint8
+			var rb4 *ringBufferDataV4_t
+			var rb6 *ringBufferDataV6_t
 
 			if enableIPv6 {
 				if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV6_t{})) {
 					log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
 					continue
 				}
-				rb := (*ringBufferDataV6_t)(unsafe.Pointer(&rec.RawSample[0]))
-				srcIP, destIP = ipv6Str(rb.SourceIP), ipv6Str(rb.DestIP)
-				srcPort, destPort = rb.SourcePort, rb.DestPort
-				protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
-				isEgress, tierNum = rb.IsEgress, rb.Tier
+				rb6 = (*ringBufferDataV6_t)(unsafe.Pointer(&rec.RawSample[0]))
+				srcPort, destPort = rb6.SourcePort, rb6.DestPort
+				protocolNum, verdictNum, packetSz = rb6.Protocol, rb6.Verdict, rb6.PacketSz
+				isEgress, tierNum = rb6.IsEgress, rb6.Tier
 			} else {
 				if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV4_t{})) {
 					log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
 					continue
 				}
-				rb := (*ringBufferDataV4_t)(unsafe.Pointer(&rec.RawSample[0]))
-				srcIP, destIP = ipv4Str(rb.SourceIP), ipv4Str(rb.DestIP)
-				srcPort, destPort = rb.SourcePort, rb.DestPort
-				protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
-				isEgress, tierNum = rb.IsEgress, rb.Tier
+				rb4 = (*ringBufferDataV4_t)(unsafe.Pointer(&rec.RawSample[0]))
+				srcPort, destPort = rb4.SourcePort, rb4.DestPort
+				protocolNum, verdictNum, packetSz = rb4.Protocol, rb4.Verdict, rb4.PacketSz
+				isEgress, tierNum = rb4.IsEgress, rb4.Tier
 			}
 
-			protocol := utils.GetProtocol(int(protocolNum))
-			verdict := getVerdict(int(verdictNum))
+			direction := "egress"
 			if isEgress == 0 {
 				direction = "ingress"
 			}
-			tier := getTier(int(tierNum))
-			isDenyVerdict = verdictNum == VerdictDeny
-
+			isDenyVerdict := verdictNum == VerdictDeny
 			if isDenyVerdict {
 				dropCountTotal.WithLabelValues(direction).Add(float64(1))
 				dropBytesTotal.WithLabelValues(direction).Add(float64(packetSz))
+			} else if !consumeNonDeny(debugEnabled, denyOnly) {
+				continue
+			}
+
+			var srcIP, destIP string
+			if enableIPv6 {
+				srcIP, destIP = ipv6Str(rb6.SourceIP), ipv6Str(rb6.DestIP)
+			} else {
+				srcIP, destIP = ipv4Str(rb4.SourceIP), ipv4Str(rb4.DestIP)
+			}
+			protocol := utils.GetProtocol(int(protocolNum))
+			verdict := getVerdict(int(verdictNum))
+			tier := getTier(int(tierNum))
+
+			if isDenyVerdict {
 				flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
-			} else if debugEnabled {
+			} else {
 				flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
 			}
 
