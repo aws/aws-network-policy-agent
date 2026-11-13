@@ -155,7 +155,7 @@ type PolicyEndpointsReconciler struct {
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req EndpointRequest) (ctrl.Result, error) {
 	log().Infof("Received a new reconcile request %v", req)
 	if err := r.reconcile(ctx, req); err != nil {
-		log().Errorf("Reconcile error: %v", err)
+		log().Errorf("Reconcile error for %v: %v", req, err)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -301,7 +301,7 @@ func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx con
 
 func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	policyEndpoint *policyk8sawsv1.PolicyEndpoint) error {
-	log().Infof("Processing Policy Endpoint  Name: %s Namespace %s", policyEndpoint.Name, policyEndpoint.Namespace)
+	log().Debugf("Processing Policy Endpoint  Name: %s Namespace %s", policyEndpoint.Name, policyEndpoint.Namespace)
 	start := time.Now()
 
 	// Identify pods local to the node. PolicyEndpoint resource will include `HostIP` field and
@@ -767,7 +767,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		return pe.Name
 	})
 
-	log().Infof("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
+	log().Debugf("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
 
 	// Gather the pods (local to the node) this policy's rules were applied to in previous
 	// reconciles, from every one of the parent's slices -- not just the reconciled one -- so a
@@ -795,9 +795,9 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		log().Infof("No PEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
 	} else {
 		for _, currentPE := range parentPEObjects {
-			log().Infof("Processing PE Name %s", currentPE.Name)
+			log().Debugf("Processing PE Name %s", currentPE.Name)
 			localTargetPods, localTargetPodIdentifiers, clusterWideTargetPodIdentifiers := r.deriveTargetPods(ctx, &currentPE, parentNP, parentPEList)
-			log().Infof("Adding to current targetPods Total pods: %d", len(localTargetPods))
+			log().Debugf("Adding to current targetPods Total pods: %d", len(localTargetPods))
 			targetPods = append(targetPods, localTargetPods...)
 			for podIdentifier := range localTargetPodIdentifiers {
 				podIdentifiers[podIdentifier] = true
@@ -858,7 +858,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 			continue
 		}
 		if string(pod.PodIP) == string(pod.HostIP) {
-			log().Infof("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
+			log().Debugf("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
 				pod.Name, pod.Namespace, pod.PodIP)
 			continue
 		}
@@ -867,7 +867,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 			targetPods = append(targetPods, npatypes.Pod{NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
 			podIdentifiers[podIdentifier] = true
-			log().Infof("Found a matching Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
+			log().Debugf("Found a matching Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
 		}
 		utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP, parentPEList)
 	}
