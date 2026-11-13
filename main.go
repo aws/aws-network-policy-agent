@@ -75,6 +75,9 @@ func main() {
 		os.Exit(1)
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
+	// Runs when main returns or panics. os.Exit skips it, so each os.Exit below follows an
+	// Errorf, which writes out the buffered lines itself.
+	defer logger.Sync()
 	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())

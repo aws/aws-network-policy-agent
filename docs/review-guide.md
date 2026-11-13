@@ -638,7 +638,7 @@ A new load that runs before the events load (`bpf_client.go:260-275`) relocates 
 - The flag default is `debug` (`pkg/config/controller_config.go:17`), so Debug lines are not free at scale.
 - Policy verdict logs: DENY at Info, ACCEPT and EXPIRED/DELETED at Debug (`pkg/ebpf/events/events.go:238-246`).
 - Flow log text differs by family (`events.go:241` vs `:270`). Anything that greps flow logs must match both `Verdict: DENY` and `Verdict DENY`.
-- The logger is a zap `SugaredLogger` (`pkg/logger/zaplogger.go:27`). Its format methods follow `fmt.Sprintf` (zap `sugar.go:378`), so `%w` renders as `%!w(...)`. Use `%v`.
+- The logger is a zap `SugaredLogger` (`pkg/logger/zaplogger.go:51`). Its format methods follow `fmt.Sprintf` (zap `sugar.go:378`), so `%w` renders as `%!w(...)`. Use `%v`.
 
 <a id="p-flags"></a>
 ### [advisory] P8. Flags and environment variables
