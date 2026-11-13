@@ -1000,3 +1000,20 @@ func TestGetHostVethName_MatchesCNINaming(t *testing.T) {
 		})
 	}
 }
+
+func TestGetPodNamespaceFromPodIdentifier(t *testing.T) {
+	for _, tc := range []struct{ name, namespace string }{
+		{"web-6d4b75cb6d-zzzzz", "team-a"},
+		{"standalone", "default"},
+		{"my.dotted-pod-1", "kube-system"},
+	} {
+		id := GetPodIdentifier(tc.name, tc.namespace)
+		if got, ok := GetPodNamespaceFromPodIdentifier(id); !ok || got != tc.namespace {
+			t.Errorf("GetPodNamespaceFromPodIdentifier(%q) = %q, %v, want %q, true", id, got, ok, tc.namespace)
+		}
+	}
+	legacy := LegacyGetPodIdentifier("web-6d4b75cb6d-zzzzz", "team-a")
+	if got, ok := GetPodNamespaceFromPodIdentifier(legacy); ok || got != "" {
+		t.Errorf("GetPodNamespaceFromPodIdentifier(%q) = %q, %v, want \"\", false", legacy, got, ok)
+	}
+}
