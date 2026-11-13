@@ -1132,3 +1132,40 @@ func TestFWRuleProcessor_RemoveDuplicateL4Rules_CatchAllKept(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeMapEntriesFromEndpointRules_ExceptValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		nodeIP     string
+		hostMask   string
+		cidr       v1alpha1.NetworkAddress
+		except     v1alpha1.NetworkAddress
+		wantExcept string
+		ipv6       bool
+	}{
+		{"IPv4 host", "10.1.1.1", "/32", "10.0.0.0/16", "10.0.1.5", "10.0.1.5/32", false},
+		{"IPv6 host", "2001:db8:1::1", "/128", "2001:db8::/64", "2001:db8::5", "2001:db8::5/128", true},
+		{"invalid address", "10.1.1.1", "/32", "10.0.0.0/16", "invalid", "", false},
+		{"invalid mask", "10.1.1.1", "/32", "10.0.0.0/16", "10.0.1.5/99", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			processor := NewFirewallRuleProcessor(tc.nodeIP, tc.hostMask, tc.ipv6)
+			entries, err := processor.ComputeMapEntriesFromEndpointRules([]EbpfFirewallRules{{
+				IPCidr: tc.cidr,
+				Except: []v1alpha1.NetworkAddress{tc.except},
+			}})
+			assert.NoError(t, err)
+			_, parent, _ := net.ParseCIDR(string(tc.cidr))
+			assert.Equal(t, utils.ComputeTrieValue([]v1alpha1.Port{{Protocol: &CATCH_ALL_PROTOCOL}}, false, false),
+				entries[string(utils.ComputeTrieKey(*parent, tc.ipv6))])
+			wantEntries := 2 // Node allow entry and parent CIDR.
+			if tc.wantExcept != "" {
+				wantEntries++
+				_, except, _ := net.ParseCIDR(tc.wantExcept)
+				assert.Equal(t, utils.ComputeTrieValue([]v1alpha1.Port{{Protocol: &DENY_ALL_PROTOCOL}}, false, false),
+					entries[string(utils.ComputeTrieKey(*except, tc.ipv6))])
+			}
+			assert.Len(t, entries, wantEntries)
+		})
+	}
+}
