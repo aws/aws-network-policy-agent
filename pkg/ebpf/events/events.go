@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 
 	cebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sys/unix"
 
@@ -62,10 +64,21 @@ var (
 		},
 		[]string{"direction"},
 	)
+
+	// policyEventReadErrorsTotal counts ReadInto failures. reason=eof is a
+	// stopped reader (the ring will not recover). reason=other is a
+	// recoverable error, counted once per retry. ErrClosed is not a failure.
+	policyEventReadErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "policy_event_read_errors_total",
+			Help: "Total number of policy event ring buffer ReadInto errors",
+		},
+		[]string{"reason"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal)
+	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal, policyEventReadErrorsTotal)
 }
 
 type ringBufferDataV4_t struct {
@@ -272,6 +285,65 @@ func publishDataToCloudwatch(ctx context.Context, message string) {
 	}
 }
 
+// policyEventReader is the ReadInto subset of ringbuf.Reader. Tests pass a
+// scripted reader; production passes the cilium reader.
+type policyEventReader interface {
+	ReadInto(rec *ringbuf.Record) error
+}
+
+const (
+	// policyEventReadDelayInitial is the pause after the first recoverable
+	// ReadInto error.
+	policyEventReadDelayInitial = 50 * time.Millisecond
+	// policyEventReadDelayMax caps the exponential backoff. A reader that
+	// keeps failing then logs once per this interval instead of every 50ms.
+	policyEventReadDelayMax = 5 * time.Second
+)
+
+// nextPolicyEventReadDelay doubles the current pause, bounded by
+// policyEventReadDelayMax. A non-positive current starts again at the
+// initial pause. The comparison against current also catches overflow.
+func nextPolicyEventReadDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return policyEventReadDelayInitial
+	}
+	next := current * 2
+	if next <= current || next > policyEventReadDelayMax {
+		return policyEventReadDelayMax
+	}
+	return next
+}
+
+// policyEventReadFailure reports whether another ReadInto can make progress.
+// ErrClosed is a normal shutdown. ErrUnexpectedEOF means the record is
+// truncated and cilium's readRecord does not advance the consumer, so the
+// next read hits the same bytes and will not recover. Other errors, including
+// a non-temporary epoll_wait failure, are retried with backoff.
+func policyEventReadFailure(err error) (retry bool, msg string) {
+	if errors.Is(err, ringbuf.ErrClosed) {
+		return false, ""
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, fmt.Sprintf("policy event ring buffer is corrupt (unexpected EOF) and will not recover by retrying: %v", err)
+	}
+	return true, ""
+}
+
+// policyEventReadErrorReason is the policy_event_read_errors_total label for
+// a ReadInto error. ErrClosed is a normal shutdown and is not counted.
+// ErrUnexpectedEOF stops the reader, so the eof counter is the lasting
+// signal after the single log line. Every other error is counted on each
+// retry.
+func policyEventReadErrorReason(err error) string {
+	if errors.Is(err, ringbuf.ErrClosed) {
+		return ""
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof"
+	}
+	return "other"
+}
+
 func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// dedicated non-sugared logger without caller capture for the hot path
@@ -284,74 +356,87 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 		// registers only the raw FD with epoll.
 		defer ringMap.Close()
 		defer rd.Close()
-		var rec ringbuf.Record
-		for {
-			if err := rd.ReadInto(&rec); err != nil {
-				if errors.Is(err, ringbuf.ErrClosed) {
-					return
+		consumePolicyEvents(ctx, rd, nodeName, flowLog, debugEnabled, enableCloudWatchLogs, enableIPv6, time.Sleep)
+	}()
+}
+
+func consumePolicyEvents(ctx context.Context, rd policyEventReader, nodeName string, flowLog *zap.Logger, debugEnabled, enableCloudWatchLogs, enableIPv6 bool, sleep func(time.Duration)) {
+	var rec ringbuf.Record
+	delay := policyEventReadDelayInitial
+	for {
+		if err := rd.ReadInto(&rec); err != nil {
+			if reason := policyEventReadErrorReason(err); reason != "" {
+				policyEventReadErrorsTotal.WithLabelValues(reason).Inc()
+			}
+			retry, msg := policyEventReadFailure(err)
+			if !retry {
+				if msg != "" {
+					log().Error(msg)
 				}
-				log().Errorf("Failed to read from Ring buf %v", err)
-				// Avoid a hot error loop if the ring is in a bad state.
-				time.Sleep(50 * time.Millisecond)
+				return
+			}
+			log().Errorf("Failed to read from Ring buf %v", err)
+			sleep(delay)
+			delay = nextPolicyEventReadDelay(delay)
+			continue
+		}
+		delay = policyEventReadDelayInitial
+
+		var isDenyVerdict bool
+		direction := "egress"
+
+		var srcIP, destIP string
+		var srcPort, destPort uint32
+		var protocolNum, verdictNum, packetSz uint32
+		var isEgress, tierNum uint8
+
+		if enableIPv6 {
+			if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV6_t{})) {
+				log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
 				continue
 			}
-
-			var isDenyVerdict bool
-			direction := "egress"
-
-			var srcIP, destIP string
-			var srcPort, destPort uint32
-			var protocolNum, verdictNum, packetSz uint32
-			var isEgress, tierNum uint8
-
-			if enableIPv6 {
-				if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV6_t{})) {
-					log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
-					continue
-				}
-				rb := (*ringBufferDataV6_t)(unsafe.Pointer(&rec.RawSample[0]))
-				srcIP, destIP = ipv6Str(rb.SourceIP), ipv6Str(rb.DestIP)
-				srcPort, destPort = rb.SourcePort, rb.DestPort
-				protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
-				isEgress, tierNum = rb.IsEgress, rb.Tier
-			} else {
-				if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV4_t{})) {
-					log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
-					continue
-				}
-				rb := (*ringBufferDataV4_t)(unsafe.Pointer(&rec.RawSample[0]))
-				srcIP, destIP = ipv4Str(rb.SourceIP), ipv4Str(rb.DestIP)
-				srcPort, destPort = rb.SourcePort, rb.DestPort
-				protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
-				isEgress, tierNum = rb.IsEgress, rb.Tier
+			rb := (*ringBufferDataV6_t)(unsafe.Pointer(&rec.RawSample[0]))
+			srcIP, destIP = ipv6Str(rb.SourceIP), ipv6Str(rb.DestIP)
+			srcPort, destPort = rb.SourcePort, rb.DestPort
+			protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
+			isEgress, tierNum = rb.IsEgress, rb.Tier
+		} else {
+			if len(rec.RawSample) < int(unsafe.Sizeof(ringBufferDataV4_t{})) {
+				log().Errorf("Failed to read from Ring buf: short sample %d", len(rec.RawSample))
+				continue
 			}
+			rb := (*ringBufferDataV4_t)(unsafe.Pointer(&rec.RawSample[0]))
+			srcIP, destIP = ipv4Str(rb.SourceIP), ipv4Str(rb.DestIP)
+			srcPort, destPort = rb.SourcePort, rb.DestPort
+			protocolNum, verdictNum, packetSz = rb.Protocol, rb.Verdict, rb.PacketSz
+			isEgress, tierNum = rb.IsEgress, rb.Tier
+		}
 
-			protocol := utils.GetProtocol(int(protocolNum))
-			verdict := getVerdict(int(verdictNum))
-			if isEgress == 0 {
-				direction = "ingress"
-			}
-			tier := getTier(int(tierNum))
-			isDenyVerdict = verdictNum == VerdictDeny
+		protocol := utils.GetProtocol(int(protocolNum))
+		verdict := getVerdict(int(verdictNum))
+		if isEgress == 0 {
+			direction = "ingress"
+		}
+		tier := getTier(int(tierNum))
+		isDenyVerdict = verdictNum == VerdictDeny
 
-			if isDenyVerdict {
-				dropCountTotal.WithLabelValues(direction).Add(float64(1))
-				dropBytesTotal.WithLabelValues(direction).Add(float64(packetSz))
-				flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
-			} else if debugEnabled {
-				flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
-			}
+		if isDenyVerdict {
+			dropCountTotal.WithLabelValues(direction).Add(float64(1))
+			dropBytesTotal.WithLabelValues(direction).Add(float64(packetSz))
+			flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
+		} else if debugEnabled {
+			flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
+		}
 
-			if enableCloudWatchLogs {
-				// Apply same filtering as local logging:
-				// DENY always published, ACCEPT only at debug level
-				if isDenyVerdict || debugEnabled {
-					message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
-					publishDataToCloudwatch(ctx, message)
-				}
+		if enableCloudWatchLogs {
+			// Apply same filtering as local logging:
+			// DENY always published, ACCEPT only at debug level
+			if isDenyVerdict || debugEnabled {
+				message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
+				publishDataToCloudwatch(ctx, message)
 			}
 		}
-	}()
+	}
 }
 
 func ensureLogGroupExists(ctx context.Context, name string) error {
