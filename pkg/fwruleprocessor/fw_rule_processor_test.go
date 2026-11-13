@@ -1019,6 +1019,94 @@ func TestFWRuleProcessor_IPv4MappedCIDRSkippedInIPv6Mode(t *testing.T) {
 	}
 }
 
+// tcpPortList builds TCP ports. Each entry has its own port pointer.
+func tcpPortList(nums []int32) []v1alpha1.Port {
+	protocolTCP := corev1.ProtocolTCP
+	ports := make([]v1alpha1.Port, len(nums))
+	for i, n := range nums {
+		n := n
+		ports[i] = v1alpha1.Port{Protocol: &protocolTCP, Port: &n}
+	}
+	return ports
+}
+
+func portNumbers(ports []v1alpha1.Port) []int {
+	nums := make([]int, 0, len(ports))
+	for _, p := range ports {
+		if p.Port == nil {
+			nums = append(nums, 0)
+			continue
+		}
+		nums = append(nums, int(*p.Port))
+	}
+	return nums
+}
+
+// TestMergeDuplicateL4Info_SortedRegardlessOfInputOrder is the unit form of
+// aws-network-policy-agent#773: ranging the dedup map must not decide the order
+// later truncated to 24 trie slots.
+func TestMergeDuplicateL4Info_SortedRegardlessOfInputOrder(t *testing.T) {
+	asc := make([]int32, 0, 31)
+	desc := make([]int32, 0, 31)
+	for i := int32(1000); i < 1030; i++ {
+		asc = append(asc, i)
+		desc = append(desc, 2029-i) // 1029 .. 1000
+	}
+	asc = append(asc, 1000) // duplicate of the first port
+
+	gotAsc := portNumbers(mergeDuplicateL4Info(tcpPortList(asc)))
+	gotDesc := portNumbers(mergeDuplicateL4Info(tcpPortList(desc)))
+
+	want := make([]int, 30)
+	for i := range want {
+		want[i] = 1000 + i
+	}
+	assert.Equal(t, want, gotAsc)
+	assert.Equal(t, want, gotDesc)
+}
+
+// TestFWRuleProcessor_PortTruncationIsDeterministic checks that a CIDR with
+// more than 24 ports encodes the same trie value no matter the input order,
+// and that the value is the lowest 24 ports rather than a map-iteration sample.
+func TestFWRuleProcessor_PortTruncationIsDeterministic(t *testing.T) {
+	asc := make([]int32, 30)
+	desc := make([]int32, 30)
+	for i := int32(0); i < 30; i++ {
+		asc[i] = 1000 + i
+		desc[i] = 1029 - i
+	}
+
+	encode := func(nums []int32) []int {
+		rules := []EbpfFirewallRules{{
+			IPCidr: "10.1.0.0/16",
+			L4Info: tcpPortList(nums),
+		}}
+		got, err := NewFirewallRuleProcessor("192.168.0.1", "/32", false).ComputeMapEntriesFromEndpointRules(rules)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_, cidr, err := net.ParseCIDR("10.1.0.0/16")
+		if err != nil {
+			t.Fatalf("parse cidr: %v", err)
+		}
+		value, ok := got[string(utils.ComputeTrieKey(*cidr, false))]
+		if !ok {
+			t.Fatal("missing trie entry for 10.1.0.0/16")
+		}
+		return decodeTrieValuePorts(value)
+	}
+
+	portsAsc := encode(asc)
+	portsDesc := encode(desc)
+	assert.Equal(t, portsAsc, portsDesc)
+
+	want := make([]int, 24)
+	for i := range want {
+		want[i] = 1000 + i
+	}
+	assert.Equal(t, want, portsAsc)
+}
+
 // TestClusterPolicy_RepeatedCIDRNotExponential verifies that N rules sharing the
 // same CIDR are processed in linear time and memory. Previously each repeat copied
 // the CIDR's own accumulated L4 rules onto itself, doubling the list per rule (O(2^N)).
