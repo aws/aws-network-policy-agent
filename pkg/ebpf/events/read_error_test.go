@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/zap"
 )
 
@@ -154,5 +155,64 @@ func TestPolicyEventReadBackoffResetsAfterRead(t *testing.T) {
 		if sleeps[i] != want[i] {
 			t.Fatalf("sleeps = %v, want %v", sleeps, want)
 		}
+	}
+}
+
+func policyEventReadErrorCount(reason string) float64 {
+	return testutil.ToFloat64(policyEventReadErrorsTotal.WithLabelValues(reason))
+}
+
+func TestPolicyEventReadErrorsAreCounted(t *testing.T) {
+	eofBefore := policyEventReadErrorCount("eof")
+	otherBefore := policyEventReadErrorCount("other")
+
+	n, sleeps := consumeWithSleeps(t, []error{
+		fmt.Errorf("read sample data: %w", io.ErrUnexpectedEOF),
+		errors.New("must not be read"),
+	})
+	if n != 1 || len(sleeps) != 0 {
+		t.Fatalf("unexpected EOF: calls=%d sleeps=%v, want one read and no retry", n, sleeps)
+	}
+	if got := policyEventReadErrorCount("eof") - eofBefore; got != 1 {
+		t.Fatalf("eof counter delta = %v, want 1", got)
+	}
+	if got := policyEventReadErrorCount("other") - otherBefore; got != 0 {
+		t.Fatalf("other counter delta after unexpected EOF = %v, want 0", got)
+	}
+
+	// ErrClosed is a normal shutdown. Counting it would alert on every stop.
+	closedEOF := policyEventReadErrorCount("eof")
+	closedOther := policyEventReadErrorCount("other")
+	n, sleeps = consumeWithSleeps(t, []error{
+		fmt.Errorf("ringbuffer: %w", ringbuf.ErrClosed),
+		errors.New("must not be read"),
+	})
+	if n != 1 || len(sleeps) != 0 {
+		t.Fatalf("ErrClosed: calls=%d sleeps=%v", n, sleeps)
+	}
+	if policyEventReadErrorCount("eof") != closedEOF || policyEventReadErrorCount("other") != closedOther {
+		t.Fatalf("ErrClosed incremented read-error counters (eof %v->%v, other %v->%v)",
+			closedEOF, policyEventReadErrorCount("eof"), closedOther, policyEventReadErrorCount("other"))
+	}
+
+	otherBefore = policyEventReadErrorCount("other")
+	eofBefore = policyEventReadErrorCount("eof")
+	n, _ = consumeWithSleeps(t, []error{
+		errors.New("epoll_wait: bad file descriptor"),
+		errors.New("epoll_wait: invalid argument"),
+		nil,
+		fmt.Errorf("read: %w", io.EOF),
+		ringbuf.ErrClosed,
+	})
+	if n != 5 {
+		t.Fatalf("ReadInto calls = %d, want 5", n)
+	}
+	// Three recoverable errors (two epoll failures and a plain EOF). The
+	// successful read and ErrClosed are not ReadInto errors.
+	if got := policyEventReadErrorCount("other") - otherBefore; got != 3 {
+		t.Fatalf("other counter delta = %v, want 3", got)
+	}
+	if got := policyEventReadErrorCount("eof") - eofBefore; got != 0 {
+		t.Fatalf("eof counter delta = %v, want 0", got)
 	}
 }

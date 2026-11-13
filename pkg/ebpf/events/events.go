@@ -64,10 +64,21 @@ var (
 		},
 		[]string{"direction"},
 	)
+
+	// policyEventReadErrorsTotal counts ReadInto failures. reason=eof is a
+	// stopped reader (the ring will not recover). reason=other is a
+	// recoverable error, counted once per retry. ErrClosed is not a failure.
+	policyEventReadErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "policy_event_read_errors_total",
+			Help: "Total number of policy event ring buffer ReadInto errors",
+		},
+		[]string{"reason"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal)
+	metrics.Registry.MustRegister(dropBytesTotal, dropCountTotal, policyEventReadErrorsTotal)
 }
 
 type ringBufferDataV4_t struct {
@@ -318,6 +329,21 @@ func policyEventReadFailure(err error) (retry bool, msg string) {
 	return true, ""
 }
 
+// policyEventReadErrorReason is the policy_event_read_errors_total label for
+// a ReadInto error. ErrClosed is a normal shutdown and is not counted.
+// ErrUnexpectedEOF stops the reader, so the eof counter is the lasting
+// signal after the single log line. Every other error is counted on each
+// retry.
+func policyEventReadErrorReason(err error) string {
+	if errors.Is(err, ringbuf.ErrClosed) {
+		return ""
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof"
+	}
+	return "other"
+}
+
 func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// dedicated non-sugared logger without caller capture for the hot path
@@ -339,6 +365,9 @@ func consumePolicyEvents(ctx context.Context, rd policyEventReader, nodeName str
 	delay := policyEventReadDelayInitial
 	for {
 		if err := rd.ReadInto(&rec); err != nil {
+			if reason := policyEventReadErrorReason(err); reason != "" {
+				policyEventReadErrorsTotal.WithLabelValues(reason).Inc()
+			}
 			retry, msg := policyEventReadFailure(err)
 			if !retry {
 				if msg != "" {
