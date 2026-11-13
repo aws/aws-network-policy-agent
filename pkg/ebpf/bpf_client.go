@@ -1354,11 +1354,14 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 // independently and any errors are returned joined.
 func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
-	// Map entries are a pure function of the rules and can take a while to compute
+	// Map entries depend only on the rules and can take a while to compute
 	// for large policies. Computing them before taking the lock means a CNI ADD or
-	// DEL for this identifier only waits for the map writes.
-	ingressEntries, ingressComputeErr := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(ingressFirewallRules)
-	egressEntries, egressComputeErr := l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules(egressFirewallRules)
+	// DEL for this identifier only waits for the map writes. A direction whose map
+	// was already programmed from these exact rules is not computed at all.
+	ingress := newRuleMapUpdate(ingressFirewallRules, l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules)
+	egress := newRuleMapUpdate(egressFirewallRules, l.fwRuleProcessor.ComputeMapEntriesFromEndpointRules)
+	ingress.precompute(l.ingressInMemoryMap, podIdentifier)
+	egress.precompute(l.egressInMemoryMap, podIdentifier)
 
 	l.podIdentifierLocks.Lock(podIdentifier)
 	defer l.podIdentifierLocks.Unlock(podIdentifier)
@@ -1387,7 +1390,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 			ingressErr = fmt.Errorf("ingress in-mem map: %w", err)
 		} else {
 			start := time.Now()
-			writeErr := refreshShadowMap(ingressEntries, ingressComputeErr, inMemMap)
+			writeErr := ingress.apply(inMemMap)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("updateEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
 			if writeErr != nil {
@@ -1410,7 +1413,7 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 			egressErr = fmt.Errorf("egress in-mem map: %w", err)
 		} else {
 			start := time.Now()
-			writeErr := refreshShadowMap(egressEntries, egressComputeErr, inMemMap)
+			writeErr := egress.apply(inMemMap)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("updateEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
 			if writeErr != nil {
@@ -1432,11 +1435,12 @@ func (l *bpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []
 // independently and any errors are returned joined.
 func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules,
 	egressFirewallRules []fwrp.EbpfFirewallRules) error {
-	// Map entries are a pure function of the rules and can take a while to compute
-	// for large policies. Computing them before taking the lock means a CNI ADD or
-	// DEL for this identifier only waits for the map writes.
-	ingressEntries, ingressComputeErr := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(ingressFirewallRules)
-	egressEntries, egressComputeErr := l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules(egressFirewallRules)
+	// Same as UpdateEbpfMaps: compute outside the lock, and only for a direction whose map was
+	// not already programmed from these exact rules.
+	ingress := newRuleMapUpdate(ingressFirewallRules, l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules)
+	egress := newRuleMapUpdate(egressFirewallRules, l.fwRuleProcessor.ComputeClusterPolicyMapEntriesFromEndpointRules)
+	ingress.precompute(l.clusterPolicyIngressInMemoryMap, podIdentifier)
+	egress.precompute(l.clusterPolicyEgressInMemoryMap, podIdentifier)
 
 	l.podIdentifierLocks.Lock(podIdentifier)
 	defer l.podIdentifierLocks.Unlock(podIdentifier)
@@ -1466,7 +1470,7 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 			ingressErr = fmt.Errorf("cluster policy ingress in-mem map: %w", err)
 		} else {
 			start := time.Now()
-			writeErr := refreshShadowMap(ingressEntries, ingressComputeErr, inMemMap)
+			writeErr := ingress.apply(inMemMap)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-ingress", fmt.Sprint(writeErr != nil)).Observe(duration)
 			if writeErr != nil {
@@ -1489,7 +1493,7 @@ func (l *bpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFir
 			egressErr = fmt.Errorf("cluster policy egress in-mem map: %w", err)
 		} else {
 			start := time.Now()
-			writeErr := refreshShadowMap(egressEntries, egressComputeErr, inMemMap)
+			writeErr := egress.apply(inMemMap)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("updateClusterPolicyEbpfMap-egress", fmt.Sprint(writeErr != nil)).Observe(duration)
 			if writeErr != nil {
@@ -1694,16 +1698,73 @@ func shadowMapForLocked(cache *sync.Map, podIdentifier string, bpfMap goebpfmaps
 	return inMemMap, nil
 }
 
+// ruleMapUpdate is one direction's pending rule-map write. Computing map entries is the
+// expensive part of programming a pod, and a reconcile often asks for exactly the rules the map
+// already holds: every node reconciles every PolicyEndpoint slice, and when one change updates
+// many policies selecting the same pods (for example, a new pod matching many policies'
+// namespaceSelector: {} peers), each slice's reconcile re-derives the same union of all those
+// policies' rules. The rules' fingerprint, checked against the shadow map, lets those passes
+// skip both the computation and the refresh, whose diff would have written nothing.
+type ruleMapUpdate struct {
+	rules       []fwrp.EbpfFirewallRules
+	compute     func([]fwrp.EbpfFirewallRules) (map[string][]byte, error)
+	fingerprint string
+	computed    bool
+	entries     map[string][]byte
+	computeErr  error
+}
+
+func newRuleMapUpdate(rules []fwrp.EbpfFirewallRules, compute func([]fwrp.EbpfFirewallRules) (map[string][]byte, error)) *ruleMapUpdate {
+	// Fingerprint before computing: compute sorts rules in place.
+	return &ruleMapUpdate{rules: rules, compute: compute, fingerprint: fwrp.RulesFingerprint(rules)}
+}
+
+func (u *ruleMapUpdate) computeOnce() {
+	if !u.computed {
+		u.entries, u.computeErr = u.compute(u.rules)
+		u.computed = true
+	}
+}
+
+// precompute computes the entries without the identifier lock unless the cached shadow map
+// already holds them. The check is only a hint, since the map can change before the lock is
+// taken; apply repeats it under the lock and computes there if the hint was wrong.
+func (u *ruleMapUpdate) precompute(cache *sync.Map, podIdentifier string) {
+	if cache == nil {
+		u.computeOnce()
+		return
+	}
+	if value, ok := cache.Load(podIdentifier); ok {
+		if inMemMap, ok := value.(*InMemoryBpfMap); ok && inMemMap.ProgrammedFrom(u.fingerprint) {
+			return
+		}
+	}
+	u.computeOnce()
+}
+
+// apply programs inMemMap with the rules' entries, unless it already holds them. The caller
+// holds the identifier lock, which every writer of the rule maps takes, so the map cannot
+// change between the check and the refresh.
+func (u *ruleMapUpdate) apply(inMemMap *InMemoryBpfMap) error {
+	if inMemMap.ProgrammedFrom(u.fingerprint) {
+		log().Debugf("Map ID %d already programmed from these rules, skipping refresh", inMemMap.GetUnderlyingMap().MapID)
+		return nil
+	}
+	u.computeOnce()
+	return refreshShadowMap(u.entries, u.computeErr, u.fingerprint, inMemMap)
+}
+
 // refreshShadowMap writes precomputed map entries through inMemMap, or returns
-// the error from computing them.
-func refreshShadowMap(mapEntries map[string][]byte, computeErr error, inMemMap *InMemoryBpfMap) error {
+// the error from computing them. fingerprint identifies the rules the entries
+// were computed from.
+func refreshShadowMap(mapEntries map[string][]byte, computeErr error, fingerprint string, inMemMap *InMemoryBpfMap) error {
 	if computeErr != nil {
 		log().Errorf("Trie entry creation/validation failed %v", computeErr)
 		return computeErr
 	}
 	start := time.Now()
 	log().Infof("ID of map to update: ID: %d", inMemMap.GetUnderlyingMap().MapID)
-	err := inMemMap.BulkRefresh(mapEntries)
+	err := inMemMap.RefreshFromRules(fingerprint, mapEntries)
 	sdkAPILatency.WithLabelValues("BulkRefreshMapEntries", fmt.Sprint(err != nil)).Observe(msSince(start))
 	if err != nil {
 		log().Errorf("BPF map update failed %v", err)
