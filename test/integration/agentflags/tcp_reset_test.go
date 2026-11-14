@@ -66,11 +66,23 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 		// The specs span two agent rollouts, longer than the default sleep.
 		check.Spec.Containers[0].Command = []string{"sleep", "1800"}
 		checkPod = createPod(check)
-		serverPod = createDeployment(rstDeployment("rst-server", "rst-server", serverNode))
+		serverDeployment := rstDeployment("rst-server", "rst-server", serverNode)
+		// Registered before the create, so a Deployment that never got ready is
+		// still deleted. The cleanup waits for the pod, not only the
+		// Deployment, which the args restore above relies on to run after the
+		// pods are gone.
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, serverDeployment)
+		serverPod = fw.CreateSingleReplicaAndGetPod(ctx, serverDeployment)
 		serverIP = serverPod.Status.PodIP
-		sameNodeClient = createDeployment(rstDeployment("rst-same", "rst-client", serverNode))
-		otherNodeClient = createDeployment(rstDeployment("rst-other", "rst-client", otherNode))
-		allowedClient = createDeployment(rstDeployment("rst-allowed", "rst-allowed", otherNode))
+		sameNodeDeployment := rstDeployment("rst-same", "rst-client", serverNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, sameNodeDeployment)
+		sameNodeClient = fw.CreateSingleReplicaAndGetPod(ctx, sameNodeDeployment)
+		otherNodeDeployment := rstDeployment("rst-other", "rst-client", otherNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, otherNodeDeployment)
+		otherNodeClient = fw.CreateSingleReplicaAndGetPod(ctx, otherNodeDeployment)
+		allowedDeployment := rstDeployment("rst-allowed", "rst-allowed", otherNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, allowedDeployment)
+		allowedClient = fw.CreateSingleReplicaAndGetPod(ctx, allowedDeployment)
 
 		By("Creating a ClusterIP Service for the server")
 		svc, err := fw.ServiceManager.CreateService(ctx, &v1.Service{
@@ -232,13 +244,14 @@ func rstDeployment(name, app, node string) *appsv1.Deployment {
 		Replicas(1).
 		AddLabel("app", app).
 		// Two client Deployments share an app label, so each also selects on
-		// its own name: createDeployment finds a Deployment's pod by its
-		// selector, and Deployments with overlapping selectors may conflict.
+		// its own name: CreateSingleReplicaAndGetPod finds a Deployment's pod
+		// by its selector, and Deployments with overlapping selectors may
+		// conflict.
 		AddLabel("deployment", name).
 		// python as PID 1 ignores SIGTERM.
 		TerminationGracePeriod(0).
 		Container(v1.Container{
-			Name: "server", Image: "public.ecr.aws/docker/library/python:3.11-slim",
+			Name: "server", Image: utils.PythonImage,
 			Command: []string{"python3", "-m", "http.server", strconv.Itoa(rstServerPort), "--bind", "::"},
 		}).
 		Build()

@@ -29,30 +29,6 @@ func createPod(pod *v1.Pod) *v1.Pod {
 	return running
 }
 
-// createDeployment creates dp, registers its deletion, waits for it to roll out
-// and returns its pod.
-func createDeployment(dp *appsv1.Deployment) *v1.Pod {
-	// Registered before the wait, so a Deployment that never rolls out is still
-	// deleted. The pod outlives its Deployment until garbage collection removes
-	// it, so the cleanup waits for the pod too.
-	var pod *v1.Pod
-	DeferCleanup(func() {
-		Expect(fw.DeploymentManager.DeleteAndWaitUntilDeploymentDeleted(ctx, dp)).To(Succeed())
-		if pod != nil {
-			Expect(fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, pod)).To(Succeed())
-		}
-	})
-	_, err := fw.DeploymentManager.CreateAndWaitUntilDeploymentReady(ctx, dp)
-	Expect(err).ToNot(HaveOccurred())
-	pods := &v1.PodList{}
-	Expect(fw.K8sClient.List(ctx, pods, client.InNamespace(dp.Namespace),
-		client.MatchingLabels(dp.Spec.Selector.MatchLabels))).To(Succeed())
-	Expect(pods.Items).To(HaveLen(1), "pods of Deployment %s", dp.Name)
-	pod = &pods.Items[0]
-	Expect(pod.Status.PodIP).ToNot(BeEmpty())
-	return pod
-}
-
 func createPolicy(policy *network.NetworkPolicy) {
 	Expect(fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, policy)).To(Succeed())
 	DeferCleanup(func() { Expect(fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, policy)).To(Succeed()) })
