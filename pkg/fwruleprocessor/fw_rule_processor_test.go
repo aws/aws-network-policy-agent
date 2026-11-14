@@ -1306,9 +1306,31 @@ func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
 			want: map[string]string{v4Node + "/32": "any", "10.1.0.0/16": "tcp/443"},
 		},
 		{
+			name:  "rule with an empty except is dropped",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except(""), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any"},
+		},
+		{
 			name:  "unparseable rule is skipped",
 			rules: []EbpfFirewallRules{{IPCidr: "not-a-cidr", L4Info: tcp(80)}},
 			want:  map[string]string{v4Node + "/32": "any"},
+		},
+		{
+			name: "unparseable rule adds no deny for its except",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", L4Info: tcp(80)},
+				{IPCidr: "10.300.0.0/16", Except: except("10.1.0.0/16"), L4Info: tcp(443)},
+			},
+			want: map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80"},
+		},
+		{
+			name:       "ipv6 unparseable rule adds no deny for its except",
+			enableIPv6: true,
+			rules: []EbpfFirewallRules{
+				{IPCidr: "2001:db8::/32", L4Info: tcp(80)},
+				{IPCidr: "2001:db8::/129", Except: except("2001:db8:1::/48"), L4Info: tcp(443)},
+			},
+			want: map[string]string{v6Node + "/128": "any", "2001:db8::/32": "tcp/80"},
 		},
 	}
 

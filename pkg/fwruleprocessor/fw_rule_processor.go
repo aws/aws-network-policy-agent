@@ -111,6 +111,13 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
 
+		// Drop a rule whose CIDR can't be parsed before its excepts are tracked,
+		// so it adds no deny entries of its own.
+		if _, _, err := net.ParseCIDR(string(firewallRule.IPCidr)); err != nil {
+			log().Errorf("Skipping rule %s: not a valid CIDR: %v", firewallRule.IPCidr, err)
+			continue
+		}
+
 		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
 		}
@@ -168,11 +175,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 
 	for key, value := range cidrsMap {
 		log().Infof("Updating Map with IP Key: %s", string(key))
-		_, firewallMapKey, err := net.ParseCIDR(string(key))
-		if err != nil {
-			log().Errorf("Skipping unparseable CIDR %q: %v", key, err)
-			continue
-		}
+		_, firewallMapKey, _ := net.ParseCIDR(string(key))
 		// Key format: Prefix length (4 bytes) followed by 4/16byte IP address
 		firewallKey := utils.ComputeTrieKey(*firewallMapKey, f.enableIPv6)
 
