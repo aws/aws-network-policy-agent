@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-network-policy-agent/test/framework/manifest"
 	"github.com/aws/aws-network-policy-agent/test/framework/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,52 +46,40 @@ var _ = Describe("Conntrack Shortening for Denied Connections", func() {
 	)
 
 	BeforeEach(func() {
-		By("Creating server pod (nginx)")
-		serverPod = &v1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				// No "-": GetPodIdentifier drops a pod name's last "-" segment, so
-				// "ct-server" and "ct-client" would share one identifier, and on the
-				// same node one set of BPF programs and policy maps.
-				Name: "ctserver", Namespace: namespace,
-				Labels: map[string]string{"app": "ct-server"},
-			},
-			Spec: v1.PodSpec{
-				Containers: []v1.Container{{
-					Name: "nginx", Image: "public.ecr.aws/nginx/nginx:latest",
-					Ports:   []v1.ContainerPort{{ContainerPort: victimPort}},
-					Command: []string{"sh", "-c"},
-					// Same config as the poisoning specs, so the server listens on both families.
-					Args: []string{fmt.Sprintf(
-						"printf '%%s' %s > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
-						shellQuote(victimConf))},
-				}},
-			},
-		}
-		var err error
-		serverPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, serverPod, 2*time.Minute)
-		Expect(err).ToNot(HaveOccurred())
+		By("Creating server deployment (nginx)")
+		serverDeployment := manifest.NewDefaultDeploymentBuilder().
+			Name("ct-server").Namespace(namespace).Replicas(1).AddLabel("app", "ct-server").
+			Container(manifest.NewBusyBoxContainerBuilder().
+				Name("nginx").Image(utils.NginxImage).ImageRepository(fw.Options.TestImageRegistry).
+				AddContainerPort(v1.ContainerPort{ContainerPort: victimPort}).
+				Command([]string{"sh", "-c"}).
+				// Same config as the poisoning specs, so the server listens on both families.
+				Args([]string{fmt.Sprintf(
+					"printf '%%s' %s > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
+					shellQuote(victimConf))}).
+				Build()).
+			Build()
+		// Registered before the create, so a Deployment that never got ready (an
+		// image that fails to pull) is still deleted and does not make the next
+		// spec's create fail.
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, serverDeployment)
+		serverPod = fw.CreateSingleReplicaAndGetPod(ctx, serverDeployment)
 		serverIP = serverPod.Status.PodIP
-		Expect(serverIP).ToNot(BeEmpty())
 
-		By("Creating client pod (python, for connects from a fixed source port)")
-		clientPod = &v1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "ctclient", Namespace: namespace,
-				Labels: map[string]string{"app": "ct-client"},
-			},
-			Spec: v1.PodSpec{
-				Containers: []v1.Container{{
-					Name: "client", Image: "public.ecr.aws/docker/library/python:3.11-slim",
-					Command: []string{"sleep", "infinity"},
-				}},
-			},
-		}
-		clientPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx, clientPod, 3*time.Minute)
-		Expect(err).ToNot(HaveOccurred())
+		By("Creating client deployment (python, for connects from a fixed source port)")
+		clientDeployment := manifest.NewDefaultDeploymentBuilder().
+			Name("ct-client").Namespace(namespace).Replicas(1).AddLabel("app", "ct-client").
+			Container(manifest.NewBusyBoxContainerBuilder().
+				Name("client").Image(utils.PythonImage).
+				Command([]string{"sleep", "infinity"}).
+				Build()).
+			Build()
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, clientDeployment)
+		clientPod = fw.CreateSingleReplicaAndGetPod(ctx, clientDeployment)
 		clientIP = clientPod.Status.PodIP
-		Expect(clientIP).ToNot(BeEmpty())
 
 		By("Creating a check pod on the server's node to read its conntrack table")
+		var err error
 		checkPod, err = fw.PodManager.CreateAndWaitTillPodIsRunning(ctx,
 			utils.BuildBPFCheckPod(namespace, serverPod.Spec.NodeName), 2*time.Minute)
 		Expect(err).ToNot(HaveOccurred())
@@ -114,10 +103,8 @@ var _ = Describe("Conntrack Shortening for Denied Connections", func() {
 		if denyPolicy != nil {
 			fw.NetworkPolicyManager.DeleteNetworkPolicy(ctx, denyPolicy)
 		}
-		for _, pod := range []*v1.Pod{checkPod, clientPod, serverPod} {
-			if pod != nil {
-				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, pod)
-			}
+		if checkPod != nil {
+			fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, checkPod)
 		}
 	})
 
