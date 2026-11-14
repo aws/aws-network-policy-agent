@@ -264,7 +264,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 	t.Run("PolicyEndpoint", func(t *testing.T) {
 		endpoints := func() []policyk8sawsv1.EndpointInfo {
 			return []policyk8sawsv1.EndpointInfo{
-				{CIDR: "10.0.0.0/16", Except: append(make([]policyk8sawsv1.NetworkAddress, 0, 4), "10.0.255.0/24"), Ports: cachedPorts(corev1.ProtocolTCP, 80, 90)},
+				{CIDR: "10.0.0.0/16", Except: append(make([]policyk8sawsv1.NetworkAddress, 0, 4), "10.0.255.0/24", "::ffff:10.0.254.0/120"), Ports: cachedPorts(corev1.ProtocolTCP, 80, 90)},
 				{CIDR: "10.0.0.0/24", Except: append(make([]policyk8sawsv1.NetworkAddress, 0, 4), "10.0.0.128/26"), Ports: cachedPorts(corev1.ProtocolUDP, 53, 0)},
 				{CIDR: "10.0.0.0/24", Ports: cachedPorts(corev1.ProtocolTCP, 443, 0)},
 				{CIDR: "10.0.0.7"},
