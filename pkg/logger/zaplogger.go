@@ -15,12 +15,37 @@
 package logger
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
+)
+
+const (
+	// fileBufferSize is how many bytes of log lines a log file's writer holds before it writes
+	// them to the file in one write(2).
+	fileBufferSize = 64 * 1024
+	// fileFlushInterval is how often a log file's writer writes out the lines it holds. With
+	// fileBufferSize it bounds the lines lost when the process ends without an error log or a
+	// Sync, as on SIGKILL or a panic outside main.
+	fileFlushInterval = 100 * time.Millisecond
+)
+
+var (
+	fileWritersMu sync.Mutex
+	// fileWriters holds one writer per log file. Every logger writing a file shares its
+	// writer, so all their lines go through one buffer and one lumberjack.Logger, which
+	// tracks the file's size and rotates it. A second lumberjack.Logger on the same file
+	// would write at its own offset, over the other's lines, and would keep writing the
+	// rotated backup, which is then compressed and removed.
+	fileWriters = map[string]*fileWriter{}
 )
 
 type structuredLogger struct {
@@ -69,7 +94,11 @@ func (logConfig *Configuration) buildZapCore() zapcore.Core {
 
 	writer := getLogFilePath(logConfig.LogLocation, logConfig.LogFileMaxSize, logConfig.LogFileMaxBackups)
 
-	cores = append(cores, zapcore.NewCore(getEncoder(), writer, logLevel))
+	core := zapcore.NewCore(getEncoder(), writer, logLevel)
+	if fw, ok := writer.(*fileWriter); ok {
+		core = zapcore.RegisterHooks(core, fw.syncOnError)
+	}
+	cores = append(cores, core)
 
 	return zapcore.NewTee(cores...)
 }
@@ -107,8 +136,15 @@ func getLogFilePath(logFilePath string, logFileMaxSize int, logFileMaxBackups in
 	return writer
 }
 
-// getLogWriter is for lumberjack
+// getLogWriter returns the writer for logFilePath, creating it on the first call for that
+// file. The size and backup limits of that first call apply to every logger writing the file.
 func getLogWriter(logFilePath string, logFileMaxSize int, logFileMaxBackups int) zapcore.WriteSyncer {
+	key := filepath.Clean(logFilePath)
+	fileWritersMu.Lock()
+	defer fileWritersMu.Unlock()
+	if fw, ok := fileWriters[key]; ok {
+		return fw
+	}
 	lumberJackLogger := &lumberjack.Logger{
 		Filename:   logFilePath,
 		MaxSize:    logFileMaxSize,
@@ -116,7 +152,60 @@ func getLogWriter(logFilePath string, logFileMaxSize int, logFileMaxBackups int)
 		MaxAge:     30,
 		Compress:   true,
 	}
-	return zapcore.AddSync(lumberJackLogger)
+	fw := &fileWriter{
+		BufferedWriteSyncer: &zapcore.BufferedWriteSyncer{
+			WS:            zapcore.AddSync(reportingWriter{lumberJackLogger}),
+			Size:          fileBufferSize,
+			FlushInterval: fileFlushInterval,
+		},
+		file: lumberJackLogger,
+	}
+	fileWriters[key] = fw
+	return fw
+}
+
+// fileWriter buffers log lines for one rotating log file. A log call copies its line into the
+// buffer; the buffer is written to the file when it fills, every fileFlushInterval, after an
+// entry at ErrorLevel or above, and on Sync.
+type fileWriter struct {
+	*zapcore.BufferedWriteSyncer
+	file *lumberjack.Logger
+}
+
+// syncOnError writes out the buffer after an entry at ErrorLevel or above. main logs an
+// error before each os.Exit, which skips deferred calls and stops the flush goroutine, so
+// this keeps the error and the lines before it.
+func (fw *fileWriter) syncOnError(entry zapcore.Entry) error {
+	if entry.Level < zapcore.ErrorLevel {
+		return nil
+	}
+	return fw.Sync()
+}
+
+// reportingWriter writes to the log file and reports a failed write on stderr instead of
+// returning it. The buffer in front of it accepts no more lines once a write returns an
+// error, so returning one would stop all logging after a transient failure such as a full
+// disk. A failed write loses the lines it carried.
+type reportingWriter struct {
+	file *lumberjack.Logger
+}
+
+func (w reportingWriter) Write(p []byte) (int, error) {
+	if _, err := w.file.Write(p); err != nil {
+		fmt.Fprintf(os.Stderr, "%v write error: %v\n", time.Now(), err)
+	}
+	return len(p), nil
+}
+
+// Sync writes out the lines buffered for every log file.
+func Sync() error {
+	fileWritersMu.Lock()
+	defer fileWritersMu.Unlock()
+	var err error
+	for _, fw := range fileWriters {
+		err = errors.Join(err, fw.Sync())
+	}
+	return err
 }
 
 func (l *structuredLogger) Debugf(format string, args ...interface{}) {
