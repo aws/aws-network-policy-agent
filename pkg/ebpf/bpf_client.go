@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -69,6 +70,22 @@ var (
 	// connections. They call nf_conntrack kfuncs, so need kernel 6.0+.
 	TC_INGRESS_CT_DENY_BINARY    = "tc.v4ingress.ctdeny.bpf.o"
 	TC_V6_INGRESS_CT_DENY_BINARY = "tc.v6ingress.ctdeny.bpf.o"
+)
+
+// TC_SHARED_BINARY defines node-wide maps the TC programs share. See
+// pkg/ebpf/c/tc_shared.h for why they are not in the events binary.
+const (
+	TC_SHARED_BINARY      = "tc.shared.bpf.o"
+	TC_CONFIG_MAP         = "aws_tc_config"
+	TCP_RESET_PENDING_MAP = "aws_tcp_reset_pending"
+)
+
+// The shared maps' pin paths, built the way the SDK pins node-wide maps
+// (<globalMapsPinPrefix>_<name> under the maps directory). recoverBPFState and
+// tcSharedMapsPinned look the maps up by these paths after a restart.
+var (
+	TC_CONFIG_MAP_PIN_PATH         = utils.BPF_MAPS_PIN_PATH_DIRECTORY + globalMapsPinPrefix + "_" + TC_CONFIG_MAP
+	TCP_RESET_PENDING_MAP_PIN_PATH = utils.BPF_MAPS_PIN_PATH_DIRECTORY + globalMapsPinPrefix + "_" + TCP_RESET_PENDING_MAP
 )
 
 // ErrProbeAttachSkipped marks a probe attach that could not be performed yet
@@ -170,7 +187,8 @@ type BPFContext struct {
 }
 
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string,
+	enableTCPResetOnDeny bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 	var policyEventsDropCountMap goebpfmaps.BpfMap
 	var policyEventsDropCountMapPresent bool
@@ -222,10 +240,15 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	// layout, the ct-deny binary is probed once the events binary has created them.
 	_, _, eventsBinaryChanged, _ := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient, []string{eventsBinary}, hostBinaryPath)
 	ingressBinary, probeCtDenyLater := ebpfClient.chooseIngressBinary(enableIPv6, eventsBinaryChanged)
+	// Programs keep the maps they were loaded with. If the shared maps are
+	// created again (the shared binary changed, or a pin is missing), every
+	// pod's programs are reloaded against them, as for the events binary;
+	// otherwise they'd keep the old config, or fail to load on a new layout.
+	reloadTCSharedMaps := binaryChanged(TC_SHARED_BINARY, hostBinaryPath) || !tcSharedMapsPinned()
 	ebpfClient.ingressBinary, ebpfClient.egressBinary,
 		ebpfClient.hostMask = ingressBinary, egressBinary, hostMask
 
-	bpfBinaries := []string{eventsBinary, ingressBinary, egressBinary, cliBinary}
+	bpfBinaries := []string{eventsBinary, TC_SHARED_BINARY, ingressBinary, egressBinary, cliBinary}
 
 	//Compare BPF binaries. The events binary was compared above; its change
 	//reloads the ingress and egress probes too.
@@ -237,6 +260,9 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	}
 	if eventsBinaryChanged {
 		ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired = true, true, true
+	}
+	if reloadTCSharedMaps {
+		ingressUpdateRequired, egressUpdateRequired = true, true
 	}
 	log().Info("Probe validation Done")
 
@@ -274,7 +300,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		}
 		var bpfSdkInputData goelf.BpfCustomData
 		bpfSdkInputData.FilePath = eventsProbe
-		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomPinPath = globalMapsPinPrefix
 		bpfSdkInputData.CustomMapSize = make(map[string]int)
 
 		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
@@ -323,6 +349,21 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			return nil, err
 		}
 	}
+
+	// Every TC program references the shared maps, so they must exist before
+	// the deferred ct-deny probe below and before any pod's program loads.
+	tcConfigMap, err := ebpfClient.loadTCSharedMaps(eventsUpdateRequired || reloadTCSharedMaps)
+	if err != nil {
+		log().Errorf("Unable to load %s. Required for policy enforcement, exiting..error: %v", TC_SHARED_BINARY, err)
+		sdkAPIErr.WithLabelValues("LoadBpfFile-TCShared").Inc()
+		return nil, err
+	}
+	if err := writeTCConfig(tcConfigMap, enableTCPResetOnDeny); err != nil {
+		log().Errorf("Unable to write the TC programs' config, exiting..error: %v", err)
+		sdkAPIErr.WithLabelValues("UpdateMapEntry-TCConfig").Inc()
+		return nil, err
+	}
+	log().Infof("TCP reset on deny enabled: %v", enableTCPResetOnDeny)
 
 	// First start, or the events binary changed: no pod runs this run's ingress
 	// program yet (an events binary change reloads them all), so switching to the
@@ -469,7 +510,6 @@ func (l *bpfClient) resolveGlobalMap(fresh goebpfmaps.BpfMap, freshOK bool, pinP
 
 func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostBinaryPath string) (bool, bool, bool, error) {
 	updateIngressProbe, updateEgressProbe, updateEventsProbe := false, false, false
-	var existingProbePath string
 
 	for _, bpfProbe := range bpfBinaries {
 		if bpfProbe == EKS_CLI_BINARY || bpfProbe == EKS_V6_CLI_BINARY {
@@ -477,22 +517,7 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 		}
 
 		log().Infof("Validating Probe: %s", bpfProbe)
-		currentProbe, err := os.ReadFile(bpfProbe)
-		if err != nil {
-			log().Errorf("error opening Probe: %s error: %v", bpfProbe, err)
-		}
-
-		// The ct-deny ingress binaries are installed under the regular ingress
-		// binary's name, so a switch between the variants shows up as a change.
-		existingProbePath = hostBinaryPath + cp.HostBinaryName(bpfProbe)
-		existingProbe, err := os.ReadFile(existingProbePath)
-		if err != nil {
-			log().Errorf("error opening Probe: %s error: %v", existingProbePath, err)
-		}
-
-		log().Info("comparing new and existing probes ...")
-		isEqual := cmp.Equal(currentProbe, existingProbe)
-		if !isEqual {
+		if binaryChanged(bpfProbe, hostBinaryPath) {
 			if bpfProbe == EVENTS_BINARY || bpfProbe == EVENTS_V6_BINARY {
 				// Ingress and Egress probes refer to Conntrack and Policy Events maps defined in
 				// events binary. So, if the events binary changes, we will need to update all the existing
@@ -513,6 +538,44 @@ func checkAndUpdateBPFBinaries(bpfTCClient tc.BpfTc, bpfBinaries []string, hostB
 		}
 	}
 	return updateIngressProbe, updateEgressProbe, updateEventsProbe, nil
+}
+
+// binaryChanged reports whether binary differs from its copy on the host,
+// which is the one the programs and maps already on the node came from. A
+// missing copy, as on a first start, counts as a change. The ct-deny ingress
+// binaries are installed under the regular ingress binary's name, so a switch
+// between the variants shows up as a change.
+func binaryChanged(binary, hostBinaryPath string) bool {
+	current, err := os.ReadFile(binary)
+	if err != nil {
+		// Not expected: the image ships every binary. No early return: an
+		// unreadable copy compares as empty, as the agent has always treated it,
+		// so a node keeps running on its recovered state.
+		log().Errorf("error opening Probe: %s error: %v", binary, err)
+	}
+	existingPath := hostBinaryPath + cp.HostBinaryName(binary)
+	existing, err := os.ReadFile(existingPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// Expected on a node's first start, or for a binary new in this version.
+		// A missing copy compares as changed, so the binary is loaded and installed.
+		log().Infof("No host copy of %s yet", binary)
+	case err != nil:
+		log().Errorf("error opening Probe: %s error: %v", existingPath, err)
+	}
+	log().Info("comparing new and existing probes ...")
+	return !cmp.Equal(current, existing)
+}
+
+// tcSharedMapsPinned reports whether both shared maps are pinned. If not,
+// loadTCSharedMaps creates both again.
+func tcSharedMapsPinned() bool {
+	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH} {
+		if _, err := os.Stat(pinPath); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.BpfSDKClient, policyEndpointeBPFContext *sync.Map, globalMaps *sync.Map, updateIngressProbe,
@@ -563,6 +626,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				// Store so the DENY drop counter can be exported on warm restart.
 				globalMaps.Store(globalMapName, globalMap)
 				log().Info("Policy events drop count map recovered")
+			}
+			// Kept so loadTCSharedMaps can reuse them: the programs pods
+			// already run reference these maps, not new copies.
+			if globalMapName == TC_CONFIG_MAP_PIN_PATH || globalMapName == TCP_RESET_PENDING_MAP_PIN_PATH {
+				globalMaps.Store(globalMapName, globalMap)
 			}
 		}
 	}
@@ -1156,6 +1224,10 @@ func ingressBinaries(enableIPv6 bool) (string, string) {
 	return TC_INGRESS_BINARY, TC_INGRESS_CT_DENY_BINARY
 }
 
+// globalMapsPinPrefix is the pin prefix of node-wide maps. The SDK treats a
+// map as node-wide by its name, and pins it as <prefix>_<name>.
+const globalMapsPinPrefix = "global"
+
 // ctDenyProbePinPrefix is the pin prefix the ct-deny probe loads under. It
 // can't match a pod's pins, including the "name-namespace" ones of agents
 // before v1.4.0: pod names and namespaces are lowercase (RFC 1123), and pod
@@ -1197,6 +1269,13 @@ func (l *bpfClient) chooseIngressBinary(enableIPv6, eventsChanged bool) (binary 
 		return ctDenyBinary, true
 	}
 	l.probeGlobalMaps = globalMaps
+	// An agent before the shared maps existed leaves only the events
+	// binary's maps; the probe would fail to relocate against the missing
+	// ones and wrongly fall back to the regular binary.
+	if !hasTCSharedMaps(globalMaps) {
+		log().Infof("Shared TC maps not present yet, probing %s after they are created", ctDenyBinary)
+		return ctDenyBinary, true
+	}
 	if !l.ctDenyBinaryLoads(ctDenyBinary) {
 		return binary, false
 	}
@@ -1245,6 +1324,69 @@ func removeCtDenyProbePins() {
 			}
 		}
 	}
+}
+
+// The ingress and egress binaries reference both shared maps, so with either
+// missing they can't load.
+func hasTCSharedMaps(globalMaps map[string]goebpfmaps.BpfMap) bool {
+	_, config := globalMaps[TC_CONFIG_MAP_PIN_PATH]
+	_, pending := globalMaps[TCP_RESET_PENDING_MAP_PIN_PATH]
+	return config && pending
+}
+
+// loadTCSharedMaps returns the config map of TC_SHARED_BINARY, reusing the
+// pinned maps recoverBPFState recovered or loading the binary otherwise.
+//
+// Recovered maps are kept because running programs reference them. With
+// reloadMaps, every pod's programs are reloaded anyway, so new maps are safe
+// and the recovered ones are closed.
+func (l *bpfClient) loadTCSharedMaps(reloadMaps bool) (goebpfmaps.BpfMap, error) {
+	if !reloadMaps {
+		config, configFound := l.globalMaps.Load(TC_CONFIG_MAP_PIN_PATH)
+		_, pendingFound := l.globalMaps.Load(TCP_RESET_PENDING_MAP_PIN_PATH)
+		if configFound && pendingFound {
+			log().Info("Recovered the shared TC maps")
+			return config.(goebpfmaps.BpfMap), nil
+		}
+	}
+	_, maps, err := l.bpfSDKClient.LoadBpfFileWithCustomData(goelf.BpfCustomData{
+		FilePath:      TC_SHARED_BINARY,
+		CustomPinPath: globalMapsPinPrefix,
+	})
+	if err != nil {
+		return goebpfmaps.BpfMap{}, err
+	}
+	config, found := maps[TC_CONFIG_MAP]
+	if !found {
+		return goebpfmaps.BpfMap{}, fmt.Errorf("%s has no %s map", TC_SHARED_BINARY, TC_CONFIG_MAP)
+	}
+	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH} {
+		if recovered, ok := l.globalMaps.LoadAndDelete(pinPath); ok {
+			closeFD(int(recovered.(goebpfmaps.BpfMap).MapFD))
+		}
+	}
+	log().Infof("Loaded %s", TC_SHARED_BINARY)
+	return config, nil
+}
+
+// tcConfig mirrors struct tc_config in pkg/ebpf/c/tc_shared.h.
+type tcConfig struct {
+	tcpResetOnDeny uint32
+}
+
+// tcConfigKey is TC_CONFIG_KEY in pkg/ebpf/c/tc_shared.h: the config map is
+// an array with one entry.
+const tcConfigKey uint32 = 0
+
+// writeTCConfig writes the agent's flags that the TC programs read, at every
+// start.
+func writeTCConfig(configMap goebpfmaps.BpfMap, enableTCPResetOnDeny bool) error {
+	var config tcConfig
+	if enableTCPResetOnDeny {
+		config.tcpResetOnDeny = 1
+	}
+	key := tcConfigKey
+	return configMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&config)), 0)
 }
 
 // closeAfterFailedUnpin closes an FD the SDK left open because unpinning failed.

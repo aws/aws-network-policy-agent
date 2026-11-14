@@ -28,6 +28,7 @@ const (
 	flagConntrackCacheCleanupPeriod    = "conntrack-cache-cleanup-period"
 	flagConntrackCacheTableSize        = "conntrack-cache-table-size"
 	flagEnableProfiling                = "enable-profiling"
+	flagEnableTCPResetOnDeny           = "enable-tcp-reset-on-deny"
 )
 
 // ControllerConfig contains the controller configuration
@@ -58,6 +59,12 @@ type ControllerConfig struct {
 	RuntimeConfig RuntimeConfig
 	// Configuration for enabling profiling
 	EnableProfiling bool
+	// EnableTCPResetOnDeny answers a TCP SYN that a policy denies with a RST
+	// instead of dropping it silently. Off by default: a RST tells the
+	// client that the address is reachable and the port is blocked by
+	// policy, and spoofed SYNs would make the node send RSTs to the spoofed
+	// addresses.
+	EnableTCPResetOnDeny bool
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -76,6 +83,9 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
 	fs.BoolVar(&cfg.EnableNetworkPolicy, flagEnableNetworkPolicy, false, "If enabled, Network Policy agent will initialize BPF maps and start reconciler")
 	fs.BoolVar(&cfg.EnableProfiling, flagEnableProfiling, false, "If enabled, Network Policy agent will enable profiling")
+	fs.BoolVar(&cfg.EnableTCPResetOnDeny, flagEnableTCPResetOnDeny, false, ""+
+		"If enabled, a TCP connection attempt denied by policy is answered with a RST instead of being dropped silently. "+
+		"This frees connection tracking state on the client and in EC2 at once, but tells the client that the port is blocked")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+

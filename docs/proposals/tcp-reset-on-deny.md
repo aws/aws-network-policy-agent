@@ -75,11 +75,15 @@ The host then receives the RST as if the pod had sent it and routes it as a repl
 - If egress policy allowed it, the program would record pod to client in its flow cache, and the client's next SYN on the same ports would be accepted as a reply.
 - If egress policy denied it (common with default-deny policies), the RST would be dropped, and the client would time out as today.
 
-So the egress program passes a TCP RST that has an entry in `aws_tcp_reset_pending`, deletes the entry, and records nothing. Any other RST from the pod is evaluated as before. A pod can't use the map: it could only send a RST with the same addresses and ports in the microseconds before the egress program consumes the entry, and that RST would be the same packet.
+So the egress program does two things:
+- **With the flag on, a RST never records a flow.** A RST that matches no known flow is evaluated as before, but the program doesn't record it, whatever the verdict. This is what keeps the client's next SYN from being accepted as a reply, and it doesn't depend on the map below: an entry can be missing when two SYNs on one tuple are denied before the first RST arrives, or when the LRU evicts it.
+- **A RST with an entry in `aws_tcp_reset_pending` passes unevaluated,** and its entry is deleted. This only gets the RST past default-deny egress; a RST whose entry is missing is evaluated, and dropped if egress denies it, so the client times out as today.
+
+A pod can't use the map to get past its egress policy: it could only send a RST with the same addresses and ports in the microseconds before the egress program consumes the entry. With the flag off, the egress program treats RSTs exactly as before.
 
 **Flag and maps.** The flag's value and the pending map live in a new binary, `tc.shared.bpf.o`, which the agent loads once per node and pins:
 - `aws_tc_config`: an array with one entry, holding the flag. The agent writes it at every start, so the value applies to programs pods already run.
-- `aws_tcp_reset_pending`: an LRU hash of 8,192 entries. Entries normally live from the redirect to the egress program, microseconds later; the LRU evicts the rare ones the host dropped in between. Under the 5,000/s flood it held at most one entry at a time.
+- `aws_tcp_reset_pending`: an LRU hash of 8,192 entries. Entries normally live from the redirect to the egress program, microseconds later; the LRU evicts the rare ones the host dropped in between. An evicted or missing entry only costs the client the RST under default-deny egress, since a RST never records a flow. Under the 5,000/s flood it held at most one entry at a time.
 
 They are not in the events binary because a change to that binary makes the agent recreate its conntrack map, which drops the state of every allowed flow on the node. A runtime toggle in a map was chosen over more compiled variants: the ingress programs already come in two variants, and a compile-time flag would double that.
 
@@ -128,7 +132,7 @@ Untested: we don't know whether EC2 frees its entry when it sees this ICMP messa
 ### Alternative 7: other signals for the egress bypass
 
 - **A bit in `skb->mark`.** The prototype used one, and it worked on AL2023 (6.1) but not on AL2 (5.10). A BPF redirect to ingress goes `__bpf_rx_skb` → `dev_forward_skb` → `____dev_forward_skb` → `skb_scrub_packet(skb, xnet)`, which clears the mark only when `xnet` is true (`net/core/skbuff.c`: 5.10 lines 5228-5232, 6.1 lines 5518-5522). 5.10 always passes true (`include/linux/netdevice.h:3921`), so the mark is gone even within one network namespace; 6.1 passes `!net_eq(...)` (`netdevice.h:3960`) and keeps it. On 5.10 the egress program would then evaluate the RST: with egress allowed it would record pod to client, and the client's next SYN on the same ports would complete a handshake to the denied port. The mark is still unforgeable by pods on both kernels, since a packet from the pod crosses namespaces (`veth_xmit` → `__dev_forward_skb`, `xnet` true).
-- **Never recording a flow for an outgoing RST.** That closes the bypass on every kernel, but a RST to a destination egress policy denies would still be dropped, so pods with default-deny egress would get nothing from the option. It would also change how the egress program treats every RST pods send.
+- **Never recording a flow for an outgoing RST, alone.** It closes the bypass on every kernel, and this change does it, but alone a RST to a destination egress policy denies would still be dropped, so pods with default-deny egress would get nothing from the option. The pending map adds that delivery on top.
 - **Enabling the option only on kernels that keep the mark.** Simple, but it leaves AL2 out, and it ties correctness to a kernel detail that a load-time check can only infer from the version.
 
 ### Prior art

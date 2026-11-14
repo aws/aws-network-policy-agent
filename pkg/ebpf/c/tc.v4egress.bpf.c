@@ -139,6 +139,12 @@ struct bpf_map_def_pvt SEC("maps") egress_pod_state_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 #include "policy_events.h"
 
+// tc.shared.bpf.o's maps, declared without a definition so the loader links
+// them to the agent's pinned copies instead of creating new ones.
+struct bpf_map_def_pvt aws_tc_config;
+struct bpf_map_def_pvt aws_tcp_reset_pending;
+
+#include "rst_on_deny.h"
 
 static __always_inline int evaluateClusterPolicyByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, __u32 *admin_tier_priority, __u8 *baseline_tier_action, __u32 *baseline_tier_priority) {
 
@@ -222,7 +228,14 @@ static __always_inline int evaluateNamespacePolicyByLookUp(struct keystruct trie
 	return ACTION_DENY;
 }
 
-static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntrack_key flow_key, __u8 pod_state_val, struct data_t *evt, int pod_state) {
+// record_flow is false for a TCP RST that starts no known flow while TCP reset
+// on deny is on. The ingress program's RST can reach here as the pod's own
+// (its pending entry overwritten by a second SYN on the tuple, or evicted),
+// and a flow recorded for it would let the client's next SYN in as a reply,
+// without ingress evaluation. With the flag off no such RST exists, so pods'
+// RSTs are recorded as before.
+static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntrack_key flow_key, __u8 pod_state_val, struct data_t *evt, int pod_state,
+	bool record_flow) {
 
 		struct conntrack_value flow_val = {};
 		flow_val.last_seen = bpf_ktime_get_ns();
@@ -263,7 +276,8 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			}
 			case ACTION_ALLOW: {
 				flow_val.val = pod_state_val;
-				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
+				if (record_flow)
+					bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 				evt->verdict = 1;
 				evt->tier = ADMIN_TIER;
 				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
@@ -279,7 +293,8 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 		switch (verdict){
 		case ACTION_ALLOW:{
 			flow_val.val = pod_state_val;
-			bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0); // 0 - BPF_ANY
+			if (record_flow)
+				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0); // 0 - BPF_ANY
 			evt->verdict = 1;
 			evt->tier = NETWORK_POLICY_TIER;
 			bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
@@ -305,7 +320,8 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 			}
 			case ACTION_ALLOW: {
 				flow_val.val = pod_state_val;
-				bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
+				if (record_flow)
+					bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 				evt->verdict = 1;
 				evt->tier = BASELINE_TIER;
 				bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
@@ -315,7 +331,8 @@ static __always_inline int evaluateFlow(struct keystruct trie_key, struct conntr
 				switch (pod_state) {
 				case DEFAULT_ALLOW: {
 					flow_val.val = pod_state_val;
-					bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
+					if (record_flow)
+						bpf_map_update_elem(&aws_conntrack_map, &flow_key, &flow_val, 0);
 					evt->verdict = 1;
 					evt->tier = DEFAULT_TIER;
 					bpf_ringbuf_output(&policy_events, evt, sizeof(*evt), 0);
@@ -344,6 +361,7 @@ int handle_egress(struct __sk_buff *skb)
 	struct conntrack_key flow_key;
 	struct conntrack_value *flow_val;
 	struct conntrack_key reverse_flow_key;
+	bool is_tcp_rst = false;
 	struct conntrack_value *reverse_flow_val;
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
@@ -380,6 +398,14 @@ int handle_egress(struct __sk_buff *skb)
 				}
 				l4_src_port = (((((unsigned short)(l4_tcp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->source) & 0xFF00) >> 8));
 				l4_dst_port = (((((unsigned short)(l4_tcp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_tcp_hdr->dest) & 0xFF00) >> 8));
+				// The ingress program's RST for a denied SYN passes
+				// unevaluated, so it reaches the client even when the pod's
+				// egress denies everything.
+				if (l4_tcp_hdr->rst &&
+				    is_pending_reset_v4(skb, ip->saddr, ip->daddr, l4_tcp_hdr->source, l4_tcp_hdr->dest)) {
+					return BPF_OK;
+				}
+				is_tcp_rst = l4_tcp_hdr->rst;
 				break;
 			case IPPROTO_UDP:
 				if (data + sizeof(*ip) + sizeof(*l4_udp_hdr) > data_end) {
@@ -459,7 +485,7 @@ int handle_egress(struct __sk_buff *skb)
 
 			// Evaluate the flow again if the pod state has changed and take the decision based on it
 			if (flow_val->val != ct_pod_state_val) {
-				int ret = evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+				int ret = evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state, true);
 				if (ret == BPF_DROP) {
 					bpf_map_delete_elem(&aws_conntrack_map, &flow_key);
 					return BPF_DROP;
@@ -486,8 +512,10 @@ int handle_egress(struct __sk_buff *skb)
 			return BPF_OK;
 		}
 
-		// If we reach here, it means it's a new flow or a non-matching response
-		return evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state);
+		// If we reach here, it means it's a new flow or a non-matching response.
+		// With TCP reset on deny on, a RST is evaluated but starts no flow; see
+		// evaluateFlow. The flag is read only for RSTs.
+		return evaluateFlow(trie_key, flow_key, ct_pod_state_val, &evt, pst->state, !(is_tcp_rst && tcp_reset_on_deny_enabled()));
 	}
 	return BPF_OK;
 }
