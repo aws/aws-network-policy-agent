@@ -189,8 +189,8 @@ jobs:
             const failed = '${{ steps.cyclonus.outcome }}' !== 'success';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const suites = ipFamily === 'IPv6'
-              ? 'cyclonus, policy, clusternetworkpolicy, strict (ebpf auto-skips on IPv6)'
-              : 'cyclonus, policy, ebpf, clusternetworkpolicy, strict';
+              ? 'cyclonus, policy, clusternetworkpolicy, agentflags, strict (ebpf auto-skips on IPv6)'
+              : 'cyclonus, policy, ebpf, clusternetworkpolicy, agentflags, strict';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,

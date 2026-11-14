@@ -125,6 +125,16 @@ $ cat /proc/sys/net/netfilter/nf_conntrack_max
 262144
 ```
 
+#### `enable-tcp-reset-on-deny`
+
+Type: Boolean
+
+Default: false
+
+If enabled, a TCP connection attempt (SYN) that a policy denies is answered with a TCP RST instead of being dropped silently, and the client sees "connection refused" at once instead of a timeout. This lets EC2 free the connection's tracking state on both the client's and the server's instance at once; a silently dropped SYN keeps it for about two minutes. Consider it if floods of denied connections, for example through a Network Load Balancer, exhaust the instance's connection tracking allowance (`conntrack_allowance_exceeded`).
+
+It is off by default because a RST tells the sender that the address exists and is blocked by policy, which a silent drop does not. Only bare SYNs are answered; other denied packets are still dropped. Enable it only where denied traffic comes from inside your own network, such as internal services; leave it off where pods are reachable from the internet or other networks you don't control. See [the proposal](docs/proposals/tcp-reset-on-deny.md).
+
 ## Network Policy Agent CLI
 The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.
 
