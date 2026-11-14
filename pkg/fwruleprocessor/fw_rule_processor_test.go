@@ -1274,9 +1274,36 @@ func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
 			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80", "10.1.2.3/32": "deny"},
 		},
 		{
-			name:  "unparseable except is skipped",
+			name:  "rule with an unparseable except is dropped",
 			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("not-a-cidr"), L4Info: tcp(80)}},
-			want:  map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/80"},
+			want:  map[string]string{v4Node + "/32": "any"},
+		},
+		{
+			name:  "rule with a valid and an unparseable except is dropped",
+			rules: []EbpfFirewallRules{{IPCidr: "10.0.0.0/8", Except: except("10.1.0.0/16", "10.2.0.0/33"), L4Info: tcp(80)}},
+			want:  map[string]string{v4Node + "/32": "any"},
+		},
+		{
+			name:       "ipv6 rule with an unparseable except is dropped",
+			enableIPv6: true,
+			rules:      []EbpfFirewallRules{{IPCidr: "2001:db8::/32", Except: except("2001:db8::/129"), L4Info: tcp(80)}},
+			want:       map[string]string{v6Node + "/128": "any"},
+		},
+		{
+			name: "dropped rule leaves a sibling rule for the same CIDR intact",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: except("not-a-cidr"), L4Info: tcp(80)},
+				{IPCidr: "10.0.0.0/8", L4Info: tcp(443)},
+			},
+			want: map[string]string{v4Node + "/32": "any", "10.0.0.0/8": "tcp/443"},
+		},
+		{
+			name: "narrower rule does not inherit ports from a dropped rule",
+			rules: []EbpfFirewallRules{
+				{IPCidr: "10.0.0.0/8", Except: except("not-a-cidr"), L4Info: tcp(80)},
+				{IPCidr: "10.1.0.0/16", L4Info: tcp(443)},
+			},
+			want: map[string]string{v4Node + "/32": "any", "10.1.0.0/16": "tcp/443"},
 		},
 		{
 			name:  "unparseable rule is skipped",
@@ -1310,5 +1337,23 @@ func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
 				assert.Equal(t, origExcepts[i], r.Except, "caller's except slice for rule %d was modified", i)
 			}
 		})
+	}
+}
+
+// TestCanonicalizeExcepts_ReturnsNewSlice checks that the result never shares
+// the input's backing array, for empty and non-empty input, so appends to it
+// cannot write into a cached PolicyEndpoint's array.
+func TestCanonicalizeExcepts_ReturnsNewSlice(t *testing.T) {
+	f := NewFirewallRuleProcessor("10.255.0.1", "/32", false)
+	for _, in := range [][]v1alpha1.NetworkAddress{
+		make([]v1alpha1.NetworkAddress, 0, 4),
+		append(make([]v1alpha1.NetworkAddress, 0, 4), "10.1.0.0/16"),
+	} {
+		backing := in[:cap(in)]
+		before := append([]v1alpha1.NetworkAddress(nil), backing...)
+		out, err := f.canonicalizeExcepts(in)
+		assert.NoError(t, err)
+		_ = append(out, "10.9.0.0/16", "10.8.0.0/16", "10.7.0.0/16", "10.6.0.0/16")
+		assert.Equal(t, before, backing, "canonicalizeExcepts result shares the input's backing array (len %d)", len(in))
 	}
 }
