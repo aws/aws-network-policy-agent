@@ -66,11 +66,23 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 		// The specs span two agent rollouts, longer than the default sleep.
 		check.Spec.Containers[0].Command = []string{"sleep", "1800"}
 		checkPod = createPod(check)
-		serverPod = createDeployment(rstDeployment("rst-server", "rst-server", serverNode))
+		serverDeployment := rstDeployment("rst-server", "rst-server", serverNode)
+		// Registered before the create, so a Deployment that never got ready is
+		// still deleted. The cleanup waits for the pod, not only the
+		// Deployment, which the args restore above relies on to run after the
+		// pods are gone.
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, serverDeployment)
+		serverPod = fw.CreateSingleReplicaAndGetPod(ctx, serverDeployment)
 		serverIP = serverPod.Status.PodIP
-		sameNodeClient = createDeployment(rstDeployment("rst-same", "rst-client", serverNode))
-		otherNodeClient = createDeployment(rstDeployment("rst-other", "rst-client", otherNode))
-		allowedClient = createDeployment(rstDeployment("rst-allowed", "rst-allowed", otherNode))
+		sameNodeDeployment := rstDeployment("rst-same", "rst-client", serverNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, sameNodeDeployment)
+		sameNodeClient = fw.CreateSingleReplicaAndGetPod(ctx, sameNodeDeployment)
+		otherNodeDeployment := rstDeployment("rst-other", "rst-client", otherNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, otherNodeDeployment)
+		otherNodeClient = fw.CreateSingleReplicaAndGetPod(ctx, otherNodeDeployment)
+		allowedDeployment := rstDeployment("rst-allowed", "rst-allowed", otherNode)
+		DeferCleanup(fw.DeleteDeploymentAndWaitForPodGone, ctx, allowedDeployment)
+		allowedClient = fw.CreateSingleReplicaAndGetPod(ctx, allowedDeployment)
 
 		By("Creating a ClusterIP Service for the server")
 		svc, err := fw.ServiceManager.CreateService(ctx, &v1.Service{
@@ -117,16 +129,16 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 		By("Turning the flag on")
 		setAgentArgs(withTCPResetOnDeny(originalArgs))
 
+		// Program IDs and the startup log are only meaningful once the new
+		// agent is running.
+		waitForTCPResetFlag(checkPod.Name, true)
 		// The agent writes the flag into a map the programs share, and only
 		// recovering that map at startup, instead of creating a new one,
 		// reaches programs it doesn't reload. Unchanged program IDs show it
 		// didn't reload them; the refused connects in the next spec show the
 		// flag reached them.
 		Expect(podProgIDs(checkPod.Name, identifier)).To(Equal(before), "the agent reloaded the server's programs")
-		// The agent container has no readiness probe, so the rollout can finish
-		// before the new agent has logged its startup.
-		Eventually(func() string { return agentLogSinceStart(checkPod.Name, sharedMapsRecovered) },
-			utils.ProbeTimeout, utils.PollIntervalShort).Should(ContainSubstring(sharedMapsRecovered))
+		Expect(agentLogSinceStart(checkPod.Name, sharedMapsRecovered)).To(ContainSubstring(sharedMapsRecovered))
 	})
 
 	It("refuses a denied connection from the same node, another node and a ClusterIP", func() {
@@ -181,6 +193,7 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 	It("times a denied connection out again with the flag off", func() {
 		By("Restoring the agent's original args")
 		setAgentArgs(originalArgs)
+		waitForTCPResetFlag(checkPod.Name, false)
 		Expect(connectResults(otherNodeClient.Name, serverIP, rstServerPort, 0, 1)).To(Equal([]string{timedOut}))
 	})
 })
@@ -191,6 +204,9 @@ const (
 	// The agent logs this at startup when it kept the shared TC maps it
 	// found pinned.
 	sharedMapsRecovered = "Recovered the shared TC maps"
+	// The agent logs this, followed by true or false, right after it writes
+	// the flag into the shared config map (pkg/ebpf/bpf_client.go).
+	tcpResetFlagWritten = "TCP reset on deny enabled: "
 
 	rstServerPort  = 8080
 	rstServicePort = 80
@@ -232,13 +248,14 @@ func rstDeployment(name, app, node string) *appsv1.Deployment {
 		Replicas(1).
 		AddLabel("app", app).
 		// Two client Deployments share an app label, so each also selects on
-		// its own name: createDeployment finds a Deployment's pod by its
-		// selector, and Deployments with overlapping selectors may conflict.
+		// its own name: CreateSingleReplicaAndGetPod finds a Deployment's pod
+		// by its selector, and Deployments with overlapping selectors may
+		// conflict.
 		AddLabel("deployment", name).
 		// python as PID 1 ignores SIGTERM.
 		TerminationGracePeriod(0).
 		Container(v1.Container{
-			Name: "server", Image: "public.ecr.aws/docker/library/python:3.11-slim",
+			Name: "server", Image: utils.PythonImage,
 			Command: []string{"python3", "-m", "http.server", strconv.Itoa(rstServerPort), "--bind", "::"},
 		}).
 		Build()
@@ -369,6 +386,17 @@ func execInPod(ns, pod, what, script string) (string, error) {
 func isV6(addr string) bool {
 	ip := net.ParseIP(addr)
 	return ip != nil && ip.To4() == nil
+}
+
+// waitForTCPResetFlag waits until the server node's agent has written the flag
+// value on into the shared config map. The agent container has no readiness
+// probe, so a rollout can finish before the new agent has written it, and a
+// connect right after would still see the old value. The previous agent
+// logged the other value, so only the new agent's line matches.
+func waitForTCPResetFlag(checkPodName string, on bool) {
+	line := fmt.Sprintf("%s%v", tcpResetFlagWritten, on)
+	Eventually(func() string { return agentLogSinceStart(checkPodName, line) },
+		utils.ProbeTimeout, utils.PollIntervalShort).Should(ContainSubstring(line), "the agent never wrote the flag")
 }
 
 // agentLogSinceStart returns the agent's log lines from its last startup on
