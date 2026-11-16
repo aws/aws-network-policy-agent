@@ -14,10 +14,8 @@ import (
 // tcp_reset_kernel_test.go does, and share its helpers.
 //
 // The programs take the L4 header at a fixed sizeof(struct iphdr). With IP
-// options that offset is still inside the IP header, so the ports read from it
-// would be option bytes the sender chose rather than the flow's real ports,
-// matched against the port rules and written into the conntrack key. Such a
-// packet is rejected before the ports are read.
+// options that offset is still inside the IP header, so the values read there
+// are not the packet's ports. Such a packet is rejected instead.
 //
 // There is no v6 equivalent: IPv6 has no ihl, and the v6 switch keys on the
 // outer nexthdr, so an extension header produces no L4 match rather than a
@@ -35,8 +33,7 @@ type ipv4Segment struct {
 }
 
 // packet builds an Ethernet frame carrying s. The option bytes are set to two
-// port-shaped values, which is what a program reading the L4 header at the
-// fixed offset would take the ports to be.
+// port-shaped values, so a test can tell which bytes a program read.
 func (s ipv4Segment) packet() []byte {
 	src, dst := s.src.Addr(), s.dst.Addr()
 
@@ -50,9 +47,8 @@ func (s ipv4Segment) packet() []byte {
 
 	options := make([]byte, s.optionWords*ipv4OptionsLen)
 	if len(options) >= 4 {
-		// Deliberately port-shaped: a program reading ports at the fixed
-		// 20-byte offset would read 8443 and 9091 out of the options instead
-		// of the real ports in the TCP header below.
+		// Port-shaped on purpose, and distinct from the real ports in the TCP
+		// header below, so a test can tell the two apart.
 		binary.BigEndian.PutUint16(options[0:], 8443)
 		binary.BigEndian.PutUint16(options[2:], 9091)
 	}
