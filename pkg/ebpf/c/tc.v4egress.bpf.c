@@ -433,6 +433,18 @@ int handle_egress(struct __sk_buff *skb)
 				break;
 		}
 
+		// Only the first fragment of a datagram carries the L4 header, so for a
+		// fragment with a non-zero offset the bytes the switch just read are
+		// payload, not ports. Discard what they produced. Ports of 0 match only
+		// a rule that applies to any port, so the fragment is still delivered
+		// wherever policy allows the peer on any port, as it is today.
+		// Dropping it instead would lose the whole datagram, since the receiver
+		// cannot reassemble without it.
+		if (bpf_ntohs(ip->frag_off) & IPV4_FRAG_OFFSET_MASK) {
+			l4_src_port = 0;
+			l4_dst_port = 0;
+		}
+
 		trie_key.prefix_len = 32;
 		trie_key.ip[0] = ip->daddr & 0xff;
 		trie_key.ip[1] = (ip->daddr >> 8) & 0xff;
