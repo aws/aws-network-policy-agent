@@ -139,6 +139,12 @@ struct bpf_map_def_pvt SEC("maps") ingress_pod_state_map = {
 struct bpf_map_def_pvt aws_conntrack_map;
 #include "policy_events.h"
 
+// tc.shared.bpf.o's maps, declared without a definition so the loader links
+// them to the agent's pinned copies instead of creating new ones.
+struct bpf_map_def_pvt aws_tc_config;
+struct bpf_map_def_pvt aws_tcp_reset_pending;
+
+#include "rst_on_deny.h"
 
 static __always_inline int evaluateClusterPolicyByLookUp(struct keystruct trie_key, struct conntrack_key flow_key, __u32 *admin_tier_priority, __u8 *baseline_tier_action) {
 
@@ -455,7 +461,9 @@ int handle_ingress(struct __sk_buff *skb)
 					// flow. Entries of established flows are left alone.
 					shorten_denied_syn_v4(skb);
 #endif
-					return BPF_DROP;
+					// As for a new flow below: a deny drops, or answers a bare
+					// SYN with a RST.
+					return deny_verdict_v4(skb);
 				}
 				return BPF_OK;
 			}
@@ -487,6 +495,11 @@ int handle_ingress(struct __sk_buff *skb)
 			shorten_denied_syn_v4(skb);
 		}
 #endif
+		// A deny ends in today's silent drop or, for a bare TCP SYN with
+		// --enable-tcp-reset-on-deny, in a RST to the client.
+		if (verdict == BPF_DROP) {
+			return deny_verdict_v4(skb);
+		}
 		return verdict;
 	}
 	return BPF_OK;
