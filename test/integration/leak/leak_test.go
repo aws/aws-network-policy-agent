@@ -45,6 +45,18 @@ var _ = Describe("BPF Probe Leak Under Pod Churn", Ordered, func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
+		By("Anchoring each worker node so autoscalers keep it for the whole test")
+		// Between the churn and the check the nodes sit idle, and an autoscaler such as Karpenter
+		// can remove one (Auto Mode consolidates after 30s). Its check pod then never starts and
+		// any leak on it goes unchecked. An annotated pod on each node prevents voluntary removal.
+		lo.ForEach(workerNodes, func(node v1.Node, _ int) {
+			anchor := buildNodeAnchorPod(node.Name)
+			Expect(fw.K8sClient.Create(ctx, anchor)).To(Succeed())
+			DeferCleanup(func() {
+				fw.PodManager.DeleteAndWaitTillPodIsDeleted(ctx, anchor)
+			})
+		})
+
 		By("Creating a default deny network policy")
 		defaultDenyPolicy = buildDefaultDenyNetworkPolicy()
 		err = fw.NetworkPolicyManager.CreateNetworkPolicy(ctx, defaultDenyPolicy)
@@ -141,7 +153,11 @@ func buildChurnCronJob() *batchv1.CronJob {
 			Namespace: namespace,
 		},
 		Spec: batchv1.CronJobSpec{
-			Schedule:                   cronSchedule,
+			Schedule: cronSchedule,
+			// One Job at a time. With overlapping Jobs, pods of newer Jobs compete for the
+			// nodes' pod slots and IPs with the tail of older ones, so no Job finishes and the
+			// churn stalls on capacity rather than on the agent.
+			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
 			SuccessfulJobsHistoryLimit: &successfulJobsHistory,
 			FailedJobsHistoryLimit:     &failedJobsHistory,
 			JobTemplate: batchv1.JobTemplateSpec{
@@ -172,6 +188,38 @@ func buildChurnCronJob() *batchv1.CronJob {
 									},
 								},
 							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildNodeAnchorPod returns a pod pinned to nodeName that autoscalers will not evict, so the
+// node stays in the cluster until the BPF check has run on it.
+func buildNodeAnchorPod(nodeName string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("leak-anchor-%s", nodeName),
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"karpenter.sh/do-not-disrupt":                    "true",
+				"cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+			},
+		},
+		Spec: v1.PodSpec{
+			NodeName:      nodeName,
+			RestartPolicy: v1.RestartPolicyNever,
+			Containers: []v1.Container{
+				{
+					Name:    "anchor",
+					Image:   "public.ecr.aws/amazonlinux/amazonlinux:2023-minimal",
+					Command: []string{"sleep", "7200"},
+					Resources: v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("1m"),
+							v1.ResourceMemory: resource.MustParse("4Mi"),
 						},
 					},
 				},
@@ -251,26 +299,28 @@ func assertNoChurnPodLeaks(output, nodeName string) {
 	}
 }
 
+// waitForChurnOrBail runs the churn for churnDuration and fails early only if it stops making
+// progress: no churn pod completes for jobStuckTimeout. Completed pods, not finished Jobs, are
+// the measure, because a Job can take longer than jobStuckTimeout to finish on nodes with few
+// pod slots or IPs while its pods still churn.
 func waitForChurnOrBail(jobStuckTimeout time.Duration) {
 	deadline := time.Now().Add(churnDuration)
-	start := time.Now()
+	lastProgress := time.Now()
+	completed := map[string]int32{}
 	for time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 
-		cj := &batchv1.CronJob{}
-		Expect(fw.K8sClient.Get(ctx, client.ObjectKey{
-			Name:      cronJobName,
-			Namespace: namespace,
-		}, cj)).ToNot(HaveOccurred())
-
-		if cj.Status.LastSuccessfulTime != nil {
-			if time.Since(cj.Status.LastSuccessfulTime.Time) > jobStuckTimeout {
-				Fail(fmt.Sprintf("CronJob last succeeded %v ago, stuck for > %v, bailing early",
-					time.Since(cj.Status.LastSuccessfulTime.Time), jobStuckTimeout))
+		jobs := &batchv1.JobList{}
+		Expect(fw.K8sClient.List(ctx, jobs, client.InNamespace(namespace))).ToNot(HaveOccurred())
+		for _, job := range jobs.Items {
+			if job.Status.Succeeded > completed[job.Name] {
+				completed[job.Name] = job.Status.Succeeded
+				lastProgress = time.Now()
 			}
-			continue
-		} else if time.Since(start) > jobStuckTimeout {
-			Fail(fmt.Sprintf("CronJob has never succeeded after %v, bailing early", jobStuckTimeout))
+		}
+
+		if time.Since(lastProgress) > jobStuckTimeout {
+			Fail(fmt.Sprintf("no churn pod completed for %v, bailing early", jobStuckTimeout))
 		}
 	}
 }

@@ -10,6 +10,7 @@
 # RUN_EBPF_TESTS: Optional, defaults to true. Runs the eBPF conntrack security suite (auto-skips on IPv6)
 # RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to true. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
 # RUN_RESTART_TESTS: Optional, defaults to false. Runs the agent restart suite (needs AL2023 or newer nodes since it runs aws-eks-na-cli on the host)
+# RUN_AGENT_FLAGS_TESTS: Optional, defaults to true. Runs the agentflags suite (changes the agent's args on aws-node and restores them, so it runs after the suites above and before strict)
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
 # DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
@@ -27,6 +28,7 @@ set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
 GINKGO_TEST_BUILD_DIR="$DIR/../test/build"
 
+source "${DIR}/lib/common.sh"
 source "${DIR}/lib/cleanup.sh"
 source "${DIR}/lib/network-policy.sh"
 source "${DIR}/lib/tests.sh"
@@ -42,6 +44,7 @@ source "${DIR}/lib/tests.sh"
 : "${RUN_EBPF_TESTS:="true"}"
 : "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="true"}"
 : "${RUN_RESTART_TESTS:="false"}"
+: "${RUN_AGENT_FLAGS_TESTS:="true"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
 : "${PROD_IMAGE_REGISTRY:=""}"
@@ -75,9 +78,9 @@ K8S_VERSION: $K8S_VERSION
 "
 
 echo "Nodes AMI version for cluster: $CLUSTER_NAME"
-kubectl get nodes -owide
+kubectl_retry get nodes -owide
 
-PROVIDER_ID=$(kubectl get nodes -ojson | jq -r '.items[0].spec.providerID')
+PROVIDER_ID=$(kubectl_retry get nodes -ojson | jq -r '.items[0].spec.providerID')
 AMI_ID=$(aws ec2 describe-instances --instance-ids ${PROVIDER_ID##*/} --region $REGION | jq -r '.Reservations[].Instances[].ImageId')
 echo "Nodes AMI ID: $AMI_ID"
 
@@ -128,6 +131,10 @@ fi
 
 if [[ $RUN_RESTART_TESTS == "true" ]]; then
     run_ginkgo_suite restart.test 15m
+fi
+
+if [[ $RUN_AGENT_FLAGS_TESTS == "true" ]]; then
+    run_agent_flags_suite 15m
 fi
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then

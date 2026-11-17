@@ -31,6 +31,7 @@ type Manager interface {
 	ExecInPod(namespace string, podName string, command []string) (string, error)
 	ValidateConnection(namespace string, podName string, url string, ipFamily string) (string, error)
 	TCPProbe(namespace string, podName string, host string, port int) (string, error)
+	IsPodReady(context context.Context, pod *v1.Pod) (bool, error)
 }
 
 type defaultManager struct {
@@ -219,18 +220,33 @@ func (d *defaultManager) ExecInPod(namespace string, podName string, command []s
 // TCPProbe execs `nc -z` in the pod and returns "OPEN" or "CLOSE" for a connection to
 // host:port. A denied connection is silently dropped (no RST), so nc blocks its full
 // timeout before reporting CLOSE. host and port are passed as positional shell
-// arguments so they are never interpreted as shell syntax.
+// arguments so they are never interpreted as shell syntax. A failed exec is retried, since
+// it goes through the apiserver and fails transiently; the verdict itself is never retried.
 func (d *defaultManager) TCPProbe(namespace string, podName string, host string, port int) (string, error) {
 	cmd := []string{
 		"/bin/sh", "-c",
 		`nc -z -w2 "$1" "$2" 2>/dev/null && echo "OPEN" || echo "CLOSE"`,
 		"sh", host, strconv.Itoa(port),
 	}
-	out, err := d.ExecInPod(namespace, podName, cmd)
-	if err != nil {
-		return "", err
+	var out string
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if out, err = d.ExecInPod(namespace, podName, cmd); err == nil {
+			return strings.TrimSpace(out), nil
+		}
+		if attempt < 3 {
+			time.Sleep(utils.PollIntervalShort)
+		}
 	}
-	return strings.TrimSpace(out), nil
+	return "", err
+}
+
+func (d *defaultManager) IsPodReady(ctx context.Context, pod *v1.Pod) (bool, error) {
+	current := &v1.Pod{}
+	if err := d.k8sClient.Get(ctx, utils.NamespacedName(pod), current); err != nil {
+		return false, err
+	}
+	return isPodReady(current), nil
 }
 
 func (d *defaultManager) ValidateConnection(namespace string, podName string, url string, ipFamily string) (string, error) {

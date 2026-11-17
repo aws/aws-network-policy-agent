@@ -8,7 +8,6 @@ import (
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -302,7 +301,7 @@ func TestPolicySlices_DeleteFlowProgrammingFailure(t *testing.T) {
 	require.ErrorIs(t, fx.reconcileDeleted("np-1-aaaaa"), writeFailed,
 		"the failure must be returned so the request requeues")
 
-	departed := utils.GetPolicyEndpointIdentifier("np-1-aaaaa", fixtureNamespace)
+	departed := fx.request("np-1-aaaaa", "np-1")
 	_, tracked := fx.r.policyEndpointSelectorMap.Load(departed)
 	assert.False(t, tracked,
 		"with no failed cleanups to retry, the deleted PE's entry must be removed, not stored empty")
@@ -335,8 +334,7 @@ func TestPolicySlices_PriorPodsDedupedByIdentity(t *testing.T) {
 	// reconciles that did -- each with the address it had at the time.
 	web0 := types.NamespacedName{Name: "web-0", Namespace: fixtureNamespace}
 	for name, ip := range map[string]string{"np-1-aaaaa": "10.1.1.5", "np-1-bbbbb": "10.1.1.7"} {
-		fx.r.policyEndpointSelectorMap.Store(
-			utils.GetPolicyEndpointIdentifier(name, fixtureNamespace),
+		fx.r.policyEndpointSelectorMap.Store(fx.request(name, "np-1"),
 			[]npatypes.Pod{{NamespacedName: web0, PodIP: policyk8sawsv1.NetworkAddress(ip)}})
 	}
 

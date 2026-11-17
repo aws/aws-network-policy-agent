@@ -38,6 +38,7 @@ type MockBpfClient struct {
 	UpdateClusterPolicyEbpfMapsErr        error
 	UpdatePodStateEbpfMapsErr             error
 	CreatePodStateEbpfEntryIfNotExistsErr error
+	AttacheBPFProbesErr                   error
 
 	// Captured args from the most recent UpdateEbpfMaps call.
 	LastIngressRules []fwrp.EbpfFirewallRules
@@ -135,6 +136,9 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
 	m.LastAttachPodConfirmedLive = podConfirmedLive
+	if m.AttacheBPFProbesErr != nil {
+		return false, m.AttacheBPFProbesErr
+	}
 	// A CNI ADD proves the pod exists and clears its deleted-pod marker, as production does.
 	if podConfirmedLive {
 		delete(m.DeletedPods, pod)
