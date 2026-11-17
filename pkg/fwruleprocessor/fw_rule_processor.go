@@ -3,6 +3,7 @@ package fwruleprocessor
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,11 +111,26 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	for _, firewallRule := range firewallRules {
 		var cidrL4Info []v1alpha1.Port
 
+		// Drop a rule whose CIDR can't be parsed before its excepts are tracked,
+		// so it adds no deny entries of its own.
+		if _, _, err := net.ParseCIDR(string(firewallRule.IPCidr)); err != nil {
+			log().Errorf("Skipping rule %s: not a valid CIDR: %v", firewallRule.IPCidr, err)
+			continue
+		}
+
 		if f.shouldSkipRule(string(firewallRule.IPCidr)) {
 			continue
 		}
 
-		// Track this rule's except CIDRs to handle later.
+		// Track this rule's except CIDRs to handle later. A rule whose except
+		// can't be parsed is dropped whole, so a malformed except removes an
+		// allow instead of allowing the range it was meant to deny.
+		excepts, err := f.canonicalizeExcepts(firewallRule.Except)
+		if err != nil {
+			log().Errorf("Skipping rule %s: %v", firewallRule.IPCidr, err)
+			continue
+		}
+		firewallRule.Except = excepts
 		for _, exceptCidr := range firewallRule.Except {
 			exceptCidrs[string(exceptCidr)] = struct{}{}
 		}
@@ -145,11 +161,7 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	}
 
 	// Go through except CIDRs and append DENY all rule to the L4 info
-	for exceptCidr := range exceptCidrs {
-		canonicalExcept := exceptCidr
-		if _, ipNet, err := net.ParseCIDR(exceptCidr); err == nil {
-			canonicalExcept = ipNet.String()
-		}
+	for canonicalExcept := range exceptCidrs {
 		if _, ok := cidrsMap[canonicalExcept]; !ok {
 			exceptFirewall := EbpfFirewallRules{
 				IPCidr: v1alpha1.NetworkAddress(canonicalExcept),
@@ -159,7 +171,6 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 			addDenyAllL4Entry(&exceptFirewall)
 			cidrsMap[canonicalExcept] = exceptFirewall
 		}
-		log().Debugf("Parsed Except CIDR: %s (canonical: %s)", exceptCidr, canonicalExcept)
 	}
 
 	for key, value := range cidrsMap {
@@ -175,6 +186,60 @@ func (f *FirewallRuleProcessor) ComputeMapEntriesFromEndpointRules(firewallRules
 	}
 
 	return firewallMap, nil
+}
+
+// canonicalizeExcepts returns the except CIDRs that can be encoded in this
+// cluster's trie, each in its canonical map-key form. It always returns a new
+// slice, so callers never write into the caller's (possibly cached) array.
+// It returns an error if any except can't be parsed.
+func (f *FirewallRuleProcessor) canonicalizeExcepts(excepts []v1alpha1.NetworkAddress) ([]v1alpha1.NetworkAddress, error) {
+	out := make([]v1alpha1.NetworkAddress, 0, len(excepts))
+	for _, except := range excepts {
+		canonical, ok, err := f.canonicalizeExcept(string(except))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, v1alpha1.NetworkAddress(canonical))
+		}
+	}
+	return out, nil
+}
+
+// canonicalizeExcept masks an except CIDR and checks it against the cluster
+// family. It returns ok=false for an except of the other family, and an error
+// if the except can't be parsed.
+func (f *FirewallRuleProcessor) canonicalizeExcept(cidr string) (string, bool, error) {
+	if !strings.Contains(cidr, "/") {
+		// A bare address is a single host of its own family.
+		if strings.Contains(cidr, ":") {
+			cidr += "/128"
+		} else {
+			cidr += "/32"
+		}
+	}
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", false, fmt.Errorf("except %q is not a valid CIDR: %v", cidr, err)
+	}
+	addr, _ := netip.AddrFromSlice(ipNet.IP)
+	ones, _ := ipNet.Mask.Size()
+
+	switch {
+	case !f.enableIPv6 && (addr.Is4() || addr.Is4In6()):
+		// IPv4 cluster: a native or IPv4-mapped except is an IPv4 range, keyed by its IPv4 text.
+		return ipNet.String(), true, nil
+	case f.enableIPv6 && addr.Is4In6():
+		// IPv6 cluster: keep the 16-byte form and the original mask. ipNet.String()
+		// would print IPv4 text with an IPv4 prefix length, which collides with native keys.
+		return netip.PrefixFrom(addr, ones).String(), true, nil
+	case f.enableIPv6 && addr.Is6() && !addr.Is4In6():
+		// IPv6 cluster: a native IPv6 except is keyed by its canonical text.
+		return ipNet.String(), true, nil
+	}
+	// The other family can't narrow a rule of this cluster's family, so skipping it is safe.
+	log().Debugf("Skipping except CIDR %s: address family does not match the cluster", cidr)
+	return "", false, nil
 }
 
 // sorting Firewall Rules in Ascending Order of Prefix length
@@ -488,10 +553,18 @@ func (f *FirewallRuleProcessor) removeDuplicateL4Rules(l4Rules []utils.L4Rule) [
 			endPortKey = int(*p.L4PortProtocolInfo.EndPort)
 		}
 
-		if p.L4PortProtocolInfo.Protocol == nil {
+		if utils.IsL4RuleEmpty(p) {
+			// An empty L4 rule is a catch-all: ComputeTrieValueForCPE evaluates it
+			// with protocol ANY, so it must not share a key with an explicit
+			// protocol-less rule (which defaults to TCP) or deduplication could
+			// drop it and remove an intended deny for non-TCP traffic.
+			key = fmt.Sprintf("%s-%d-%d-%d-%s", "ANY", portKey, endPortKey, p.Priority, p.Action)
+		} else if p.L4PortProtocolInfo.Protocol == nil {
 			key = fmt.Sprintf("%s-%d-%d-%d-%s", "TCP", portKey, endPortKey, p.Priority, p.Action)
 		} else {
-			key = fmt.Sprintf("%v-%d-%d-%d-%s", p.L4PortProtocolInfo.Protocol, portKey, endPortKey, p.Priority, p.Action)
+			// Dereference the pointer so equal protocols share a key regardless of
+			// pointer identity; %v on a *corev1.Protocol alone prints its address.
+			key = fmt.Sprintf("%v-%d-%d-%d-%s", *p.L4PortProtocolInfo.Protocol, portKey, endPortKey, p.Priority, p.Action)
 		}
 
 		if _, ok := uniquePorts[key]; ok {

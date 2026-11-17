@@ -336,8 +336,14 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	var programmingErr error
 	for podIdentifier := range podIdentifiers {
 		// Derive Ingress IPs from the PolicyEndpoint
+		podNamespace, ok := utils.GetPodNamespaceFromPodIdentifier(podIdentifier)
+		if !ok {
+			programmingErr = errors.Join(programmingErr, fmt.Errorf(
+				"podIdentifier %s in policyendpoint %s has no namespace", podIdentifier, policyEndpoint.Name))
+			continue
+		}
 		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
-			policyEndpoint.Namespace, parentNP, false)
+			podNamespace, parentNP, false)
 		if err != nil {
 			// Record and continue: a derive failure for one identifier must not abort the
 			// loop for every identifier after it. The returned error requeues the request.
@@ -840,7 +846,17 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
 	// by the Host IP value.
 	nodeIP := net.ParseIP(r.nodeIP)
+	var otherNamespaceEntries int
+	var firstOtherNamespaceEntry types.NamespacedName
 	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
+		// PolicyEndpoints only select pods in their own namespace.
+		if pod.Namespace != policyEndpoint.Namespace {
+			if otherNamespaceEntries == 0 {
+				firstOtherNamespaceEntry = types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+			}
+			otherNamespaceEntries++
+			continue
+		}
 		if string(pod.PodIP) == string(pod.HostIP) {
 			log().Infof("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
 				pod.Name, pod.Namespace, pod.PodIP)
@@ -854,6 +870,10 @@ func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
 			log().Infof("Found a matching Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
 		}
 		utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP, parentPEList)
+	}
+	if otherNamespaceEntries > 0 {
+		log().Warnf("Ignored %d podSelectorEndpoints in PolicyEndpoint %s/%s with a different namespace (first: %s)",
+			otherNamespaceEntries, policyEndpoint.Namespace, policyEndpoint.Name, firstOtherNamespaceEntry)
 	}
 	return targetPods, podIdentifiers, clusterwidePodIdentifiers
 }

@@ -186,6 +186,15 @@ func GetPodIdentifier(podName, podNamespace string) string {
 	return podIdentifierPrefix + "@" + podNamespace
 }
 
+// GetPodNamespaceFromPodIdentifier returns the namespace of an identifier built by GetPodIdentifier.
+func GetPodNamespaceFromPodIdentifier(podIdentifier string) (string, bool) {
+	i := strings.LastIndex(podIdentifier, "@")
+	if i < 0 {
+		return "", false
+	}
+	return podIdentifier[i+1:], true
+}
+
 // LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm
 // with the "-" separator. Used only by the legacy bpffs pin migration to
 // compute what a previously-running agent would have produced for a given

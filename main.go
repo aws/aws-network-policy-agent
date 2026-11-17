@@ -75,6 +75,9 @@ func main() {
 		os.Exit(1)
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
+	// Runs when main returns or panics. os.Exit skips it, so each os.Exit below follows an
+	// Errorf, which writes out the buffered lines itself.
+	defer logger.Sync()
 	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
@@ -119,7 +122,8 @@ func main() {
 		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel,
+			ctrlConfig.EnableTCPResetOnDeny))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)

@@ -17,7 +17,7 @@ import (
 // namespace so the table starts empty and the host's is untouched. The flows
 // are created over ctnetlink, so no traffic is needed. The tests skip unless
 // run as root on a kernel with ctnetlink. CI runs them as root with
-// CONNTRACK_KERNEL_TESTS=required, which turns a skip into a failure so the
+// BPF_KERNEL_TESTS=required, which turns a skip into a failure so the
 // step cannot pass without running them.
 
 // testFlowTimeout is the conntrack timeout of created flows, in seconds. It
@@ -30,7 +30,7 @@ const testFlowTimeout = 300
 func enterTestNetns(t *testing.T) {
 	t.Helper()
 	skip := t.Skipf
-	if os.Getenv("CONNTRACK_KERNEL_TESTS") == "required" {
+	if os.Getenv("BPF_KERNEL_TESTS") == "required" {
 		skip = t.Fatalf
 	}
 	if os.Geteuid() != 0 {

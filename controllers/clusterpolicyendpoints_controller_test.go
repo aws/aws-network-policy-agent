@@ -430,6 +430,9 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 
 		reconciler := NewClusterPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf)
 
+		podName := "nginx-abc123"
+		podNamespace := "np-target"
+		podIP := "192.168.95.108"
 		podIdentifier := "nginx@np-target"
 		deletedCPE := "isolate-dark-corner-t7p5w"
 		siblingCPE := "isolate-dark-corner-x9k4m"
@@ -437,18 +440,28 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, deletedCPE, siblingCPE))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(deletedCPE, parentCNP), []npatypes.Pod{
-			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
-		})
+		podEntry := []npatypes.Pod{
+			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: policyk8sawsv1.NetworkAddress(podIP)},
+		}
+		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(deletedCPE, parentCNP), podEntry)
+		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(siblingCPE, parentCNP), podEntry)
 
-		// List returns only the sibling — the deleted CPE is gone from etcd.
+		// List returns only the sibling — the deleted CPE is gone from etcd. The sibling still
+		// selects the pod on this node, so the identifier entry must survive the cleanup.
 		siblingObj := policyk8sawsv1.ClusterPolicyEndpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: siblingCPE},
 			Spec: policyk8sawsv1.ClusterPolicyEndpointSpec{
-				PolicyRef:            policyk8sawsv1.ClusterPolicyReference{Name: parentCNP},
-				Priority:             10,
-				Tier:                 policyk8sawsv1.AdminTier,
-				PodSelectorEndpoints: []policyk8sawsv1.PodEndpoint{}, // sibling selects nothing on this node
+				PolicyRef: policyk8sawsv1.ClusterPolicyReference{Name: parentCNP},
+				Priority:  10,
+				Tier:      policyk8sawsv1.AdminTier,
+				PodSelectorEndpoints: []policyk8sawsv1.PodEndpoint{
+					{
+						HostIP:    policyk8sawsv1.NetworkAddress(nodeIP),
+						PodIP:     policyk8sawsv1.NetworkAddress(podIP),
+						Name:      podName,
+						Namespace: podNamespace,
+					},
+				},
 			},
 		}
 		mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpointList{}), gomock.Any()).DoAndReturn(
@@ -457,14 +470,26 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 				return nil
 			},
 		).AnyTimes()
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+				if cpObj, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint); ok {
+					*cpObj = siblingObj
+				}
+				return nil
+			},
+		).AnyTimes()
 
 		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(deletedCPE, parentCNP))
 		assert.Nil(t, err)
 
-		// deletedCPE must be gone from the identifier's list.
-		if v, ok := reconciler.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
-			assert.NotContains(t, refNames(v.([]utils.PolicyEndpointRef)), deletedCPE,
+		// deletedCPE must be gone, but the entry must stay alive because siblingCPE still applies.
+		v, ok := reconciler.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
+		if assert.True(t, ok, "identifier entry should stay alive because the sibling CPE still applies") {
+			names := refNames(v.([]utils.PolicyEndpointRef))
+			assert.NotContains(t, names, deletedCPE,
 				"deleted CPE must not linger in podIdentifierToClusterPolicyEndpointMap when siblings exist")
+			assert.Contains(t, names, siblingCPE,
+				"sibling CPE should remain in the identifier entry")
 		}
 	})
 }

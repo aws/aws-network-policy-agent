@@ -115,14 +115,22 @@ function run_ginkgo_suite(){
     : "${GINKGO_TEST_BUILD_DIR:?run_ginkgo_suite requires GINKGO_TEST_BUILD_DIR}"
     : "${CLUSTER_NAME:?run_ginkgo_suite requires CLUSTER_NAME}"
     : "${KUBE_CONFIG_PATH:?run_ginkgo_suite requires KUBE_CONFIG_PATH}"
-    : "${TEST_IMAGE_REGISTRY:?run_ginkgo_suite requires TEST_IMAGE_REGISTRY}"
     : "${IP_FAMILY:?run_ginkgo_suite requires IP_FAMILY}"
+    # registry.k8s.io is the scripts' default for cyclonus, which pulls upstream images. The
+    # ginkgo suites need the networking-e2e-test-images mirror (busybox is not on
+    # registry.k8s.io), so for that default they use the framework's own registry.
+    local registry_flag=()
+    if [[ -n "${TEST_IMAGE_REGISTRY:-}" && "$TEST_IMAGE_REGISTRY" != "registry.k8s.io" ]]; then
+        registry_flag=(--test-image-registry="$TEST_IMAGE_REGISTRY")
+    else
+        echo "TEST_IMAGE_REGISTRY is ${TEST_IMAGE_REGISTRY:-unset}; using the test framework's default registry"
+    fi
     echo "Running ${suite_binary} (timeout ${timeout})"
     CGO_ENABLED=0 ginkgo -v -timeout "$timeout" --no-color --fail-on-pending \
         "$GINKGO_TEST_BUILD_DIR/$suite_binary" -- \
         --cluster-kubeconfig="$KUBE_CONFIG_PATH" \
         --cluster-name="$CLUSTER_NAME" \
-        --test-image-registry="$TEST_IMAGE_REGISTRY" \
+        ${registry_flag[@]+"${registry_flag[@]}"} \
         --ip-family="$IP_FAMILY" || TEST_FAILED="true"
 }
 
@@ -131,6 +139,32 @@ function run_ginkgo_suite(){
 function enable_strict_mode(){
     echo "Enable network policy strict mode"
     kubectl set env daemonset aws-node -n kube-system -c aws-node NETWORK_POLICY_ENFORCING_MODE=strict
+
+    echo "Check aws-node daemonset status"
+    kubectl rollout status ds/aws-node -n kube-system --timeout=300s
+}
+
+# Runs the agentflags suite, whose specs change the agent's args on the aws-node
+# daemonset and put them back when they finish. A run killed or timed out before
+# then leaves them changed for every suite after it, so this saves the args first
+# and restores them after the suite, or on exit if the script stops mid-suite.
+# Run it after the suites that expect the stock agent, and before strict mode.
+function run_agent_flags_suite(){
+    local timeout="${1:-15m}"
+    AGENT_ARGS_BEFORE_FLAGS_SUITE=$(kubectl get daemonset aws-node -n kube-system \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="aws-eks-nodeagent")].args}')
+    trap restore_agent_args EXIT
+
+    run_ginkgo_suite agentflags.test "$timeout"
+
+    restore_agent_args
+    trap - EXIT
+}
+
+function restore_agent_args(){
+    echo "Restore the agent args saved before the agentflags suite"
+    kubectl patch daemonset aws-node -n kube-system --type=strategic -p \
+        "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"aws-eks-nodeagent\",\"args\":${AGENT_ARGS_BEFORE_FLAGS_SUITE}}]}}}}"
 
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
