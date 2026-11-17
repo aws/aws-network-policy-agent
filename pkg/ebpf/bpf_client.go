@@ -110,6 +110,10 @@ var (
 		prometheus.SummaryOpts{
 			Name: "awsnodeagent_aws_ebpf_sdk_latency_ms",
 			Help: "eBPF SDK API call latency in ms",
+			// p50 and p99 over the summary's default 10-minute window, so a
+			// slower program load or attach shows up in the tail and not only
+			// in the mean that _sum and _count give.
+			Objectives: map[float64]float64{0.5: 0.05, 0.99: 0.001},
 		},
 		[]string{"api", "error"},
 	)
