@@ -258,7 +258,7 @@ func publishDataToCloudwatch(ctx context.Context, message string) {
 		err := createLogStream(ctx)
 		if err != nil {
 			log().Errorf("Failed to create log stream %v", err)
-			panic(err)
+			return
 		}
 	} else {
 		input.SequenceToken = aws.String(sequenceToken)

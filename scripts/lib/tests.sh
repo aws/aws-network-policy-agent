@@ -143,3 +143,29 @@ function enable_strict_mode(){
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 }
+
+# Runs the agentflags suite, whose specs change the agent's args on the aws-node
+# daemonset and put them back when they finish. A run killed or timed out before
+# then leaves them changed for every suite after it, so this saves the args first
+# and restores them after the suite, or on exit if the script stops mid-suite.
+# Run it after the suites that expect the stock agent, and before strict mode.
+function run_agent_flags_suite(){
+    local timeout="${1:-15m}"
+    AGENT_ARGS_BEFORE_FLAGS_SUITE=$(kubectl get daemonset aws-node -n kube-system \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="aws-eks-nodeagent")].args}')
+    trap restore_agent_args EXIT
+
+    run_ginkgo_suite agentflags.test "$timeout"
+
+    restore_agent_args
+    trap - EXIT
+}
+
+function restore_agent_args(){
+    echo "Restore the agent args saved before the agentflags suite"
+    kubectl patch daemonset aws-node -n kube-system --type=strategic -p \
+        "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"aws-eks-nodeagent\",\"args\":${AGENT_ARGS_BEFORE_FLAGS_SUITE}}]}}}}"
+
+    echo "Check aws-node daemonset status"
+    kubectl rollout status ds/aws-node -n kube-system --timeout=300s
+}

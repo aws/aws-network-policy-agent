@@ -55,10 +55,28 @@ jobs:
           go test -c -o "$RUNNER_TEMP/conntrack.test" ./pkg/ebpf/conntrack/
           cd pkg/ebpf/conntrack
           sudo --preserve-env=BPF_KERNEL_TESTS "$RUNNER_TEMP/conntrack.test" -test.run 'Kernel$' -test.v
+      - name: BPF program kernel tests
+        # These tests load the agent's compiled TC programs and run them on
+        # test packets, so they need root and the BPF objects, which are
+        # built in an AL2023 container like the image's. A skip counts as a
+        # failure here, and so do missing conntrack kfuncs, which nf_conntrack
+        # registers when it loads.
+        env:
+          BPF_KERNEL_TESTS: required
+        run: |
+          uname -r
+          sudo modprobe nf_conntrack
+          docker run --rm -v "$PWD":/src -w /src -e OWNER="$(id -u):$(id -g)" public.ecr.aws/amazonlinux/amazonlinux:2023 bash -c \
+            'dnf install -y -q clang llvm make libbpf-devel bpftool && make vmlinuxh build-bpf && chown -R "$OWNER" pkg/ebpf/c'
+          # The binary is built with coverage, and its profile is uploaded with
+          # make test's, since only these tests reach the TC programs' config.
+          go test -c -cover -covermode=atomic -o "$RUNNER_TEMP/ebpf.test" ./pkg/ebpf/
+          cd pkg/ebpf
+          sudo --preserve-env=BPF_KERNEL_TESTS "$RUNNER_TEMP/ebpf.test" -test.run 'Kernel$' -test.v -test.coverprofile="$RUNNER_TEMP/coverage-bpf-kernel.txt"
       - name: Upload code coverage
         uses: codecov/codecov-action@v4
         with:
-          files: coverage.txt
+          files: coverage.txt,${{ runner.temp }}/coverage-bpf-kernel.txt
           disable_search: true
           flags: unittest
           fail_ci_if_error: false
