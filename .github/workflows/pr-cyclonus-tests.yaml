@@ -10,9 +10,8 @@ permissions:
   pull-requests: write
   issues: write
 
-# Serialize runs per PR so overlapping `/test cyclonus` comments cannot collide
-# on the deterministic cluster name (create-vs-delete race). Queue rather than
-# cancel — cancelling mid-run would leak clusters.
+# Serialize runs per PR so overlapping `/test cyclonus` comments don't run at
+# once. Queue rather than cancel, since cancelling mid-run would leak clusters.
 concurrency:
   group: cyclonus-tests-${{ github.event.issue.number }}
   cancel-in-progress: false
@@ -125,7 +124,7 @@ jobs:
         ip-family: [IPv4, IPv6]
     env:
       IP_FAMILY: ${{ matrix.ip-family }}
-      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
+      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}-${{ github.run_id }}
       KUBECONFIG: ${{ github.workspace }}/.kube/config
       TEST_IMAGE_REGISTRY: ${{ secrets.TEST_IMAGE_REGISTRY }}
     steps:
@@ -133,15 +132,12 @@ jobs:
         with:
           ref: ${{ needs.check-trigger.outputs.pr-sha }}
 
-      # PRs opened before the lifecycle script merged check out a head that
-      # predates it; fall back to the default-branch copy so /test cyclonus
-      # keeps working on them without a rebase.
-      - name: Ensure cluster lifecycle script
+      # Create and delete clusters with the default-branch lifecycle script, not
+      # the PR's copy, so every PR gets the current cleanup logic.
+      - name: Use default-branch cluster lifecycle script
         run: |
-          if [[ ! -f scripts/eks-test-cluster.sh ]]; then
-            git fetch --depth=1 origin "${{ github.workflow_sha }}"
-            git checkout FETCH_HEAD -- scripts/eks-test-cluster.sh
-          fi
+          git fetch --depth=1 origin "${{ github.workflow_sha }}"
+          git checkout FETCH_HEAD -- scripts/eks-test-cluster.sh
 
       - uses: ./.github/actions/install-dependencies
 
@@ -210,25 +206,18 @@ jobs:
     needs: [check-trigger, cyclonus]
     if: always() && needs.check-trigger.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         ip-family: [IPv4, IPv6]
     env:
-      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}
+      CLUSTER_NAME: cyclonus-pr-${{ github.event.issue.number }}-${{ matrix.ip-family }}-${{ github.run_id }}
     steps:
+      # Cleanup runs only the default-branch lifecycle script, never PR code.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-trigger.outputs.pr-sha }}
-
-      # Keep create and delete on the same lifecycle-script revision. PRs that
-      # predate the helper use the exact default-branch workflow commit.
-      - name: Ensure cluster lifecycle script
-        run: |
-          if [[ ! -f scripts/eks-test-cluster.sh ]]; then
-            git fetch --depth=1 origin "${{ github.workflow_sha }}"
-            git checkout FETCH_HEAD -- scripts/eks-test-cluster.sh
-          fi
+          ref: ${{ github.workflow_sha }}
 
       # Deletion needs only eksctl (aws CLI is preinstalled on runners).
       # Deliberately not the install-dependencies composite: cleanup is the
@@ -243,7 +232,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.OSS_ROLE_ARN }}
           aws-region: ${{ env.REGION }}
-          role-duration-seconds: 3600
+          # Outlasts the job timeout.
+          role-duration-seconds: 10800
 
       - name: Delete EKS cluster
         run: ./scripts/eks-test-cluster.sh delete
