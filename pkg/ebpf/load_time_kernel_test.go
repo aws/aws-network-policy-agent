@@ -32,62 +32,14 @@ func TestProbeLoadTimeKernel(t *testing.T) {
 	iterations := envInt(t, "BPF_LOAD_TIME_ITERATIONS", 20)
 	maxP99 := envDuration(t, "BPF_LOAD_TIME_MAX_P99", 2*time.Second)
 
-	kfuncsErr := checkKfuncs(ctDenyKfuncs)
-	if kfuncsErr != nil && required {
-		t.Fatalf("kernel lacks the conntrack kfuncs the ct-deny variants need (modprobe nf_conntrack): %v", kfuncsErr)
-	}
-	families := []struct {
-		name, eventsBinary string
-		binaries           []string
-		ctDenyBinary       string
-	}{
-		{"v4", EVENTS_BINARY, []string{TC_INGRESS_BINARY, TC_EGRESS_BINARY}, TC_INGRESS_CT_DENY_BINARY},
-		{"v6", EVENTS_V6_BINARY, []string{TC_V6_INGRESS_BINARY, TC_V6_EGRESS_BINARY}, TC_V6_INGRESS_CT_DENY_BINARY},
-	}
-
-	sdk := goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps})
-	// load loads binary and returns how long it took and a func that closes
-	// what it opened.
-	load := func(t *testing.T, binary, pinPrefix string) (time.Duration, func()) {
-		t.Helper()
-		start := time.Now()
-		progs, maps, err := sdk.LoadBpfFile(filepath.Join(dir, binary), testPinPrefix+pinPrefix)
-		elapsed := time.Since(start)
-		require.NoError(t, err, "load %s", binary)
-		return elapsed, func() {
-			for _, p := range progs {
-				unix.Close(p.Program.ProgFD)
-			}
-			for _, m := range maps {
-				unix.Close(int(m.MapFD))
-			}
-		}
-	}
-
-	for _, fam := range families {
+	loader := newProbeLoader(t, dir, required)
+	for _, fam := range loadTimeFamilies {
 		t.Run(fam.name, func(t *testing.T) {
-			// The TC programs reference the global and shared maps, which
-			// the agent creates once per node, so they are not timed. Their
-			// FDs stay open while the TC objects load, as in the agent: the
-			// loader resolves the references through them.
-			for j, binary := range []string{fam.eventsBinary, TC_SHARED_BINARY} {
-				_, closeFDs := load(t, binary, fmt.Sprintf("LOADTIME%sGLOBAL%d", fam.name, j))
-				t.Cleanup(closeFDs)
-			}
-
-			binaries := fam.binaries
-			if kfuncsErr == nil {
-				binaries = append(slices.Clone(binaries), fam.ctDenyBinary)
-			} else {
-				t.Logf("skipping %s: kernel lacks the conntrack kfuncs: %v", fam.ctDenyBinary, kfuncsErr)
-			}
-			for _, binary := range binaries {
+			for _, binary := range loader.prepare(t, fam) {
 				t.Run(binary, func(t *testing.T) {
 					times := make([]time.Duration, iterations)
 					for i := range times {
-						var closeFDs func()
-						times[i], closeFDs = load(t, binary, fmt.Sprintf("LOADTIME%s%d", fam.name, i))
-						closeFDs()
+						times[i] = loader.timeLoad(t, binary, fmt.Sprintf("LOADTIME%s%d", fam.name, i))
 					}
 					slices.Sort(times)
 					p50, p99 := nearestRank(times, 0.50), nearestRank(times, 0.99)
@@ -97,6 +49,104 @@ func TestProbeLoadTimeKernel(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// BenchmarkProbeLoad reports the time to load each per-pod TC object, as
+// Go benchmark output (ns/op), so `go test -bench ProbeLoad` results can be
+// compared across changes with benchstat. Like TestProbeLoadTimeKernel it
+// needs root and the built objects, and skips otherwise; CI does not run
+// benchmarks.
+func BenchmarkProbeLoad(b *testing.B) {
+	dir, required := requireBPFKernelTests(b)
+	loader := newProbeLoader(b, dir, required)
+	for _, fam := range loadTimeFamilies {
+		b.Run(fam.name, func(b *testing.B) {
+			for _, binary := range loader.prepare(b, fam) {
+				b.Run(binary, func(b *testing.B) {
+					i := 0
+					for b.Loop() {
+						b.StopTimer()
+						prefix := fmt.Sprintf("LOADBENCH%s%d", fam.name, i)
+						i++
+						b.StartTimer()
+						loader.timeLoad(b, binary, prefix)
+					}
+				})
+			}
+		})
+	}
+}
+
+// loadTimeFamily is one address family's per-pod TC objects, with the events
+// binary whose global maps they reference.
+type loadTimeFamily struct {
+	name, eventsBinary string
+	binaries           []string
+	ctDenyBinary       string
+}
+
+var loadTimeFamilies = []loadTimeFamily{
+	{"v4", EVENTS_BINARY, []string{TC_INGRESS_BINARY, TC_EGRESS_BINARY}, TC_INGRESS_CT_DENY_BINARY},
+	{"v6", EVENTS_V6_BINARY, []string{TC_V6_INGRESS_BINARY, TC_V6_EGRESS_BINARY}, TC_V6_INGRESS_CT_DENY_BINARY},
+}
+
+// probeLoader loads TC objects the way the agent does for a new pod.
+type probeLoader struct {
+	dir       string
+	sdk       goelf.BpfSDKClient
+	kfuncsErr error
+}
+
+func newProbeLoader(tb testing.TB, dir string, required bool) *probeLoader {
+	tb.Helper()
+	kfuncsErr := checkKfuncs(ctDenyKfuncs)
+	if kfuncsErr != nil && required {
+		tb.Fatalf("kernel lacks the conntrack kfuncs the ct-deny variants need (modprobe nf_conntrack): %v", kfuncsErr)
+	}
+	return &probeLoader{dir: dir, sdk: goelf.New(goelf.Config{NamespacedMaps: utils.NamespacedBPFMaps}), kfuncsErr: kfuncsErr}
+}
+
+// prepare loads the family's events and shared objects, which the agent
+// creates once per node and so are not timed, and returns the per-pod objects
+// to time. Their FDs stay open until tb ends, as in the agent: the loader
+// resolves the TC objects' references to their maps through them.
+func (l *probeLoader) prepare(tb testing.TB, fam loadTimeFamily) []string {
+	tb.Helper()
+	for j, binary := range []string{fam.eventsBinary, TC_SHARED_BINARY} {
+		closeFDs := l.load(tb, binary, fmt.Sprintf("LOADTIME%sGLOBAL%d", fam.name, j))
+		tb.Cleanup(closeFDs)
+	}
+	if l.kfuncsErr != nil {
+		tb.Logf("skipping %s: kernel lacks the conntrack kfuncs: %v", fam.ctDenyBinary, l.kfuncsErr)
+		return fam.binaries
+	}
+	return append(slices.Clone(fam.binaries), fam.ctDenyBinary)
+}
+
+// timeLoad loads binary under a new pin prefix, as for a new pod identifier,
+// closes what it opened, and returns how long the load took.
+func (l *probeLoader) timeLoad(tb testing.TB, binary, pinPrefix string) time.Duration {
+	tb.Helper()
+	start := time.Now()
+	closeFDs := l.load(tb, binary, pinPrefix)
+	elapsed := time.Since(start)
+	closeFDs()
+	return elapsed
+}
+
+// load loads binary and returns a func that closes what it opened.
+func (l *probeLoader) load(tb testing.TB, binary, pinPrefix string) func() {
+	tb.Helper()
+	progs, maps, err := l.sdk.LoadBpfFile(filepath.Join(l.dir, binary), testPinPrefix+pinPrefix)
+	require.NoError(tb, err, "load %s", binary)
+	return func() {
+		for _, p := range progs {
+			unix.Close(p.Program.ProgFD)
+		}
+		for _, m := range maps {
+			unix.Close(int(m.MapFD))
+		}
 	}
 }
 

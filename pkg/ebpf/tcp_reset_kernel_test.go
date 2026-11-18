@@ -78,7 +78,7 @@ var (
 // BPF_KERNEL_TESTS=required a skip fails instead, so CI can't pass without
 // running it; it also returns whether that is set. It mounts bpffs if needed,
 // since the loader pins every map there.
-func requireBPFKernelTests(t *testing.T) (dir string, required bool) {
+func requireBPFKernelTests(t testing.TB) (dir string, required bool) {
 	t.Helper()
 	required = os.Getenv("BPF_KERNEL_TESTS") == "required"
 	skip := t.Skipf
