@@ -2,6 +2,7 @@ package bpflatency
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -152,7 +153,8 @@ var _ = Describe("eBPF program load and attach latency", Ordered, func() {
 })
 
 // report writes the measured values in one block, so runs can be compared
-// across releases, kernels and address families.
+// across releases, kernels and address families, and as one JSON line
+// prefixed with resultLinePrefix, so a script can collect them from the logs.
 func report(node *v1.Node, before, after map[fwutils.LatencyKey]fwutils.LatencySeries) {
 	info := node.Status.NodeInfo
 	fmt.Fprintf(GinkgoWriter, "eBPF load latency: node=%s kernel=%s os=%q arch=%s ipFamily=%s pods=%d\n",
@@ -164,6 +166,67 @@ func report(node *v1.Node, before, after map[fwutils.LatencyKey]fwutils.LatencyS
 		fmt.Fprintf(GinkgoWriter, "  %-22s new=%d mean=%.2fms p50=%s p99=%s (quantiles over the agent's 10m window, %d observations in total)\n",
 			api, n, mean, formatMs(s.Quantiles, 0.5), formatMs(s.Quantiles, 0.99), s.Count)
 	}
+	line, err := resultLine(runInfo{Kernel: info.KernelVersion, OS: info.OSImage, Arch: info.Architecture,
+		IPFamily: fw.Options.IpFamily, Pods: *podCount}, before, after)
+	Expect(err).ToNot(HaveOccurred())
+	fmt.Fprintln(GinkgoWriter, line)
+}
+
+// resultLinePrefix starts the machine-readable result line.
+const resultLinePrefix = "BPFLATENCY_RESULT "
+
+type runInfo struct {
+	Kernel   string `json:"kernel"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	IPFamily string `json:"ipFamily"`
+	Pods     int    `json:"pods"`
+}
+
+// apiResult is one call's numbers in ms. A value the agent did not report
+// (no observations in its window, or an agent without the quantiles) is null.
+type apiResult struct {
+	New    uint64   `json:"new"`
+	MeanMs *float64 `json:"meanMs"`
+	P50Ms  *float64 `json:"p50Ms"`
+	P99Ms  *float64 `json:"p99Ms"`
+}
+
+// resultLine returns the run's numbers as resultLinePrefix plus one line of
+// JSON: the run info, and per call, this run's observations and their mean,
+// and the agent's p50 and p99.
+func resultLine(info runInfo, before, after map[fwutils.LatencyKey]fwutils.LatencySeries) (string, error) {
+	apis := map[string]apiResult{}
+	for _, api := range []string{loadAPI, attachIngressAPI, attachEgressAPI} {
+		key := fwutils.LatencyKey{API: api}
+		n, mean := after[key].MeanMsSince(before[key])
+		q := after[key].Quantiles
+		apis[api] = apiResult{New: n, MeanMs: msOrNull(mean, true), P50Ms: msOrNull(q[0.5], hasKey(q, 0.5)),
+			P99Ms: msOrNull(q[0.99], hasKey(q, 0.99))}
+	}
+	b, err := json.Marshal(struct {
+		runInfo
+		APIs map[string]apiResult `json:"apis"`
+	}{info, apis})
+	if err != nil {
+		return "", err
+	}
+	return resultLinePrefix + string(b), nil
+}
+
+func hasKey(q map[float64]float64, k float64) bool {
+	_, ok := q[k]
+	return ok
+}
+
+// msOrNull rounds v to 0.01 ms, or returns nil when it is not present or NaN,
+// which JSON cannot encode.
+func msOrNull(v float64, present bool) *float64 {
+	if !present || math.IsNaN(v) {
+		return nil
+	}
+	r := math.Round(v*100) / 100
+	return &r
 }
 
 func formatMs(q map[float64]float64, quantile float64) string {
