@@ -2188,6 +2188,49 @@ func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T
 	}
 }
 
+// When only one direction's binary changes, the recovered entries of that
+// direction are not kept. The FDs the SDK opened for them (program and per-pod
+// maps, including the pod state map) belong to the caller and must be closed,
+// while the node-wide maps in the same entry stay open.
+func TestRecoverBPFStateClosesFDsOfUpdatedDirection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	closed := recordClosedFDs(t)
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{}, nil)
+	// Distinct fake FDs; nothing is opened because the SDK is mocked.
+	ingressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "ingress")
+	egressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "egress")
+	recovered := map[string]goelf.BpfData{
+		ingressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 10},
+		},
+		egressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 20},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_EGRESS_MAP:                {MapFD: 21},
+				utils.TC_CLUSTER_POLICY_EGRESS_MAP: {MapFD: 22},
+				utils.TC_EGRESS_POD_STATE_MAP:      {MapFD: 23},
+				CONNTRACK_MAP_PIN_PATH:             {MapFD: 5},
+			},
+		},
+	}
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(recovered, nil)
+	mockBpfClient.EXPECT().GetAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil)
+	mockTCClient.EXPECT().GetAllAttachedProgIds().Return(map[string]int{}, map[string]int{}, nil)
+	mockTCClient.EXPECT().CleanupQdiscs(false, true).Return(nil)
+
+	c := NewMockBpfClient()
+	ctx := new(sync.Map)
+	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, ctx, new(sync.Map), false, true, false)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int{20, 21, 22, 23}, *closed)
+	stored, ok := ctx.Load("pod_ns")
+	require.True(t, ok)
+	assert.Equal(t, 10, stored.(BPFContext).ingressPgmInfo.Program.ProgFD)
+}
+
 // recoverBPFState reuses the global maps the ct-deny probe recovered instead
 // of recovering them again, so the FDs in the SDK's map cache stay the ones
 // the agent uses.

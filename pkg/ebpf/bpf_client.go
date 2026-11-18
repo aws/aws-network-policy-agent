@@ -722,6 +722,11 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 						}
 					}
 				}
+			} else {
+				// This direction's binary is being replaced, so the entry is not kept.
+				// The SDK opened its program and per-pod map FDs for us: close them.
+				// Node-wide maps in the entry share FDs with the SDK cache; leave them.
+				closeRecoveredPodFDs(bpfEntry)
 			}
 			policyEndpointeBPFContext.Store(podIdentifier, peBPFContext)
 		}
@@ -1431,6 +1436,20 @@ var (
 	unpinProgram = (*goebpfprogs.BpfProgram).UnPinProg
 	unpinMap     = (*goebpfmaps.BpfMap).UnPinMap
 )
+
+// closeRecoveredPodFDs closes the program FD and the per-pod map FDs of a
+// recovered entry that is not kept. Maps outside utils.NamespacedBPFMaps are
+// node-wide and stay open.
+func closeRecoveredPodFDs(bpfEntry goelf.BpfData) {
+	if bpfEntry.Program.ProgFD > 0 {
+		closeFD(bpfEntry.Program.ProgFD)
+	}
+	for _, name := range utils.NamespacedBPFMaps {
+		if m, ok := bpfEntry.Maps[name]; ok && m.MapFD > 0 {
+			closeFD(int(m.MapFD))
+		}
+	}
+}
 
 // closeLoadedObjects closes the FDs of a discarded load. loadedMaps holds only
 // the maps the load created, not the global maps.
