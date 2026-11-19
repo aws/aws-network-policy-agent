@@ -6,6 +6,8 @@
 #   policy.test - network policy enforcement through the agent's TC programs
 #   ebpf.test   - eBPF program behavior, including the conntrack shortening of
 #                 denied connections on kernels with the nf_conntrack kfuncs
+#   bpflatency.test - p50/p99 of the agent's eBPF program load and probe
+#                 attach for new pods, against ceilings, and logged per kernel
 #   agentflags.test - agent flags set on aws-node, such as TCP reset on deny
 #                 (changes aws-node and restores it, so it runs before strict)
 #   strict.test - strict enforcement mode (mutates aws-node, so it runs last)
@@ -39,6 +41,8 @@ echo "Making ginkgo test binaries"
 run_ginkgo_suite policy.test 15m
 
 run_ginkgo_suite ebpf.test 15m
+
+run_ginkgo_suite bpflatency.test 15m
 
 run_agent_flags_suite 15m
 
