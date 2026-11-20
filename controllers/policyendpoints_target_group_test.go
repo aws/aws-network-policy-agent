@@ -177,3 +177,25 @@ func TestDeriveFirewallRules_TargetGroupsAreScopedPerPolicy(t *testing.T) {
 		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pb@ns")),
 		"podB must get npx's group for podB and npy's group for podB, not npy's group for podA")
 }
+
+// The shape a split policy is emitted in: the rules that do not vary by pod ride in an ungrouped
+// PolicyEndpoint that lists no pods of its own, since the groups already list them all. It reaches
+// a pod through its parent's PE list, so it must still apply to every group.
+func TestDeriveFirewallRules_UngroupedPolicyEndpointWithoutPods(t *testing.T) {
+	podA := tgPod("pa-1", "172.16.0.1")
+	podB := tgPod("pb-1", "172.16.0.2")
+
+	pes := map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{
+		{Namespace: "ns", Name: "np-aaaa"}: tgPEWith("np-aaaa", "np", "g1", "10.1.0.0/16", []policyk8sawsv1.PodEndpoint{podA}, 8080),
+		{Namespace: "ns", Name: "np-bbbb"}: tgPEWith("np-bbbb", "np", "g2", "10.1.0.0/16", []policyk8sawsv1.PodEndpoint{podB}, 9090),
+		{Namespace: "ns", Name: "np-cccc"}: tgPEWith("np-cccc", "np", "", "10.3.0.0/16", nil, 443),
+	}
+	parents := []string{"np"}
+
+	assert.ElementsMatch(t, []string{"10.1.0.0/16:8080", "10.3.0.0/16:443"},
+		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pa@ns")),
+		"the shared rule must reach podA even though the ungrouped PolicyEndpoint lists no pods")
+	assert.ElementsMatch(t, []string{"10.1.0.0/16:9090", "10.3.0.0/16:443"},
+		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pb@ns")),
+		"the shared rule must reach podB too")
+}
