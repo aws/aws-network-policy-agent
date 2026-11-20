@@ -88,8 +88,8 @@ func TestBpfClient_ConcurrentLifecycleKeepsShadowMapsConsistent(t *testing.T) {
 			return map[string]goelf.BpfData{pinPath: {Program: goebpfprogs.BpfProgram{ProgFD: fd}, Maps: maps}}, nil, nil
 		})
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
