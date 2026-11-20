@@ -17,6 +17,8 @@ COPY cmd cmd
 # which can be used for different test scenarios
 RUN CGO_ENABLED=0 GOOS=linux GO111MODULE=on go build \
     -a -o check-bpf-cleanup-agent cmd/check-bpf-cleanup-agent/main.go
+RUN CGO_ENABLED=0 GOOS=linux GO111MODULE=on go build \
+    -a -o check-bpf-load-agent ./cmd/check-bpf-load-agent
 
 FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-iptables:latest-al23
 
