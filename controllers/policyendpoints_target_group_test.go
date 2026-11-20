@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -107,4 +108,72 @@ func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
 		pes[types.NamespacedName{Namespace: "ns", Name: "np-bbbb"}] = tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podB}, 9090)
 		assert.Equal(t, []int32{8080}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
 	})
+}
+
+// tgPEWith is tgPE with the parent policy and peer spelled out, for the cases that need more than
+// one policy.
+func tgPEWith(name, parent, group, cidr string, pods []policyk8sawsv1.PodEndpoint, port int32) *policyk8sawsv1.PolicyEndpoint {
+	pe := tgPE(name, group, pods, port)
+	pe.Spec.PolicyRef = policyk8sawsv1.PolicyReference{Name: parent, Namespace: "ns"}
+	pe.Spec.Ingress = []policyk8sawsv1.EndpointInfo{{CIDR: policyk8sawsv1.NetworkAddress(cidr), Ports: tgPorts(port)}}
+	return pe
+}
+
+// tgPeerPortsOf reports the peer each port was allowed from, which is what separates a group
+// admitted under the wrong policy from one the pod is entitled to: a colliding group key is a hash
+// of the ports, so the ports match by construction and only the peer differs.
+func tgPeerPortsOf(t *testing.T, rules []fwrp.EbpfFirewallRules) []string {
+	t.Helper()
+	var out []string
+	for _, r := range rules {
+		for _, p := range r.L4Info {
+			require.NotNil(t, p.Port)
+			out = append(out, fmt.Sprintf("%s:%d", r.IPCidr, *p.Port))
+		}
+	}
+	return out
+}
+
+// deriveRulesAcrossNPs registers every parent against one reconciler, the way a separate reconcile
+// of each policy would, then derives one podIdentifier from the accumulated map.
+func deriveRulesAcrossNPs(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint,
+	parents []string, podIdentifier string) []fwrp.EbpfFirewallRules {
+	t.Helper()
+	r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, nil, false)
+	ctx := context.Background()
+	for _, parent := range parents {
+		_, _, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, parent, "ns", "")
+		require.NoError(t, err)
+	}
+	ingress, _, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", "", false)
+	require.NoError(t, err)
+	return ingress
+}
+
+// A group key is a content hash of the resolved ports, so two policies selecting the same pods can
+// mint the same key for different pods. Matching a group without its policy then lets one policy's
+// group admit the other's, and the pod is reachable from a peer no policy allowed it.
+func TestDeriveFirewallRules_TargetGroupsAreScopedPerPolicy(t *testing.T) {
+	podA := tgPod("pa-1", "172.16.0.1")
+	podB := tgPod("pb-1", "172.16.0.2")
+
+	// npx allows 10.1.0.0/16 on a named port: podA resolves 8080, podB resolves 9999.
+	// npy allows 10.2.0.0/16 on another: podA resolves 9999, podB resolves 7777.
+	// So npy's group for podA and npx's group for podB are both the hash of {9999}.
+	const shared = "k9999"
+	pes := map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{
+		{Namespace: "ns", Name: "npx-a"}: tgPEWith("npx-a", "npx", "k8080", "10.1.0.0/16", []policyk8sawsv1.PodEndpoint{podA}, 8080),
+		{Namespace: "ns", Name: "npx-b"}: tgPEWith("npx-b", "npx", shared, "10.1.0.0/16", []policyk8sawsv1.PodEndpoint{podB}, 9999),
+		{Namespace: "ns", Name: "npy-a"}: tgPEWith("npy-a", "npy", shared, "10.2.0.0/16", []policyk8sawsv1.PodEndpoint{podA}, 9999),
+		{Namespace: "ns", Name: "npy-b"}: tgPEWith("npy-b", "npy", "k7777", "10.2.0.0/16", []policyk8sawsv1.PodEndpoint{podB}, 7777),
+	}
+	parents := []string{"npx", "npy"}
+
+	assert.ElementsMatch(t, []string{"10.1.0.0/16:8080", "10.2.0.0/16:9999"},
+		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pa@ns")),
+		"podA must get npx's group for podA and npy's group for podA, not npx's group for podB")
+
+	assert.ElementsMatch(t, []string{"10.1.0.0/16:9999", "10.2.0.0/16:7777"},
+		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pb@ns")),
+		"podB must get npx's group for podB and npy's group for podB, not npy's group for podA")
 }

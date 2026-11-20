@@ -635,10 +635,17 @@ func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod np
 	return true, nil
 }
 
-// podIdentifierTargetGroups returns the spec.targetGroup values this podIdentifier belongs to. A
-// pod belongs to a group when a PolicyEndpoint carrying that group lists it. An empty result means
-// the pod only appears in ungrouped PolicyEndpoints, which is every cluster whose controller does
-// not group and every policy whose pods agree on their named ports.
+// targetGroupKey scopes a group to the policy that produced it. A group key is a content hash of
+// the resolved ports, so two policies selecting the same pods can produce the same key for
+// different pods, and a set keyed by the group alone would let one policy's group admit the other's.
+func targetGroupKey(parentNP, targetGroup string) string {
+	return parentNP + "/" + targetGroup
+}
+
+// podIdentifierTargetGroups returns the groups this podIdentifier belongs to, each scoped to its
+// parent policy. A pod belongs to a group when a PolicyEndpoint carrying that group lists it. An
+// empty result means the pod only appears in ungrouped PolicyEndpoints, which is every cluster
+// whose controller does not group and every policy whose pods agree on their named ports.
 func (r *PolicyEndpointsReconciler) podIdentifierTargetGroups(ctx context.Context,
 	refs []utils.PolicyEndpointRef, podIdentifier, resourceNamespace string) map[string]struct{} {
 	groups := make(map[string]struct{})
@@ -654,7 +661,7 @@ func (r *PolicyEndpointsReconciler) podIdentifierTargetGroups(ctx context.Contex
 		}
 		for _, p := range pe.Spec.PodSelectorEndpoints {
 			if utils.GetPodIdentifier(p.Name, p.Namespace) == podIdentifier {
-				groups[pe.Spec.TargetGroup] = struct{}{}
+				groups[targetGroupKey(pe.Spec.PolicyRef.Name, pe.Spec.TargetGroup)] = struct{}{}
 				break
 			}
 		}
@@ -698,12 +705,12 @@ func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx cont
 			}
 
 			// A grouped PolicyEndpoint carries the rules of one resolved-port group and applies
-			// only to that group's pods. Ungrouped ones always apply, so a controller that does
-			// not set the field behaves exactly as before.
+			// only to that group's pods, matched within its own policy. Ungrouped ones always
+			// apply, so a controller that does not set the field behaves exactly as before.
 			if currentPE.Spec.TargetGroup != "" {
-				if _, ok := targetGroups[currentPE.Spec.TargetGroup]; !ok {
-					log().Debugf("Skipping PE %s: target group %s does not contain podIdentifier %s",
-						ref.Name, currentPE.Spec.TargetGroup, podIdentifier)
+				if _, ok := targetGroups[targetGroupKey(currentPE.Spec.PolicyRef.Name, currentPE.Spec.TargetGroup)]; !ok {
+					log().Debugf("Skipping PE %s: target group %s of policy %s does not contain podIdentifier %s",
+						ref.Name, currentPE.Spec.TargetGroup, currentPE.Spec.PolicyRef.Name, podIdentifier)
 					continue
 				}
 			}
