@@ -128,8 +128,8 @@ type family struct {
 // loadedFamily holds one address family's programs and the maps the tests
 // read or write.
 type loadedFamily struct {
-	ingressFD, egressFD                                         int
-	config, pending, conntrack, ingressPodState, egressPodState goebpfmaps.BpfMap
+	ingressFD, egressFD                                                          int
+	config, pending, conntrack, events, ingress, ingressPodState, egressPodState goebpfmaps.BpfMap
 }
 
 // loadFamily loads the events and shared binaries, then ingressBinary and the
@@ -171,7 +171,7 @@ func loadFamily(t *testing.T, dir string, fam family, ingressBinary string) load
 	}
 	return loadedFamily{ingressFD: ingressFD, egressFD: egressFD,
 		config: sharedMaps[TC_CONFIG_MAP], pending: sharedMaps[TCP_RESET_PENDING_MAP],
-		conntrack: globalMaps[AWS_CONNTRACK_MAP], ingressPodState: ingressMaps[utils.TC_INGRESS_POD_STATE_MAP],
+		conntrack: globalMaps[AWS_CONNTRACK_MAP], events: globalMaps[AWS_EVENTS_MAP], ingress: ingressMaps[utils.TC_INGRESS_MAP], ingressPodState: ingressMaps[utils.TC_INGRESS_POD_STATE_MAP],
 		egressPodState: egressMaps[utils.TC_EGRESS_POD_STATE_MAP]}
 }
 
@@ -382,7 +382,7 @@ func TestTCPResetOnDenyKernel(t *testing.T) {
 				progs := loadFamily(t, dir, fam, ingressBinary)
 				syn := tcpSegment{src: fam.client, dst: fam.pod, seq: 0x11223344, flags: tcpFlagSyn} // any seq: the RST must ack it + 1
 
-				require.NoError(t, writeTCConfig(progs.config, true))
+				require.NoError(t, writeTCConfig(progs.config, true, POLICY_EVENT_SCOPE_ALL))
 				var ifindex uint32
 				t.Run("flag on: denied SYN answered with RST", func(t *testing.T) {
 					ifindex = assertAnsweredWithReset(t, progs, syn)
@@ -418,8 +418,8 @@ func TestTCPResetOnDenyKernel(t *testing.T) {
 
 					// With the flag off, a RST the pod sends is recorded as
 					// before: only the ingress program's RSTs need the rule.
-					require.NoError(t, writeTCConfig(progs.config, false))
-					defer func() { require.NoError(t, writeTCConfig(progs.config, true)) }()
+					require.NoError(t, writeTCConfig(progs.config, false, POLICY_EVENT_SCOPE_ALL))
+					defer func() { require.NoError(t, writeTCConfig(progs.config, true, POLICY_EVENT_SCOPE_ALL)) }()
 					verdict, _ = testRun(t, progs.egressFD, third)
 					assert.Equal(t, uint32(tcActOK), verdict, "egress allows the pod's RST")
 					assert.Equal(t, 1, countEntries(t, progs.conntrack), "flag off: the RST's flow is recorded as before")
@@ -448,7 +448,7 @@ func TestTCPResetOnDenyKernel(t *testing.T) {
 					{"flag on: allowed SYN passed unchanged", true, tcpFlagSyn, DEFAULT_ALLOW, tcActOK},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
-						require.NoError(t, writeTCConfig(progs.config, tc.flagOn))
+						require.NoError(t, writeTCConfig(progs.config, tc.flagOn, POLICY_EVENT_SCOPE_ALL))
 						writePodState(t, progs.ingressPodState, POD_STATE_MAP_KEY, tc.podState)
 						segment := syn
 						segment.flags = tc.flags

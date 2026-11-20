@@ -21,6 +21,10 @@ struct tc_config {
 	// (tcConfig in bpf_client.go), and a fixed-size field keeps the two
 	// layouts identical.
 	__u32 tcp_reset_on_deny;
+	// The policy event scope: 0 emits ACCEPT events, 1 skips them (see
+	// POLICY_EVENT_SCOPE_DENY in policy_events.h). Written by the agent at every
+	// start, from --policy-event-logs-scope and the log level.
+	__u32 policy_event_scope;
 };
 
 // aws_tcp_reset_pending marks the RSTs the ingress program sent, so the egress

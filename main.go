@@ -105,6 +105,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	policyEventsDenyOnly, validScope := config.ParsePolicyEventLogsScope(ctrlConfig.PolicyEventLogsScope)
+	if !validScope {
+		log.Warnf("Invalid --policy-event-logs-scope=%q; using \"all\" (valid values: all, deny)", ctrlConfig.PolicyEventLogsScope)
+	}
 	ctx := ctrl.SetupSignalHandler()
 
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
@@ -123,7 +127,7 @@ func main() {
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
 			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel,
-			ctrlConfig.EnableTCPResetOnDeny))
+			ctrlConfig.EnableTCPResetOnDeny, policyEventsDenyOnly))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)

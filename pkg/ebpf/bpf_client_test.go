@@ -35,7 +35,9 @@ import (
 	"github.com/vishvananda/netns"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	// "unsafe"
+	"unsafe"
 )
 
 func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
@@ -1803,10 +1805,11 @@ func TestChooseIngressBinary(t *testing.T) {
 	// Distinct fake FDs, only so the test can tell which FDs the probe
 	// closed. Nothing is opened: the SDK is mocked and closeFD records.
 	globalMaps := map[string]goebpfmaps.BpfMap{
-		CONNTRACK_MAP_PIN_PATH:         {MapFD: 50},
-		POLICY_EVENTS_MAP_PIN_PATH:     {MapFD: 51},
-		TC_CONFIG_MAP_PIN_PATH:         {MapFD: 52},
-		TCP_RESET_PENDING_MAP_PIN_PATH: {MapFD: 53},
+		CONNTRACK_MAP_PIN_PATH:                {MapFD: 50},
+		POLICY_EVENTS_MAP_PIN_PATH:            {MapFD: 51},
+		TC_CONFIG_MAP_PIN_PATH:                {MapFD: 52},
+		TCP_RESET_PENDING_MAP_PIN_PATH:        {MapFD: 53},
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: {MapFD: 54},
 	}
 	// What an agent from before the shared TC maps leaves on the node.
 	eventsMapsOnly := map[string]goebpfmaps.BpfMap{
@@ -2710,50 +2713,75 @@ func TestLoadTCSharedMaps(t *testing.T) {
 	// one, and which were closed. Nothing is opened: the SDK is mocked and
 	// closeFD records.
 	recoveredConfig := goebpfmaps.BpfMap{MapFD: 70}
+	recoveredPending := goebpfmaps.BpfMap{MapFD: 71}
+	recoveredDrop := goebpfmaps.BpfMap{MapFD: 72}
 	loadedConfig := goebpfmaps.BpfMap{MapFD: 80}
+	loadedDrop := goebpfmaps.BpfMap{MapFD: 81}
 	sharedBinary := goelf.BpfCustomData{FilePath: TC_SHARED_BINARY, CustomPinPath: globalMapsPinPrefix}
+	allRecovered := map[string]goebpfmaps.BpfMap{
+		TC_CONFIG_MAP_PIN_PATH:                recoveredConfig,
+		TCP_RESET_PENDING_MAP_PIN_PATH:        recoveredPending,
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: recoveredDrop,
+	}
+	loadedAll := map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig, AWS_EVENTS_DROP_COUNT_MAP: loadedDrop}
 
 	tests := []struct {
 		name       string
-		recovered  []string // pin paths recoverBPFState stored
+		recovered  map[string]goebpfmaps.BpfMap // pin paths recoverBPFState stored
 		reloadMaps bool
 		loadMaps   map[string]goebpfmaps.BpfMap
 		loadErr    error
 		wantLoad   bool
 		want       goebpfmaps.BpfMap
+		wantDrop   goebpfmaps.BpfMap
 		wantClosed []int
 		wantErr    bool
 	}{
 		{
 			// Pods' programs reference the pinned maps, so they are kept.
 			name:      "recovered: reused",
-			recovered: []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH},
+			recovered: allRecovered,
 			want:      recoveredConfig,
+			wantDrop:  recoveredDrop,
 		},
 		{
 			name:     "first start: loaded",
-			loadMaps: map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			loadMaps: loadedAll,
 			wantLoad: true,
 			want:     loadedConfig,
+			wantDrop: loadedDrop,
 		},
 		{
 			name:       "only one map recovered: loaded",
-			recovered:  []string{TC_CONFIG_MAP_PIN_PATH},
-			loadMaps:   map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			recovered:  map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP_PIN_PATH: recoveredConfig},
+			loadMaps:   loadedAll,
 			wantLoad:   true,
 			want:       loadedConfig,
+			wantDrop:   loadedDrop,
 			wantClosed: []int{int(recoveredConfig.MapFD)},
+		},
+		{
+			// The drop counter is part of the shared set: without its pin the
+			// maps are loaded again, and the recovered config is closed.
+			name:       "drop counter not recovered: loaded",
+			recovered:  map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP_PIN_PATH: recoveredConfig, TCP_RESET_PENDING_MAP_PIN_PATH: recoveredPending},
+			loadMaps:   loadedAll,
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantDrop:   loadedDrop,
+			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredPending.MapFD)},
 		},
 		{
 			// The caller reloads every pod's programs, so new maps are
 			// safe, and the recovered ones are closed.
 			name:       "reload: loaded, recovered closed",
-			recovered:  []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH},
+			recovered:  allRecovered,
 			reloadMaps: true,
-			loadMaps:   map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			loadMaps:   loadedAll,
 			wantLoad:   true,
 			want:       loadedConfig,
-			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredConfig.MapFD)},
+			wantDrop:   loadedDrop,
+			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredPending.MapFD), int(recoveredDrop.MapFD)},
 		},
 		{
 			name:     "load fails",
@@ -2763,7 +2791,13 @@ func TestLoadTCSharedMaps(t *testing.T) {
 		},
 		{
 			name:     "binary has no config map",
-			loadMaps: map[string]goebpfmaps.BpfMap{},
+			loadMaps: map[string]goebpfmaps.BpfMap{AWS_EVENTS_DROP_COUNT_MAP: loadedDrop},
+			wantLoad: true,
+			wantErr:  true,
+		},
+		{
+			name:     "binary has no drop counter map",
+			loadMaps: map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
 			wantLoad: true,
 			wantErr:  true,
 		},
@@ -2776,18 +2810,19 @@ func TestLoadTCSharedMaps(t *testing.T) {
 				mockBpfClient.EXPECT().LoadBpfFileWithCustomData(sharedBinary).Return(nil, tt.loadMaps, tt.loadErr).Times(1)
 			}
 			c := &bpfClient{bpfSDKClient: mockBpfClient, globalMaps: new(sync.Map)}
-			for _, pinPath := range tt.recovered {
-				c.globalMaps.Store(pinPath, recoveredConfig)
+			for pinPath, m := range tt.recovered {
+				c.globalMaps.Store(pinPath, m)
 			}
 			closed := recordClosedFDs(t)
 
-			got, err := c.loadTCSharedMaps(tt.reloadMaps)
+			got, gotDrop, err := c.loadTCSharedMaps(tt.reloadMaps)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantDrop, gotDrop)
 			assert.Equal(t, tt.wantClosed, *closed, "recovered maps closed")
 		})
 	}
@@ -2817,6 +2852,46 @@ func TestBinaryChanged(t *testing.T) {
 	require.NoError(t, os.Remove(binary))
 	require.NoError(t, os.Remove(hostDir+TC_SHARED_BINARY))
 	assert.False(t, binaryChanged(binary, hostDir), "both copies missing")
+}
+
+// On warm restart recoverBPFState stores the drop-counter map under its pin path,
+// so loadTCSharedMaps can reuse it. A fresh load still wins over nothing.
+func TestRecoverBPFStatePolicyEventMaps(t *testing.T) {
+	dropMap := goebpfmaps.BpfMap{MapFD: 42}
+	freshDrop := goebpfmaps.BpfMap{MapFD: 77}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:                {MapFD: 2},
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: dropMap,
+	}, nil).AnyTimes()
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	client := NewMockBpfClient()
+	_, _, _, _, _, err := client.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), client.globalMaps, false, false, false)
+	assert.NoError(t, err)
+
+	got, ok := client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, dropMap, got)
+	got, ok = client.resolveGlobalMap(freshDrop, true, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, freshDrop, got)
+	_, ok = client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, "/sys/fs/bpf/globals/aws/maps/does_not_exist")
+	assert.False(t, ok)
+}
+
+// tcConfig must match struct tc_config in tc_shared.h field for field: both
+// fields are __u32, so the struct is 8 bytes and the agent writes the scope where
+// the datapath reads it.
+func TestTCConfigLayoutMatchesDatapath(t *testing.T) {
+	var c tcConfig
+	assert.Equal(t, uintptr(8), unsafe.Sizeof(c))
+	assert.Equal(t, uintptr(0), unsafe.Offsetof(c.tcpResetOnDeny))
+	assert.Equal(t, uintptr(4), unsafe.Offsetof(c.policyEventScope))
 }
 
 // The tests below attach the agent's compiled TC programs to a veth in a test
@@ -2989,4 +3064,26 @@ func TestReattachAfterRestartKeepsPodFilteredKernel(t *testing.T) {
 	}
 	assert.Zero(t, watcher.detaches, "the pod's filters were detached")
 	assert.Equal(t, before, hookIDs(t, link), "the pod runs the same programs after the restart")
+}
+
+func TestPolicyEventDatapathScope(t *testing.T) {
+	tests := []struct {
+		name           string
+		denyOnly       bool
+		acceptConsumed bool
+		wantVal        uint32
+		wantMsg        string
+	}{
+		{"scope all at debug", false, true, POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"},
+		{"scope all above debug", false, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"},
+		{"scope deny at debug", true, true, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+		{"scope deny above debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVal, gotMsg := policyEventDatapathScope(tt.denyOnly, tt.acceptConsumed)
+			assert.Equal(t, tt.wantVal, gotVal)
+			assert.Equal(t, tt.wantMsg, gotMsg)
+		})
+	}
 }
