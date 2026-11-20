@@ -1001,6 +1001,29 @@ func TestGetHostVethName_MatchesCNINaming(t *testing.T) {
 	}
 }
 
+func TestIsNodeIP(t *testing.T) {
+	tests := []struct {
+		name   string
+		nodeIP string
+		cidr   string
+		want   bool
+	}{
+		{"host /32 matches", "10.0.0.1", "10.0.0.1/32", true},
+		{"host /128 matches", "fd00::1", "fd00::1/128", true},
+		{"different host", "10.0.0.1", "10.0.0.2/32", false},
+		{"aligned network /24 is not the node", "10.0.0.0", "10.0.0.0/24", false},
+		{"aligned network /64 is not the node", "fd00::", "fd00::/64", false},
+		{"invalid cidr", "10.0.0.1", "garbage", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsNodeIP(tt.nodeIP, tt.cidr); got != tt.want {
+				t.Errorf("IsNodeIP(%q, %q) = %v, want %v", tt.nodeIP, tt.cidr, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetPodNamespaceFromPodIdentifier(t *testing.T) {
 	for _, tc := range []struct{ name, namespace string }{
 		{"web-6d4b75cb6d-zzzzz", "team-a"},
