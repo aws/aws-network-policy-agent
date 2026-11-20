@@ -15,8 +15,10 @@ package rpcclient
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -57,4 +59,14 @@ func GetDefaultServiceRetryConfig() grpc.DialOption {
 
 func GetInsecureConnectionType() grpc.DialOption {
 	return grpc.WithTransportCredentials(insecure.NewCredentials())
+}
+
+// GetFastReconnectParams makes the client retry a failed connection every 0.1 to 0.5 seconds.
+// The agent starts before ipamd listens. With grpc's default backoff (1s, growing by 1.6x) it finds
+// ipamd up to several seconds late, and until then it does not serve the CNI plugin on npa.sock.
+func GetFastReconnectParams() grpc.DialOption {
+	return grpc.WithConnectParams(grpc.ConnectParams{
+		Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: 500 * time.Millisecond},
+		MinConnectTimeout: time.Second,
+	})
 }

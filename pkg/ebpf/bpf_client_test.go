@@ -1,9 +1,13 @@
 package ebpf
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +31,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	// "unsafe"
@@ -2854,4 +2860,176 @@ func TestBinaryChanged(t *testing.T) {
 	require.NoError(t, os.Remove(binary))
 	require.NoError(t, os.Remove(hostDir+TC_SHARED_BINARY))
 	assert.False(t, binaryChanged(binary, hostDir), "both copies missing")
+}
+
+// The tests below attach the agent's compiled TC programs to a veth in a test
+// network namespace. Like the other kernel tests in this package, they need
+// root and the objects from `make build-bpf` (see requireBPFKernelTests).
+
+// enterTestNetns moves the test's thread into a new network namespace with a
+// veth pair whose host side is named hostVeth, until the test ends. netlink
+// works in the calling thread's namespace, so the test must not hand the work
+// to other goroutines.
+func enterTestNetns(t *testing.T, hostVeth string) netlink.Link {
+	t.Helper()
+	runtime.LockOSThread()
+	orig, err := netns.Get()
+	require.NoError(t, err)
+	ns, err := netns.New()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, netns.Set(orig))
+		ns.Close()
+		orig.Close()
+		runtime.UnlockOSThread()
+	})
+	require.NoError(t, netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: hostVeth}, PeerName: "testpeer0"}))
+	link, err := netlink.LinkByName(hostVeth)
+	require.NoError(t, err)
+	require.NoError(t, netlink.LinkSetUp(link))
+	return link
+}
+
+// cniHostVethName is the name the VPC CNI gives a pod's host-side veth, which
+// is the name the agent looks up (utils.GetHostVethName).
+func cniHostVethName(pod types.NamespacedName) string {
+	h := sha1.Sum([]byte(fmt.Sprintf("%s.%s", pod.Namespace, pod.Name)))
+	return POD_VETH_PREFIX + hex.EncodeToString(h[:])[:11]
+}
+
+// hookWatcher is the SDK's TC client, checking the veth's two hooks after
+// every attach or detach. The pod's traffic meets whatever the hooks hold
+// between two calls.
+type hookWatcher struct {
+	tc.BpfTc
+	t    *testing.T
+	link netlink.Link
+	// filters holds, after each call, how many filters each hook had.
+	filters  []hookFilterCounts
+	detaches int
+}
+
+// hookFilterCounts is the filter count on the hook that carries the pod's
+// ingress program (the veth's TC egress) and on the one that carries its
+// egress program (TC ingress).
+type hookFilterCounts struct {
+	call            string
+	ingress, egress int
+}
+
+func (w *hookWatcher) record(call string) {
+	count := func(hook uint32) int {
+		filters, err := netlink.FilterList(w.link, hook)
+		require.NoError(w.t, err)
+		return len(filters)
+	}
+	w.filters = append(w.filters, hookFilterCounts{call, count(netlink.HANDLE_MIN_EGRESS), count(netlink.HANDLE_MIN_INGRESS)})
+}
+
+func (w *hookWatcher) TCEgressAttach(name string, progFD int, funcName string) error {
+	defer w.record("TCEgressAttach")
+	return w.BpfTc.TCEgressAttach(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCIngressAttach(name string, progFD int, funcName string) error {
+	defer w.record("TCIngressAttach")
+	return w.BpfTc.TCIngressAttach(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCEgressDetach(name string) error {
+	defer w.record("TCEgressDetach")
+	w.detaches++
+	return w.BpfTc.TCEgressDetach(name)
+}
+
+func (w *hookWatcher) TCIngressDetach(name string) error {
+	defer w.record("TCIngressDetach")
+	w.detaches++
+	return w.BpfTc.TCIngressDetach(name)
+}
+
+// newAgentClient is a bpfClient as a freshly started agent has it: no record
+// of attached pods, and the pod's programs recovered from their pins.
+func newAgentClient(tcClient tc.BpfTc, podIdentifier string, progs loadedFamily) *bpfClient {
+	contexts := &sync.Map{}
+	contexts.Store(podIdentifier, BPFContext{
+		ingressPgmInfo: goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: progs.ingressFD}},
+		egressPgmInfo:  goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: progs.egressFD}},
+	})
+	return &bpfClient{
+		bpfTCClient:               tcClient,
+		policyEndpointeBPFContext: contexts,
+		ingressPodToProgMap:       &sync.Map{},
+		egressPodToProgMap:        &sync.Map{},
+		ingressProgToPodsMap:      &sync.Map{},
+		egressProgToPodsMap:       &sync.Map{},
+		deletedPods:               &sync.Map{},
+	}
+}
+
+// hookIDs returns the program IDs of the filters on link's two hooks.
+func hookIDs(t *testing.T, link netlink.Link) [2][]uint32 {
+	t.Helper()
+	var ids [2][]uint32
+	for i, hook := range []uint32{netlink.HANDLE_MIN_EGRESS, netlink.HANDLE_MIN_INGRESS} {
+		filters, err := netlink.FilterList(link, hook)
+		require.NoError(t, err)
+		for _, f := range filters {
+			ids[i] = append(ids[i], uint32(f.(*netlink.BpfFilter).Id))
+		}
+	}
+	return ids
+}
+
+// TestReattachAfterRestartKeepsPodFilteredKernel is #790: after an agent
+// restart, the PolicyEndpoint reconcile attaches a policy-selected pod's
+// programs again over the filters the previous agent left. The pod's traffic
+// must stay filtered throughout, so neither hook may be empty at any point.
+func TestReattachAfterRestartKeepsPodFilteredKernel(t *testing.T) {
+	// The agent deletes the filter and adds it back today, so both hooks are
+	// empty in between. The fix (docs/proposals/tc-filter-replace-on-reattach.md)
+	// removes this skip.
+	t.Skip("fails until the agent replaces a pod's filter in place (#790)")
+	dir, _ := requireBPFKernelTests(t)
+	v4 := family{"v4", netip.MustParseAddrPort("10.0.0.1:40000"), netip.MustParseAddrPort("10.0.1.2:80"),
+		EVENTS_BINARY, TC_EGRESS_BINARY, []string{TC_INGRESS_BINARY}}
+	progs := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	pod := types.NamespacedName{Namespace: "default", Name: "reattach-0"}
+	const podIdentifier = "reattach-default"
+	link := enterTestNetns(t, cniHostVethName(pod))
+	sdkTC := tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+
+	// The agent before the restart attaches the pod's programs, as on CNI ADD.
+	_, err := newAgentClient(sdkTC, podIdentifier, progs).AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.NoError(t, err)
+	before := hookIDs(t, link)
+	require.Len(t, before[0], 1)
+	require.Len(t, before[1], 1)
+
+	// The restarted agent's reconcile attaches them again.
+	watcher := &hookWatcher{BpfTc: sdkTC, t: t, link: link}
+	_, err = newAgentClient(watcher, podIdentifier, progs).AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, false)
+	require.NoError(t, err)
+
+	// The checks below only see TC calls that go through the watcher. If the
+	// re-attach used a method the watcher doesn't wrap, they would check
+	// nothing and pass, so require a watched call on each hook. TCEgress*
+	// calls set the hook with the pod's ingress program, TCIngress* the other.
+	var ingressHookCalls, egressHookCalls int
+	for _, f := range watcher.filters {
+		if strings.HasPrefix(f.call, "TCEgress") {
+			ingressHookCalls++
+		} else {
+			egressHookCalls++
+		}
+	}
+	require.NotZero(t, ingressHookCalls, "no watched TC call set the pod's ingress program")
+	require.NotZero(t, egressHookCalls, "no watched TC call set the pod's egress program")
+
+	for _, f := range watcher.filters {
+		assert.Equal(t, 1, f.ingress, "filters carrying the pod's ingress program after %s", f.call)
+		assert.Equal(t, 1, f.egress, "filters carrying the pod's egress program after %s", f.call)
+	}
+	assert.Zero(t, watcher.detaches, "the pod's filters were detached")
+	assert.Equal(t, before, hookIDs(t, link), "the pod runs the same programs after the restart")
 }
