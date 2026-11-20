@@ -134,6 +134,13 @@ static __always_inline void shorten_denied_syn_v4(struct __sk_buff *skb)
 
 	if ((void *)(tcp + 1) > data_end)
 		return;
+	// The fixed offsets above hold only for an options-less, unfragmented
+	// packet, which is the layout noted above. Anything else puts tcp somewhere
+	// that is not the L4 header, so the tuple would not be this flow's. The
+	// literals are ihl in 32-bit words and the fragment offset mask (RFC 791),
+	// which this header cannot take from the programs' own defines.
+	if (ip->ihl != 5 || (ip->frag_off & bpf_htons(0x1FFF)))
+		return;
 	// Only a pure SYN's entry is unanswered; see the callers.
 	if (ip->protocol != IPPROTO_TCP || !tcp->syn || tcp->ack)
 		return;

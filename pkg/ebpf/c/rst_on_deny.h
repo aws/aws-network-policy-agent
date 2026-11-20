@@ -21,6 +21,11 @@
 // bytes it never needs fragmenting, so this can't affect delivery.
 #define IPV4_DF 0x4000
 
+// The fragment offset field of ip->frag_off, in host byte order (RFC 791). A
+// non-zero offset means a later fragment, which carries no L4 header. The
+// other three bits are the reserved, DF and MF flags.
+#define IPV4_FRAG_OFFSET_MASK 0x1FFF
+
 // The IPv4 header length (ihl, RFC 791) and the TCP data offset (doff, RFC
 // 9293 3.1) count 32-bit words, not bytes, so a 20-byte header is written as 5.
 #define HEADER_LEN_WORDS(bytes) ((bytes) / 4)
@@ -171,8 +176,12 @@ static __always_inline int deny_verdict_v4(struct __sk_buff *skb)
 	// The verifier needs the bounds check; a shorter packet can't be answered.
 	if ((void *)(syn_tcp + 1) > data_end)
 		return BPF_DROP;
-	// With IP options, syn_tcp would point into the IP header.
-	if (syn_ip->ihl != HEADER_LEN_WORDS(sizeof(struct iphdr)) || syn_ip->protocol != IPPROTO_TCP || !is_bare_syn(syn_tcp))
+	// syn_tcp is only the L4 header for an options-less, unfragmented packet.
+	// With IP options it points into the IP header, and with a non-zero
+	// fragment offset into payload.
+	if (syn_ip->ihl != HEADER_LEN_WORDS(sizeof(struct iphdr)) ||
+	    (bpf_ntohs(syn_ip->frag_off) & IPV4_FRAG_OFFSET_MASK) ||
+	    syn_ip->protocol != IPPROTO_TCP || !is_bare_syn(syn_tcp))
 		return BPF_DROP;
 	// After the packet checks, so other denied packets skip the lookup.
 	if (!tcp_reset_on_deny_enabled())
