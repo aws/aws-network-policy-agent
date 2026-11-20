@@ -105,6 +105,13 @@ function install_network_policy_helm(){
       kubectl -n kube-system label --overwrite $kind app.kubernetes.io/managed-by=Helm || echo "Unable to label $kind"
     done
 
+    # Helm 4 defaults to server-side apply, which conflicts with the fields the EKS vpc-cni
+    # addon (field manager "eks") owns on the ENIConfig CRD and aws-node, so the takeover
+    # fails. Helm 3 only does client-side apply and rejects the flag.
+    if [[ $(helm version --template '{{.Version}}') != v3.* ]]; then
+      HELM_EXTRA_ARGS+=" --server-side=false"
+    fi
+
     echo "Installing/Updating the aws-vpc-cni helm chart with enableNetworkPolicy=true"
     helm upgrade --install aws-vpc-cni eks/aws-vpc-cni --wait --timeout 300s \
         --namespace kube-system \
