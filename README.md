@@ -268,19 +268,73 @@ Network Policy Agent exposes Prometheus metrics on port 8162 (configurable via `
 
 Type: Counter
 
-Description: Total number of packets dropped by network policy agent
+Description: Total number of packets dropped by network policy agent (always enabled)
 
 Labels:
-- `direction`: Traffic direction (ingress/egress)
+- `direction`: Traffic direction (`ingress`/`egress`)
+- `protocol`: IP protocol (`TCP`, `UDP`, `SCTP`, …)
+
+Maximum cardinality: `2 × 3 = 6 series`.
 
 #### `network_policy_drop_bytes_total`
 
 Type: Counter
 
-Description: Total number of bytes dropped by network policy agent
+Description: Total number of bytes dropped by network policy agent (always enabled)
 
 Labels:
-- `direction`: Traffic direction (ingress/egress)
+- `direction`: Traffic direction (`ingress`/`egress`)
+- `protocol`: IP protocol (`TCP`, `UDP`, `SCTP`, …)
+
+#### `network_policy_drop_count_by_port_total` *(opt-in)*
+
+Type: Counter
+
+Description: Total number of packets dropped, additionally labelled by destination
+port. Only registered when `--enable-pod-drop-labels=true`.
+
+**Cardinality note:** `dest_port` for egress drops is the remote port the pod tried to
+reach, which is unbounded. Enable only when you are willing to accept the resulting
+Prometheus cardinality (worst case: 2 × 3 × 65535 ≈ 393k series, typical workloads
+much lower).
+
+Labels:
+- `direction`: Traffic direction (`ingress`/`egress`)
+- `protocol`: IP protocol (`TCP`, `UDP`, `SCTP`, …)
+- `dest_port`: Destination port number
+
+#### `network_policy_drop_bytes_by_port_total` *(opt-in)*
+
+Type: Counter
+
+Description: Total bytes dropped, additionally labelled by destination port.
+Only registered when `--enable-pod-drop-labels=true`.
+
+Labels: same as `network_policy_drop_count_by_port_total`
+
+#### `network_policy_pod_drop_count_total` *(opt-in)*
+
+Type: Counter
+
+Description: Total number of packets dropped, labelled by the local pod. Only
+registered when `--enable-pod-drop-labels=true`.
+
+Labels:
+- `direction`: Traffic direction (`ingress`/`egress`)
+- `pod_namespace`: Namespace of the local pod
+- `pod_name`: Name of the local pod
+
+#### `network_policy_pod_drop_bytes_total` *(opt-in)*
+
+Type: Counter
+
+Description: Total bytes dropped, labelled by the local pod. Only registered when
+`--enable-pod-drop-labels=true`.
+
+Labels:
+- `direction`: Traffic direction (`ingress`/`egress`)
+- `pod_namespace`: Namespace of the local pod
+- `pod_name`: Name of the local pod
 
 ### Accessing Metrics
 
@@ -295,10 +349,10 @@ curl localhost:8162/metrics
 ```
 # HELP network_policy_drop_bytes_total Total number of bytes dropped by network policy agent
 # TYPE network_policy_drop_bytes_total counter
-network_policy_drop_bytes_total{direction="ingress"} 1.0665324e+07
+network_policy_drop_bytes_total{direction="ingress",protocol="TCP"} 1.0665324e+07
 # HELP network_policy_drop_count_total Total number of packets dropped by network policy agent
 # TYPE network_policy_drop_count_total counter
-network_policy_drop_count_total{direction="ingress"} 144126
+network_policy_drop_count_total{direction="ingress",protocol="TCP"} 144126
 ```
 
 ## Contributing

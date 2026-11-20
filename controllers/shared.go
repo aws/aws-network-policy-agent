@@ -94,6 +94,7 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 			continue
 		}
 
+		ebpfClient.RegisterPodIP(string(pod.PodIP), pod.NamespacedName)
 		outcome.attached++
 		log().Debugf("eBPF probes in place for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}

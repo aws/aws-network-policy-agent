@@ -46,13 +46,37 @@ func log() logger.Logger {
 
 const VerdictDeny uint32 = 0
 
+// PodResolver resolves a local pod's IP address to its Kubernetes namespace
+// and name. The event loop uses it to attribute drop metrics to workloads.
+// Implementations must be goroutine-safe and return quickly (e.g. a sync.Map
+// lookup), as ResolveIP is called on every denied packet.
+type PodResolver interface {
+	// ResolveIP returns the namespace and name of the pod whose primary IP is
+	// addr. It returns empty strings when the pod is not known locally.
+	ResolveIP(addr string) (namespace, name string)
+}
+
+var (
+	// dropCountByPort and dropBytesByPort are registered only when a non-nil
+	// PodResolver is passed. dest_port is unbounded for egress drops (the
+	// remote port a pod tried to reach), so it is opt-in behind
+	// --enable-pod-drop-labels.
+	dropCountByPort *prometheus.CounterVec
+	dropBytesByPort *prometheus.CounterVec
+
+	// podDropCountTotal and podDropBytesTotal are also opt-in; pod name is
+	// high-cardinality.
+	podDropCountTotal *prometheus.CounterVec
+	podDropBytesTotal *prometheus.CounterVec
+)
+
 var (
 	dropCountTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "network_policy_drop_count_total",
 			Help: "Total number of packets dropped by network policy agent",
 		},
-		[]string{"direction"},
+		[]string{"direction", "protocol"},
 	)
 
 	dropBytesTotal = prometheus.NewCounterVec(
@@ -60,7 +84,7 @@ var (
 			Name: "network_policy_drop_bytes_total",
 			Help: "Total number of bytes dropped by network policy agent",
 		},
-		[]string{"direction"},
+		[]string{"direction", "protocol"},
 	)
 )
 
@@ -92,7 +116,7 @@ type ringBufferDataV6_t struct {
 	Tier       uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, denyOnly bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, denyOnly bool, resolver PodResolver) error {
 	// Enable logging and setup ring buffer
 	ctx := context.Background()
 	if mapFD <= 0 {
@@ -131,8 +155,39 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 			return err
 		}
 	}
+	if resolver != nil {
+		dropCountByPort = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "network_policy_drop_count_by_port_total",
+				Help: "Total number of packets dropped by network policy agent, labelled by dest_port",
+			},
+			[]string{"direction", "protocol", "dest_port"},
+		)
+		dropBytesByPort = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "network_policy_drop_bytes_by_port_total",
+				Help: "Total bytes dropped by network policy agent, labelled by dest_port",
+			},
+			[]string{"direction", "protocol", "dest_port"},
+		)
+		podDropCountTotal = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "network_policy_pod_drop_count_total",
+				Help: "Total number of packets dropped by network policy agent, labelled by the local pod",
+			},
+			[]string{"direction", "pod_namespace", "pod_name"},
+		)
+		podDropBytesTotal = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "network_policy_pod_drop_bytes_total",
+				Help: "Total bytes dropped by network policy agent, labelled by the local pod",
+			},
+			[]string{"direction", "pod_namespace", "pod_name"},
+		)
+		metrics.Registry.MustRegister(dropCountByPort, dropBytesByPort, podDropCountTotal, podDropBytesTotal)
+	}
 	log().Debug("Configure Event loop ... ")
-	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6, denyOnly)
+	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6, denyOnly, resolver)
 	return nil
 }
 
@@ -293,7 +348,7 @@ func AcceptEventsConsumed(denyOnly bool) bool {
 	return consumeNonDeny(flowDebugEnabled(), denyOnly)
 }
 
-func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool, denyOnly bool) {
+func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool, denyOnly bool, resolver PodResolver) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// dedicated non-sugared logger without caller capture for the hot path
 	flowLog := logger.GetFlowLogger()
@@ -348,13 +403,6 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 				direction = "ingress"
 			}
 			isDenyVerdict := verdictNum == VerdictDeny
-			if isDenyVerdict {
-				dropCountTotal.WithLabelValues(direction).Add(float64(1))
-				dropBytesTotal.WithLabelValues(direction).Add(float64(packetSz))
-			} else if !consumeNonDeny(debugEnabled, denyOnly) {
-				continue
-			}
-
 			var srcIP, destIP string
 			if enableIPv6 {
 				srcIP, destIP = ipv6Str(rb6.SourceIP), ipv6Str(rb6.DestIP)
@@ -366,8 +414,27 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 			tier := getTier(int(tierNum))
 
 			if isDenyVerdict {
+				dropCountTotal.WithLabelValues(direction, protocol).Add(1)
+				dropBytesTotal.WithLabelValues(direction, protocol).Add(float64(packetSz))
+				if resolver != nil {
+					destPortStr := strconv.FormatUint(uint64(destPort), 10)
+					dropCountByPort.WithLabelValues(direction, protocol, destPortStr).Add(1)
+					dropBytesByPort.WithLabelValues(direction, protocol, destPortStr).Add(float64(packetSz))
+					// For ingress the local pod is the destination; for egress it is the source.
+					localIP := destIP
+					if isEgress != 0 {
+						localIP = srcIP
+					}
+					if ns, name := resolver.ResolveIP(localIP); name != "" {
+						podDropCountTotal.WithLabelValues(direction, ns, name).Add(1)
+						podDropBytesTotal.WithLabelValues(direction, ns, name).Add(float64(packetSz))
+					}
+				}
 				flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
 			} else {
+				if !consumeNonDeny(debugEnabled, denyOnly) {
+					continue
+				}
 				flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
 			}
 
