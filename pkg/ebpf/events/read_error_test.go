@@ -105,7 +105,7 @@ func (r *scriptPolicyEventReader) ReadInto(rec *ringbuf.Record) error {
 func consumeWithSleeps(t *testing.T, errs []error) (n int, sleeps []time.Duration) {
 	t.Helper()
 	rd := &scriptPolicyEventReader{errs: errs}
-	consumePolicyEvents(context.Background(), rd, "node-a", zap.NewNop(), false, false, false, func(d time.Duration) {
+	consumePolicyEvents(context.Background(), rd, "node-a", zap.NewNop(), false, false, false, false, func(d time.Duration) {
 		sleeps = append(sleeps, d)
 	})
 	return rd.n, sleeps

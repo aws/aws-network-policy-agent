@@ -105,7 +105,7 @@ type ringBufferDataV6_t struct {
 	Tier       uint8
 }
 
-func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool) error {
+func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIPv6 bool, denyOnly bool) error {
 	// Enable logging and setup ring buffer
 	ctx := context.Background()
 	if mapFD <= 0 {
@@ -145,7 +145,7 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 		}
 	}
 	log().Debug("Configure Event loop ... ")
-	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6)
+	capturePolicyEvents(ctx, rd, ringMap, enableCloudWatchLogs, enableIPv6, denyOnly)
 	return nil
 }
 
@@ -344,23 +344,44 @@ func policyEventReadErrorReason(err error) string {
 	return "other"
 }
 
-func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool) {
+// consumeNonDeny reports whether a non-DENY event produces any output.
+// Non-DENY flow lines are Debug lines and CloudWatch publishes non-DENY only at
+// debug, so above debug nothing uses them. With --policy-event-logs-scope=deny
+// they are not used either.
+func consumeNonDeny(debugEnabled, denyOnly bool) bool {
+	return debugEnabled && !denyOnly
+}
+
+// flowDebugEnabled reports whether the flow logger writes Debug lines.
+func flowDebugEnabled() bool {
+	return logger.GetFlowLogger().Core().Enabled(zapcore.DebugLevel)
+}
+
+// AcceptEventsConsumed reports whether the agent uses ACCEPT events at all,
+// given the configured log level and --policy-event-logs-scope. When it
+// returns false the datapath is told not to emit them; the event loop applies
+// the same rule to any that still arrive.
+func AcceptEventsConsumed(denyOnly bool) bool {
+	return consumeNonDeny(flowDebugEnabled(), denyOnly)
+}
+
+func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf.Map, enableCloudWatchLogs bool, enableIPv6 bool, denyOnly bool) {
 	nodeName := os.Getenv("MY_NODE_NAME")
 	// dedicated non-sugared logger without caller capture for the hot path
 	flowLog := logger.GetFlowLogger()
 	// Gate ACCEPT logging on the core's level rather than the raw flag string.
-	debugEnabled := flowLog.Core().Enabled(zapcore.DebugLevel)
+	debugEnabled := flowDebugEnabled()
 	go func() {
 		// Hold ringMap for the reader's lifetime: cilium/ebpf closes the
 		// underlying FD once the Map is garbage collected, and the reader
 		// registers only the raw FD with epoll.
 		defer ringMap.Close()
 		defer rd.Close()
-		consumePolicyEvents(ctx, rd, nodeName, flowLog, debugEnabled, enableCloudWatchLogs, enableIPv6, time.Sleep)
+		consumePolicyEvents(ctx, rd, nodeName, flowLog, debugEnabled, enableCloudWatchLogs, enableIPv6, denyOnly, time.Sleep)
 	}()
 }
 
-func consumePolicyEvents(ctx context.Context, rd policyEventReader, nodeName string, flowLog *zap.Logger, debugEnabled, enableCloudWatchLogs, enableIPv6 bool, sleep func(time.Duration)) {
+func consumePolicyEvents(ctx context.Context, rd policyEventReader, nodeName string, flowLog *zap.Logger, debugEnabled, enableCloudWatchLogs, enableIPv6, denyOnly bool, sleep func(time.Duration)) {
 	var rec ringbuf.Record
 	delay := policyEventReadDelayInitial
 	for {
@@ -424,17 +445,16 @@ func consumePolicyEvents(ctx context.Context, rd policyEventReader, nodeName str
 			dropCountTotal.WithLabelValues(direction).Add(float64(1))
 			dropBytesTotal.WithLabelValues(direction).Add(float64(packetSz))
 			flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
-		} else if debugEnabled {
+		} else if consumeNonDeny(debugEnabled, denyOnly) {
 			flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
+		} else {
+			continue
 		}
 
 		if enableCloudWatchLogs {
-			// Apply same filtering as local logging:
-			// DENY always published, ACCEPT only at debug level
-			if isDenyVerdict || debugEnabled {
-				message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
-				publishDataToCloudwatch(ctx, message)
-			}
+			// Only DENY events and, at debug level, ACCEPT events reach this point.
+			message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
+			publishDataToCloudwatch(ctx, message)
 		}
 	}
 }

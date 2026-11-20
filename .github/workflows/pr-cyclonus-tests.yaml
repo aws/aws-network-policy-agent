@@ -168,6 +168,7 @@ jobs:
           ENABLE_STRICT_MODE: "true"
           RUN_EBPF_TESTS: "true"
           RUN_CLUSTER_NETWORK_POLICY_TESTS: "true"
+          RUN_RESTART_TESTS: "true"
           # The control-plane controller packs 200 endpoints per object, so at test scale a
           # policy never splits. Running the controller on the dataplane lets us shrink that
           # and exercise policies spread across several PolicyEndpoint objects.
@@ -185,8 +186,8 @@ jobs:
             const failed = '${{ steps.cyclonus.outcome }}' !== 'success';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const suites = ipFamily === 'IPv6'
-              ? 'cyclonus, policy, clusternetworkpolicy, agentflags, strict (ebpf auto-skips on IPv6)'
-              : 'cyclonus, policy, ebpf, clusternetworkpolicy, agentflags, strict';
+              ? 'cyclonus, policy, clusternetworkpolicy, restart, agentflags, strict (ebpf auto-skips on IPv6)'
+              : 'cyclonus, policy, ebpf, clusternetworkpolicy, restart, agentflags, strict';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
