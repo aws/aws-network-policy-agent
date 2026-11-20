@@ -48,12 +48,12 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		originalArgs = agentArgs()
+		originalArgs = fw.AgentArgs(ctx)
 		// Registered first, so it runs after the pods and policies are gone,
 		// and the flag never leaks into the specs that run after these.
 		DeferCleanup(func() {
 			By("Restoring the agent's original args")
-			setAgentArgs(originalArgs)
+			fw.SetAgentArgs(ctx, originalArgs)
 		})
 
 		nodes, err := utils.SchedulableNodes(ctx, fw.K8sClient)
@@ -127,7 +127,7 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 		Expect(before).ToNot(BeEmpty(), "no programs found for %s", identifier)
 
 		By("Turning the flag on")
-		setAgentArgs(withTCPResetOnDeny(originalArgs))
+		fw.SetAgentArgs(ctx, withTCPResetOnDeny(originalArgs))
 
 		// Program IDs and the startup log are only meaningful once the new
 		// agent is running.
@@ -192,7 +192,7 @@ var _ = Describe("TCP Reset on Deny", Ordered, func() {
 
 	It("times a denied connection out again with the flag off", func() {
 		By("Restoring the agent's original args")
-		setAgentArgs(originalArgs)
+		fw.SetAgentArgs(ctx, originalArgs)
 		waitForTCPResetFlag(checkPod.Name, false)
 		Expect(connectResults(otherNodeClient.Name, serverIP, rstServerPort, 0, 1)).To(Equal([]string{timedOut}))
 	})

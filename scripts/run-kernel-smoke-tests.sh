@@ -38,9 +38,9 @@ echo "Making ginkgo test binaries"
 
 run_ginkgo_suite policy.test 15m
 
-run_ginkgo_suite ebpf.test 15m
+run_suite_restoring_agent_args ebpf.test 15m
 
-run_agent_flags_suite 15m
+run_suite_restoring_agent_args agentflags.test 15m
 
 enable_strict_mode
 
