@@ -31,6 +31,10 @@ RUN yum update -y && \
     yum clean all
 COPY . ./
 RUN make vmlinuxh
+# libbpf 1.6.1 added bpf_stream_vprintk to bpf_helpers.h; it also appears in
+# vmlinux.h as a kfunc with conflicting attributes. Strip it from vmlinux.h so
+# clang only sees one declaration. NPA never calls this function.
+RUN sed -i '/bpf_stream_vprintk/d' ./pkg/ebpf/c/vmlinux.h
 
 # Build BPF
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as bpfbuilder

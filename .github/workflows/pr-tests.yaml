@@ -67,7 +67,7 @@ jobs:
           uname -r
           sudo modprobe nf_conntrack
           docker run --rm -v "$PWD":/src -w /src -e OWNER="$(id -u):$(id -g)" public.ecr.aws/amazonlinux/amazonlinux:2023 bash -c \
-            'dnf install -y -q clang llvm make libbpf-devel bpftool && make vmlinuxh build-bpf && chown -R "$OWNER" pkg/ebpf/c'
+            'dnf install -y -q clang llvm make libbpf-devel bpftool && make vmlinuxh && sed -i "/bpf_stream_vprintk/d" ./pkg/ebpf/c/vmlinux.h && make build-bpf && chown -R "$OWNER" pkg/ebpf/c'
           # The binary is built with coverage, and its profile is uploaded with
           # make test's, since only these tests reach the TC programs' config.
           go test -c -cover -covermode=atomic -o "$RUNNER_TEMP/ebpf.test" ./pkg/ebpf/
