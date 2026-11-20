@@ -19,8 +19,9 @@ import (
 // These tests load the agent's compiled TC programs into the kernel and run
 // them on hand-built packets with BPF_PROG_TEST_RUN, which returns the
 // program's verdict and the packet as the program left it. They check that a
-// denied SYN becomes a well-formed RST only with the flag on, and that the
-// egress program passes that RST without recording a flow.
+// denied SYN becomes a well-formed RST only with the flag on, that the egress
+// program passes that RST without recording a flow, and that the ingress
+// program admits replies to a flow the egress program allowed.
 //
 // They need root and the objects from `make build-bpf` (in pkg/ebpf/c, or in
 // BPF_OBJECTS_DIR), so they skip under `make test`. CI runs them with
@@ -490,4 +491,39 @@ func recordStaleFlow(t *testing.T, conntrack goebpfmaps.BpfMap, syn tcpSegment, 
 		Protocol: ipProtoTCP, Owner_ip: dst.As16(), Ifindex: ifindex,
 	}
 	require.NoError(t, conntrack.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&value)), 0))
+}
+
+// TestReplyToEgressAllowedFlowPassesIngressDenyKernel checks that a pod's
+// ingress program admits replies to a connection its egress program allowed,
+// whatever the pod's ingress policy, and nothing else from the same peer. It
+// is also why a connection that gets in while a pod is unfiltered stays
+// allowed afterwards (#790): the pod's answer records the flow.
+func TestReplyToEgressAllowedFlowPassesIngressDenyKernel(t *testing.T) {
+	dir, _ := requireBPFKernelTests(t)
+	for _, fam := range []family{
+		{"v4", netip.MustParseAddrPort("10.0.0.1:443"), netip.MustParseAddrPort("10.0.1.2:40000"),
+			EVENTS_BINARY, TC_EGRESS_BINARY, []string{TC_INGRESS_BINARY}},
+		{"v6", netip.MustParseAddrPort("[fd00::1]:443"), netip.MustParseAddrPort("[fd00:1::2]:40000"),
+			EVENTS_V6_BINARY, TC_V6_EGRESS_BINARY, []string{TC_V6_INGRESS_BINARY}},
+	} {
+		t.Run(fam.name, func(t *testing.T) {
+			// The pod's ingress is denied by default and its egress allowed,
+			// as with an ingress-only policy. fam.client is the peer.
+			progs := loadFamily(t, dir, fam, fam.ingressBinaries[0])
+			writePodState(t, progs.egressPodState, POD_STATE_MAP_KEY, DEFAULT_ALLOW)
+
+			syn := tcpSegment{src: fam.pod, dst: fam.client, seq: 1, flags: tcpFlagSyn}
+			verdict, _ := testRun(t, progs.egressFD, syn.packet())
+			require.Equal(t, uint32(tcActOK), verdict, "the pod's egress allows its SYN")
+			assert.Equal(t, 1, countEntries(t, progs.conntrack), "egress recorded the flow")
+
+			synAck := tcpSegment{src: fam.client, dst: fam.pod, seq: 100, flags: tcpFlagSyn | tcpFlagAck}
+			verdict, _ = testRun(t, progs.ingressFD, synAck.packet())
+			assert.Equal(t, uint32(tcActOK), verdict, "the peer's reply passes the pod's ingress deny")
+
+			other := tcpSegment{src: fam.client, dst: netip.AddrPortFrom(fam.pod.Addr(), 40001), seq: 1, flags: tcpFlagSyn}
+			verdict, _ = testRun(t, progs.ingressFD, other.packet())
+			assert.Equal(t, uint32(tcActShot), verdict, "a new connection from the peer is denied")
+		})
+	}
 }
