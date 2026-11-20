@@ -37,24 +37,23 @@ import (
 )
 
 var (
-	TC_INGRESS_BINARY                = "tc.v4ingress.bpf.o"
-	TC_EGRESS_BINARY                 = "tc.v4egress.bpf.o"
-	TC_V6_INGRESS_BINARY             = "tc.v6ingress.bpf.o"
-	TC_V6_EGRESS_BINARY              = "tc.v6egress.bpf.o"
-	EVENTS_BINARY                    = "v4events.bpf.o"
-	EVENTS_V6_BINARY                 = "v6events.bpf.o"
-	AWS_CONNTRACK_MAP                = "aws_conntrack_map"
-	AWS_EVENTS_MAP                   = "policy_events"
-	EKS_CLI_BINARY                   = "aws-eks-na-cli"
-	EKS_V6_CLI_BINARY                = "aws-eks-na-cli-v6"
-	hostBinaryPath                   = "/host/opt/cni/bin/"
-	IPv4_HOST_MASK                   = "/32"
-	IPv6_HOST_MASK                   = "/128"
-	CONNTRACK_MAP_PIN_PATH           = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
-	POLICY_EVENTS_MAP_PIN_PATH       = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
-	AWS_EVENTS_SCOPE_MAP             = "policy_events_scope_map"
-	POLICY_EVENTS_SCOPE_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_policy_events_scope_map"
-	// Values of policy_events_scope_map key 0; must match the datapath.
+	TC_INGRESS_BINARY          = "tc.v4ingress.bpf.o"
+	TC_EGRESS_BINARY           = "tc.v4egress.bpf.o"
+	TC_V6_INGRESS_BINARY       = "tc.v6ingress.bpf.o"
+	TC_V6_EGRESS_BINARY        = "tc.v6egress.bpf.o"
+	EVENTS_BINARY              = "v4events.bpf.o"
+	EVENTS_V6_BINARY           = "v6events.bpf.o"
+	AWS_CONNTRACK_MAP          = "aws_conntrack_map"
+	AWS_EVENTS_MAP             = "policy_events"
+	EKS_CLI_BINARY             = "aws-eks-na-cli"
+	EKS_V6_CLI_BINARY          = "aws-eks-na-cli-v6"
+	hostBinaryPath             = "/host/opt/cni/bin/"
+	IPv4_HOST_MASK             = "/32"
+	IPv6_HOST_MASK             = "/128"
+	CONNTRACK_MAP_PIN_PATH     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
+	POLICY_EVENTS_MAP_PIN_PATH = "/sys/fs/bpf/globals/aws/maps/global_policy_events"
+	// Values of struct tc_config.policy_event_scope; must match the datapath
+	// (POLICY_EVENT_SCOPE_DENY in pkg/ebpf/c/policy_events.h).
 	POLICY_EVENT_SCOPE_ALL           uint32          = 0
 	POLICY_EVENT_SCOPE_DENY          uint32          = 1
 	CATCH_ALL_PROTOCOL               corev1.Protocol = "ANY_IP_PROTOCOL"
@@ -210,10 +209,6 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string,
 	enableTCPResetOnDeny bool, policyEventsDenyOnly bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
-	var policyEventsDropCountMap goebpfmaps.BpfMap
-	var policyEventsDropCountMapPresent bool
-	var policyEventsScopeMap goebpfmaps.BpfMap
-	var policyEventsScopeMapPresent bool
 
 	ebpfClient := &bpfClient{
 		// Maps PolicyEndpoint resource to it's eBPF context
@@ -353,14 +348,6 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 			if mapName == AWS_EVENTS_MAP {
 				eventBufferFD = int(mapInfo.MapFD)
 			}
-			if mapName == AWS_EVENTS_SCOPE_MAP {
-				policyEventsScopeMap = mapInfo
-				policyEventsScopeMapPresent = true
-			}
-			if mapName == AWS_EVENTS_DROP_COUNT_MAP {
-				policyEventsDropCountMap = mapInfo
-				policyEventsDropCountMapPresent = true
-			}
 		}
 	}
 
@@ -378,13 +365,19 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 
 	// Every TC program references the shared maps, so they must exist before
 	// the deferred ct-deny probe below and before any pod's program loads.
-	tcConfigMap, err := ebpfClient.loadTCSharedMaps(eventsUpdateRequired || reloadTCSharedMaps)
+	tcConfigMap, dropCountMap, err := ebpfClient.loadTCSharedMaps(eventsUpdateRequired || reloadTCSharedMaps)
 	if err != nil {
 		log().Errorf("Unable to load %s. Required for policy enforcement, exiting..error: %v", TC_SHARED_BINARY, err)
 		sdkAPIErr.WithLabelValues("LoadBpfFile-TCShared").Inc()
 		return nil, err
 	}
-	if err := writeTCConfig(tcConfigMap, enableTCPResetOnDeny); err != nil {
+	// The scope comes from the flag and the log level and is written on every start.
+	// With event logs off it is 'all', so a stale 'deny' from an earlier start is cleared.
+	policyEventScope, scopeMsg := POLICY_EVENT_SCOPE_ALL, ""
+	if enablePolicyEventLogs {
+		policyEventScope, scopeMsg = policyEventDatapathScope(policyEventsDenyOnly, events.AcceptEventsConsumed(policyEventsDenyOnly))
+	}
+	if err := writeTCConfig(tcConfigMap, enableTCPResetOnDeny, policyEventScope); err != nil {
 		log().Errorf("Unable to write the TC programs' config, exiting..error: %v", err)
 		sdkAPIErr.WithLabelValues("UpdateMapEntry-TCConfig").Inc()
 		return nil, err
@@ -407,30 +400,11 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 	log().Info("Initialized Conntrack client")
 
 	if enablePolicyEventLogs {
-		// Write the datapath scope on every start, so a changed flag or log level
-		// applies on a warm restart too. Fails open: if the map is missing or the
-		// write fails, the datapath keeps emitting ACCEPT events.
-		scopeVal, scopeMsg := policyEventDatapathScope(policyEventsDenyOnly, events.AcceptEventsConsumed(policyEventsDenyOnly))
-		scopeMap, haveScopeMap := ebpfClient.resolveGlobalMap(policyEventsScopeMap, policyEventsScopeMapPresent, POLICY_EVENTS_SCOPE_MAP_PIN_PATH)
-		if haveScopeMap {
-			key := uint32(0)
-			if err := scopeMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&scopeVal)), 0); err != nil {
-				log().Errorf("Failed to write policy event scope %d: %v", scopeVal, err)
-				sdkAPIErr.WithLabelValues("WritePolicyEventScope").Inc()
-			}
-		} else {
-			log().Warnf("Policy events scope map not found; datapath keeps its current scope (requested %d)", scopeVal)
-		}
 		log().Info(scopeMsg)
 		// Export the kernel's failed-DENY-write counter. Read only at /metrics
 		// scrape time on the existing controller-runtime registry; no new
-		// listener. Non-fatal if the map is absent.
-		dropMap, haveDropMap := ebpfClient.resolveGlobalMap(policyEventsDropCountMap, policyEventsDropCountMapPresent, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
-		if haveDropMap {
-			registerRingbufDropMetrics(dropMap)
-		} else {
-			log().Warn("Policy events drop count map not found; ring buffer DENY drop metric disabled")
-		}
+		// listener.
+		registerRingbufDropMetrics(dropCountMap)
 		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, policyEventsDenyOnly)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
@@ -611,7 +585,7 @@ func binaryChanged(binary, hostBinaryPath string) bool {
 // tcSharedMapsPinned reports whether both shared maps are pinned. If not,
 // loadTCSharedMaps creates both again.
 func tcSharedMapsPinned() bool {
-	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH} {
+	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH} {
 		if _, err := os.Stat(pinPath); err != nil {
 			return false
 		}
@@ -662,11 +636,6 @@ func (l *bpfClient) recoverBPFState(bpfTCClient tc.BpfTc, eBPFSDKClient goelf.Bp
 				isPolicyEventsMapPresent = true
 				eventsMapFD = int(globalMap.MapFD)
 				log().Infof("Policy event Map is already present on the node Recovered FD: %d", eventsMapFD)
-			}
-			if globalMapName == POLICY_EVENTS_SCOPE_MAP_PIN_PATH {
-				// Store so the scope can be rewritten on warm restart.
-				globalMaps.Store(globalMapName, globalMap)
-				log().Info("Policy events scope map recovered")
 			}
 			if globalMapName == POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH {
 				// Store so the DENY drop counter can be exported on warm restart.
@@ -1372,27 +1341,30 @@ func removeCtDenyProbePins() {
 	}
 }
 
-// The ingress and egress binaries reference both shared maps, so with either
-// missing they can't load.
+// The ingress and egress binaries reference the shared maps, so with any of
+// them missing they can't load.
 func hasTCSharedMaps(globalMaps map[string]goebpfmaps.BpfMap) bool {
 	_, config := globalMaps[TC_CONFIG_MAP_PIN_PATH]
 	_, pending := globalMaps[TCP_RESET_PENDING_MAP_PIN_PATH]
-	return config && pending
+	_, dropCount := globalMaps[POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH]
+	return config && pending && dropCount
 }
 
-// loadTCSharedMaps returns the config map of TC_SHARED_BINARY, reusing the
-// pinned maps recoverBPFState recovered or loading the binary otherwise.
+// loadTCSharedMaps returns the config map and the policy event drop counter of
+// TC_SHARED_BINARY, reusing the pinned maps recoverBPFState recovered or loading
+// the binary otherwise.
 //
 // Recovered maps are kept because running programs reference them. With
 // reloadMaps, every pod's programs are reloaded anyway, so new maps are safe
 // and the recovered ones are closed.
-func (l *bpfClient) loadTCSharedMaps(reloadMaps bool) (goebpfmaps.BpfMap, error) {
+func (l *bpfClient) loadTCSharedMaps(reloadMaps bool) (goebpfmaps.BpfMap, goebpfmaps.BpfMap, error) {
 	if !reloadMaps {
 		config, configFound := l.globalMaps.Load(TC_CONFIG_MAP_PIN_PATH)
 		_, pendingFound := l.globalMaps.Load(TCP_RESET_PENDING_MAP_PIN_PATH)
-		if configFound && pendingFound {
+		dropCount, dropFound := l.globalMaps.Load(POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+		if configFound && pendingFound && dropFound {
 			log().Info("Recovered the shared TC maps")
-			return config.(goebpfmaps.BpfMap), nil
+			return config.(goebpfmaps.BpfMap), dropCount.(goebpfmaps.BpfMap), nil
 		}
 	}
 	_, maps, err := l.bpfSDKClient.LoadBpfFileWithCustomData(goelf.BpfCustomData{
@@ -1400,37 +1372,44 @@ func (l *bpfClient) loadTCSharedMaps(reloadMaps bool) (goebpfmaps.BpfMap, error)
 		CustomPinPath: globalMapsPinPrefix,
 	})
 	if err != nil {
-		return goebpfmaps.BpfMap{}, err
+		return goebpfmaps.BpfMap{}, goebpfmaps.BpfMap{}, err
 	}
 	config, found := maps[TC_CONFIG_MAP]
 	if !found {
-		return goebpfmaps.BpfMap{}, fmt.Errorf("%s has no %s map", TC_SHARED_BINARY, TC_CONFIG_MAP)
+		return goebpfmaps.BpfMap{}, goebpfmaps.BpfMap{}, fmt.Errorf("%s has no %s map", TC_SHARED_BINARY, TC_CONFIG_MAP)
 	}
-	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH} {
+	dropCount, found := maps[AWS_EVENTS_DROP_COUNT_MAP]
+	if !found {
+		return goebpfmaps.BpfMap{}, goebpfmaps.BpfMap{}, fmt.Errorf("%s has no %s map", TC_SHARED_BINARY, AWS_EVENTS_DROP_COUNT_MAP)
+	}
+	for _, pinPath := range []string{TC_CONFIG_MAP_PIN_PATH, TCP_RESET_PENDING_MAP_PIN_PATH, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH} {
 		if recovered, ok := l.globalMaps.LoadAndDelete(pinPath); ok {
 			closeFD(int(recovered.(goebpfmaps.BpfMap).MapFD))
 		}
 	}
 	log().Infof("Loaded %s", TC_SHARED_BINARY)
-	return config, nil
+	return config, dropCount, nil
 }
 
-// tcConfig mirrors struct tc_config in pkg/ebpf/c/tc_shared.h.
+// tcConfig mirrors struct tc_config in pkg/ebpf/c/tc_shared.h. Both fields are
+// __u32, so the struct is 8 bytes with no padding.
 type tcConfig struct {
-	tcpResetOnDeny uint32
+	tcpResetOnDeny   uint32
+	policyEventScope uint32
 }
 
 // tcConfigKey is TC_CONFIG_KEY in pkg/ebpf/c/tc_shared.h: the config map is
 // an array with one entry.
 const tcConfigKey uint32 = 0
 
-// writeTCConfig writes the agent's flags that the TC programs read, at every
-// start.
-func writeTCConfig(configMap goebpfmaps.BpfMap, enableTCPResetOnDeny bool) error {
+// writeTCConfig writes the agent's settings that the TC programs read, at every
+// start: the TCP reset flag and the policy event scope.
+func writeTCConfig(configMap goebpfmaps.BpfMap, enableTCPResetOnDeny bool, policyEventScope uint32) error {
 	var config tcConfig
 	if enableTCPResetOnDeny {
 		config.tcpResetOnDeny = 1
 	}
+	config.policyEventScope = policyEventScope
 	key := tcConfigKey
 	return configMap.CreateUpdateMapEntry(uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&config)), 0)
 }

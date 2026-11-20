@@ -39,6 +39,17 @@ struct bpf_map_def_pvt SEC("maps") aws_tcp_reset_pending = {
 	.pinning = PIN_GLOBAL_NS,
 };
 
+// policy_events_drop_count_map: failed bpf_ringbuf_output for DENY events.
+// key 0 = ingress, key 1 = egress; per-CPU u64, summed by userspace. Defined here
+// (not in the events binary) so that changing it does not recreate conntrack.
+struct bpf_map_def_pvt SEC("maps") policy_events_drop_count_map = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 2,
+	.pinning = PIN_GLOBAL_NS,
+};
+
 // This binary has no programs, so the kernel never sees a license for it. The
 // section is here because aws-ebpf-sdk-go refuses to load an object without
 // one ("license missing in elf file").
