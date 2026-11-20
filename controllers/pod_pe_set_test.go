@@ -18,18 +18,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// updatePEs and deletePE drive the shared utils writers against r's pod identifier map.
-func updatePEs(r *PolicyEndpointsReconciler, podIdentifier, parent string, parentPEList []string) {
-	utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToPolicyEndpointMap,
+// setPEs and deleteParent drive the shared utils writers against r's pod identifier map.
+func setPEs(r *PolicyEndpointsReconciler, podIdentifier, parent string, parentPEList []string) {
+	utils.SetParentPolicyEndpoints(&r.podIdentifierToPolicyEndpointMap,
 		&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parent, parentPEList)
 }
 
-func deletePE(r *PolicyEndpointsReconciler, podIdentifier string, policyEndpoint utils.PolicyEndpointRef) {
-	utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
-		&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, policyEndpoint)
+func deleteParent(r *PolicyEndpointsReconciler, podIdentifier, parent string) {
+	utils.DeleteParentFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
+		&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parent)
 }
 
-// TestPodIdentifierPEList_MatchesSetModel drives random update/delete sequences, with slice names
+// TestPodIdentifierPEList_MatchesSetModel drives random set/delete sequences, with slice names
 // shared across parents, and requires the stored list to equal a set model after every step:
 // sorted by name then parent, free of duplicates, and keyed by the parent as well as the name.
 func TestPodIdentifierPEList_MatchesSetModel(t *testing.T) {
@@ -52,26 +52,29 @@ func TestPodIdentifierPEList_MatchesSetModel(t *testing.T) {
 		for step := 0; step < 500; step++ {
 			id := identifiers[rng.Intn(len(identifiers))]
 			parent := fmt.Sprintf("np-%d", rng.Intn(4))
-			if rng.Intn(3) == 0 {
-				ref := utils.PolicyEndpointRef{Name: names[rng.Intn(len(names))], Parent: parent}
-				deletePE(r, id, ref)
-				delete(model[id], ref)
-				if len(model[id]) == 0 {
-					delete(model, id)
+			for ref := range model[id] {
+				if ref.Parent == parent {
+					delete(model[id], ref)
 				}
+			}
+			if rng.Intn(3) == 0 {
+				deleteParent(r, id, parent)
 			} else {
 				// parentPEList comes from a List, so names are distinct and unordered.
 				list := make([]string, 0, 8)
 				for _, i := range rng.Perm(len(names))[:1+rng.Intn(8)] {
 					list = append(list, names[i])
 				}
-				updatePEs(r, id, parent, list)
+				setPEs(r, id, parent, list)
 				if model[id] == nil {
 					model[id] = map[utils.PolicyEndpointRef]bool{}
 				}
 				for _, name := range list {
 					model[id][utils.PolicyEndpointRef{Name: name, Parent: parent}] = true
 				}
+			}
+			if len(model[id]) == 0 {
+				delete(model, id)
 			}
 			for _, id := range identifiers {
 				want, wantOK := model[id]
@@ -103,7 +106,7 @@ func TestPodIdentifierPEList_ConcurrentReaders(t *testing.T) {
 				default:
 					r.ArePoliciesAvailableInLocalCache("a@ns")
 					if v, ok := r.podIdentifierToPolicyEndpointMap.Load("a@ns"); ok {
-						// Read every element, as deriveIngressAndEgressFirewallRules does, so an
+						// Read every element, as a programming pass does, so an
 						// in-place write to a published list is reported by -race, and check the
 						// snapshot is still sorted.
 						refs := v.([]utils.PolicyEndpointRef)
@@ -120,9 +123,9 @@ func TestPodIdentifierPEList_ConcurrentReaders(t *testing.T) {
 	}
 	for i := 0; i < 2000; i++ {
 		parent := fmt.Sprintf("parent-%d", i%3)
-		updatePEs(r, "a@ns", parent, []string{fmt.Sprintf("np-%d", i%50), fmt.Sprintf("np-%d", (i+1)%50)})
+		setPEs(r, "a@ns", parent, []string{fmt.Sprintf("np-%d", i%50), fmt.Sprintf("np-%d", (i+1)%50)})
 		if i%3 == 0 {
-			deletePE(r, "a@ns", utils.PolicyEndpointRef{Name: fmt.Sprintf("np-%d", i%50), Parent: parent})
+			deleteParent(r, "a@ns", parent)
 		}
 	}
 	close(stop)
@@ -192,12 +195,12 @@ func TestFirewallRules_IndependentOfPolicyEndpointOrder(t *testing.T) {
 	}
 }
 
-// BenchmarkUpdatePodIdentifierToPEMap models the KWOK scale test: an identifier already
-// tracking 600 PEs (5 policies x 120 slices), updated with one policy's 120 slices, once per
-// selected pod in that policy's PEs.
+// BenchmarkSetParentPolicyEndpoints models the KWOK scale test: an identifier already
+// tracking 600 PEs (5 policies x 120 slices), set again to one policy's unchanged 120 slices,
+// as every reconcile of that policy does.
 //
-//	go test ./controllers/ -run '^$' -bench BenchmarkUpdatePodIdentifierToPEMap -benchmem
-func BenchmarkUpdatePodIdentifierToPEMap(b *testing.B) {
+//	go test ./controllers/ -run '^$' -bench BenchmarkSetParentPolicyEndpoints -benchmem
+func BenchmarkSetParentPolicyEndpoints(b *testing.B) {
 	slicesOf := func(np int) []string {
 		var names []string
 		for i := 0; i < 120; i++ {
@@ -207,13 +210,13 @@ func BenchmarkUpdatePodIdentifierToPEMap(b *testing.B) {
 	}
 	r := NewPolicyEndpointsReconciler(nil, benchNodeIP, nil, false)
 	for np := 0; np < 5; np++ {
-		updatePEs(r, "bulk-6b8f9c7d4@npa-kwok", fmt.Sprintf("wide-peer-%d", np), slicesOf(np))
+		setPEs(r, "bulk-6b8f9c7d4@npa-kwok", fmt.Sprintf("wide-peer-%d", np), slicesOf(np))
 	}
 	parent := slicesOf(2)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		updatePEs(r, "bulk-6b8f9c7d4@npa-kwok", "wide-peer-2", parent)
+		setPEs(r, "bulk-6b8f9c7d4@npa-kwok", "wide-peer-2", parent)
 	}
 }
 

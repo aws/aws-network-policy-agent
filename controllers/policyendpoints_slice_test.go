@@ -394,10 +394,8 @@ func TestPolicySlices_NodeScopedCleanup(t *testing.T) {
 			"reconciling one namespace must not program another's identifier")
 		assert.ElementsMatch(t, []string{"np-1-aaaaa"}, fx.identifierSlices(here),
 			"a same-named policy in another namespace is not a sibling and must not be recorded as one")
-		_, crossNamespace := fx.r.policyEndpointSelectorMap.Load(EndpointRequest{
-			Endpoint: types.NamespacedName{Name: "np-1-bbbbb", Namespace: fixtureNamespace}, Parent: "np-1"})
-		assert.False(t, crossNamespace,
-			"the foreign slice must not gain a selector entry keyed to this namespace")
+		assert.Equal(t, []string{here}, fx.r.localIdentifiers(fixtureNamespace, "np-1"),
+			"the foreign slice's pods must not be recorded under this namespace's policy")
 	})
 
 }
@@ -500,7 +498,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
 	t.Run("a policy re-sliced under new names retains only its current slices", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{allow("192.168.90.1/32")}
@@ -528,7 +525,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("the delete event for an already-replaced slice changes nothing", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{allow("192.168.90.1/32")}
@@ -623,7 +619,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("deleting every slice of a policy leaves no entry behind", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 

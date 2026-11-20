@@ -12,7 +12,9 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -37,7 +39,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		// Simulate prior state: pod was previously targeted by this CPE
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeName, parentCNP), []npatypes.Pod{
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: "192.168.95.108"},
 		})
 
@@ -70,7 +72,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		// Mock: Get for the CPE (used by cleanupClusterPolicyPod if it runs)
+		// Mock: Get for the CPE (used by the reconcile and by programming)
 		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 			func(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
 				if cpObj, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint); ok {
@@ -80,7 +82,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), cpe)
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpe.Name, cpe.Spec.PolicyRef.Name))
 		assert.Nil(t, err)
 
 		// Verify: stale pod identifier removed from lookup map
@@ -122,7 +124,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeName, parentCNP), []npatypes.Pod{
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
 		})
 
@@ -146,7 +148,13 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), cpe)
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ types.NamespacedName, obj *policyk8sawsv1.ClusterPolicyEndpoint, _ ...client.GetOption) error {
+				*obj = *cpe
+				return nil
+			}).AnyTimes()
+
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpe.Name, cpe.Spec.PolicyRef.Name))
 		assert.Nil(t, err, "reconcile should not error when the stale pod has no eBPF context to clear")
 
 		// No eBPF map update should have been attempted for the context-less pod.
@@ -172,7 +180,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		// Prior state: identifier holds BOTH CPEs of the same parent CNP.
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeA, cpeB))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeA, parentCNP), []npatypes.Pod{
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
 		})
 
@@ -200,7 +208,13 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), &cpeAObj)
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
+			DoAndReturn(func(_ context.Context, key types.NamespacedName, obj *policyk8sawsv1.ClusterPolicyEndpoint, _ ...client.GetOption) error {
+				*obj = makeCPE(key.Name)
+				return nil
+			}).AnyTimes()
+
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpeAObj.Name, cpeAObj.Spec.PolicyRef.Name))
 		assert.Nil(t, err)
 
 		// The whole entry must be gone — no sibling CPE left behind.
@@ -263,7 +277,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 				},
 			},
 		}
-		err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), currentCPE)
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(currentCPE.Name, currentCPE.Spec.PolicyRef.Name))
 		assert.Nil(t, err)
 
 		// Reconcile #2: label removed — CPE still exists but selects no pods.
@@ -281,7 +295,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		}
 		mockBpf.CallLog = nil
 		mockBpf.LastClusterPolicyIngressRules = nil
-		err = reconciler.reconcileClusterPolicyEndpoint(context.TODO(), currentCPE)
+		err = reconciler.reconcileAndProgram(context.TODO(), cpeRequest(currentCPE.Name, currentCPE.Spec.PolicyRef.Name))
 		assert.Nil(t, err)
 
 		_, ok := reconciler.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
@@ -337,7 +351,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		// Pre-populate: pod was already a target in prior reconcile
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeName, parentCNP), []npatypes.Pod{
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: "192.168.95.108"},
 		})
 
@@ -359,7 +373,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 			},
 		).AnyTimes()
 
-		err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), cpe)
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpe.Name, cpe.Spec.PolicyRef.Name))
 		assert.Nil(t, err)
 
 		// Pod is still a target — should remain in the map
@@ -372,7 +386,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 	})
 }
 
-func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T) {
+func TestReconcileClusterPolicyEndpoint_DeletedCPEIdentifiersCleanedUp(t *testing.T) {
 	nodeIP := "192.168.70.108"
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -390,7 +404,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 		// Simulate prior state
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeName, parentCNP), []npatypes.Pod{
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
 		})
 
@@ -402,28 +416,24 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 			},
 		).AnyTimes()
 
-		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(cpeName, parentCNP))
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
+			Return(apierrors.NewNotFound(schema.GroupResource{Resource: "clusterpolicyendpoints"}, "")).AnyTimes()
+
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpeName, parentCNP))
 		assert.Nil(t, err)
 
 		// Verify cleanup
 		_, ok := reconciler.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier)
 		assert.False(t, ok, "pod identifier should be removed during delete cleanup")
 
-		selectorMapSize := 0
-		reconciler.ClusterPolicyEndpointSelectorMap.Range(func(_, _ any) bool {
-			selectorMapSize++
-			return true
-		})
-		assert.Equal(t, 0, selectorMapSize, "ClusterPolicyEndpointSelectorMap should be empty after cleanup")
+		_, ok = reconciler.clusterNetworkPolicyToLocalPodsMap.Load(parentCNP)
+		assert.False(t, ok, "nothing may stay recorded for the deleted CNP")
 	})
 
-	// When the deleted CPE has siblings under the same parent, the sibling names are in
-	// parentCPEList but the deleted CPE's name isn't — so the scrub loop in
-	// deriveTargetPodsForParentCNP wouldn't remove it. Its dangling name keeps the
-	// identifier entry alive and defeats the HasBPFContext guard: cleanupClusterPolicyPod
-	// takes the "sibling still applies" branch and calls UpdateClusterPolicyEbpfMaps on
-	// a detached context. cleanUpClusterPolicyEndpoint must scrub resourceName from every
-	// affected identifier explicitly.
+	// When the deleted CPE has siblings under the same parent, the identifier stays selected
+	// and never goes stale, so only setting the parent's entries to its live slices removes
+	// the deleted name. A dangling name would keep the identifier tracked for a CPE that no
+	// longer exists.
 	t.Run("deleted CPE removed from identifier map when siblings exist", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
 		mockBpf := &ebpf.MockBpfClient{}
@@ -440,11 +450,9 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 
 		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, deletedCPE, siblingCPE))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-		podEntry := []npatypes.Pod{
-			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: policyk8sawsv1.NetworkAddress(podIP)},
-		}
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(deletedCPE, parentCNP), podEntry)
-		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(siblingCPE, parentCNP), podEntry)
+		seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
+			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
+		})
 
 		// List returns only the sibling — the deleted CPE is gone from etcd. The sibling still
 		// selects the pod on this node, so the identifier entry must survive the cleanup.
@@ -479,7 +487,16 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 			},
 		).AnyTimes()
 
-		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(deletedCPE, parentCNP))
+		mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
+			DoAndReturn(func(_ context.Context, key types.NamespacedName, obj *policyk8sawsv1.ClusterPolicyEndpoint, _ ...client.GetOption) error {
+				if key.Name == siblingCPE {
+					*obj = siblingObj
+					return nil
+				}
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "clusterpolicyendpoints"}, key.Name)
+			}).AnyTimes()
+
+		err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(deletedCPE, parentCNP))
 		assert.Nil(t, err)
 
 		// deletedCPE must be gone, but the entry must stay alive because siblingCPE still applies.
@@ -514,7 +531,7 @@ func TestReconcileClusterPolicyEndpoint_TransientListErrorDoesNotClearEbpf(t *te
 
 	reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, refsOf(parentCNP, cpeName))
 	reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
-	reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeRequest(cpeName, parentCNP), []npatypes.Pod{
+	seedClusterPolicyLocalPods(reconciler, mockBpf, parentCNP, []npatypes.Pod{
 		{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
 	})
 
@@ -535,7 +552,13 @@ func TestReconcileClusterPolicyEndpoint_TransientListErrorDoesNotClearEbpf(t *te
 		},
 	}
 
-	err := reconciler.reconcileClusterPolicyEndpoint(context.TODO(), cpe)
+	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpoint{}), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ types.NamespacedName, obj *policyk8sawsv1.ClusterPolicyEndpoint, _ ...client.GetOption) error {
+			*obj = *cpe
+			return nil
+		}).AnyTimes()
+
+	err := reconciler.reconcileAndProgram(context.TODO(), cpeRequest(cpe.Name, cpe.Spec.PolicyRef.Name))
 	assert.ErrorIs(t, err, listErr, "reconcile must surface List failure so controller-runtime requeues")
 
 	// eBPF state MUST be untouched — no Deny-rule clear, no pod-state flip.

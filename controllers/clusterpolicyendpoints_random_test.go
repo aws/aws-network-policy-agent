@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -244,7 +243,8 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 			if !st[s].present {
 				continue
 			}
-			err := fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(apiName(s), parentOf(s)))
+			fx.markDeleting(apiName(s))
+			err := fx.reconcileUnder(apiName(s), parentOf(s))
 			if err != nil && !injected() {
 				t.Errorf("cleanup of %s in progress failed with no failure injected: %v", apiName(s), err)
 			}
@@ -402,17 +402,17 @@ func runRandomizedClusterPolicy(t *testing.T, seed int64) {
 	}
 	check("after drain")
 
-	// Nothing is tracked for CPEs or parents that no longer exist.
-	fx.r.ClusterPolicyEndpointSelectorMap.Range(func(k, _ interface{}) bool {
-		if cpe, ok := fx.store[k.(EndpointRequest).Endpoint.Name]; !ok || cpe.Spec.PolicyRef.Name != k.(EndpointRequest).Parent {
-			t.Errorf("selector map still tracks deleted CPE %s", k)
-		}
-		return true
-	})
+	// Nothing is tracked for parents that no longer exist.
 	parents := map[string]bool{}
 	for _, cpe := range fx.store {
 		parents[cpe.Spec.PolicyRef.Name] = true
 	}
+	fx.r.clusterNetworkPolicyToLocalPodsMap.Range(func(k, _ interface{}) bool {
+		if !parents[k.(string)] {
+			t.Errorf("local pod map still tracks %s, which has no CPEs", k)
+		}
+		return true
+	})
 	fx.r.clusterNetworkPolicyToPodIdentifierMap.Range(func(k, _ interface{}) bool {
 		if !parents[k.(string)] {
 			t.Errorf("parent map still tracks %s, which has no CPEs", k)

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -19,15 +20,14 @@ import (
 // Guards for behaviour that was previously only exercised incidentally: each case below
 // fails if the one line it covers is reverted or deleted.
 
-// TestPolicySlices_SiblingSelectorEntriesAreUnioned covers the prior-pod lookup in
-// deriveTargetPodsForParentNP reading every slice of the parent rather than only the
-// reconciled one.
+// TestPolicySlices_NewSliceFindsPodsDeselectedInTheSameUpdate covers the prior-pod lookup being
+// per parent policy rather than per slice.
 //
 // A policy re-sliced in a single update can present a brand new slice to the reconciler
-// first. That slice has no selector entry of its own, so a pod dropped in the same update is
-// only discoverable under a sibling's entry -- reduce the lookup to resourceName and the pod
-// keeps its enforcement with nothing left to ever clean it up.
-func TestPolicySlices_SiblingSelectorEntriesAreUnioned(t *testing.T) {
+// first. A pod dropped in the same update was recorded only under the parent's earlier
+// reconcile, so a lookup keyed by the reconciled slice would miss it and the pod would keep
+// its enforcement with nothing left to ever clean it up.
+func TestPolicySlices_NewSliceFindsPodsDeselectedInTheSameUpdate(t *testing.T) {
 	gone := identifierOf("gone-aaa")
 	fx := newPEFixture(t)
 	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
@@ -46,27 +46,23 @@ func TestPolicySlices_SiblingSelectorEntriesAreUnioned(t *testing.T) {
 			ingress: []ruleRef{allow("192.168.90.2/32")}},
 	)
 
-	// The new slice is reconciled first, before it has a selector entry of its own.
+	// The new slice is reconciled first, before any reconcile has recorded it.
 	require.NoError(t, fx.reconcile("np-1-bbbbb"))
 
 	state, ok := fx.podState(gone)
 	require.True(t, ok,
-		"the deselected pod is only reachable through the sibling slice's selector entry, so it must still be cleaned up")
+		"the deselected pod is only known from the parent's earlier reconcile, so it must still be cleaned up")
 	assert.Equal(t, ebpf.DEFAULT_ALLOW, state,
 		"no policy selects the deselected pod anymore, so it must be back on its baseline")
 }
 
-// TestPolicySlices_DepartingSliceEntryHoldsOnlyFailedCleanups covers the selector-map write
-// at the end of cleanUpPolicyEndpoint, on the path the delete-flow tests never reach: a
-// sibling slice of the same parent survives the delete.
-//
-// While a cleanup is owed the departing slice's entry must hold exactly the pods that failed,
-// not the full set it held before, and once the retry succeeds the entry must go. Dropping
-// the write leaves the pre-delete set behind for good.
-func TestPolicySlices_DepartingSliceEntryHoldsOnlyFailedCleanups(t *testing.T) {
+// TestPolicySlices_FailedCleanupIsRetriedUntilItSucceeds covers a slice delete whose cleanup
+// fails for one identifier while a sibling slice of the same parent survives. The failed
+// identifier stays queued and is programmed by the next pass; the parent's record no longer
+// lists the deleted slice either way.
+func TestPolicySlices_FailedCleanupIsRetriedUntilItSucceeds(t *testing.T) {
 	writeFailed := errors.New("map write failed")
 	stuck, other := identifierOf("stuck-aaa"), identifierOf("other-aaa")
-	departing := EndpointRequest{Endpoint: types.NamespacedName{Name: "np-1-aaaaa", Namespace: fixtureNamespace}, Parent: "np-1"}
 
 	fx := newPEFixture(t)
 	fx.setSlices(
@@ -78,33 +74,28 @@ func TestPolicySlices_DepartingSliceEntryHoldsOnlyFailedCleanups(t *testing.T) {
 			ingress: []ruleRef{allow("192.168.90.2/32")}},
 	)
 	fx.reconcileAll()
-
-	// Both pods start out recorded under the departing slice.
-	before := selectorEntry(t, fx, departing)
-	require.ElementsMatch(t, []string{stuck, other}, identifiersOf(before))
+	require.ElementsMatch(t, []string{stuck, other}, fx.r.localIdentifiers(fixtureNamespace, "np-1"))
 
 	// np-1-aaaaa is deleted while np-1-bbbbb remains, and stuck's cleanup fails.
 	fx.bpf.UpdateEbpfMapsErrFor = map[string]error{stuck: writeFailed}
 	fx.deleteSlice("np-1-aaaaa")
 	fx.reset()
 	require.ErrorIs(t, fx.reconcileDeleted("np-1-aaaaa"), writeFailed)
+	assert.Equal(t, []string{other}, fx.r.localIdentifiers(fixtureNamespace, "np-1"),
+		"the parent's record reflects its surviving slice even while a cleanup is owed")
+	assert.Equal(t, []string{"np-1-bbbbb"}, fx.identifierSlices(other))
+	assert.Equal(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(other), "the failure for stuck does not hold back other")
 
-	owed := selectorEntry(t, fx, departing)
-	assert.ElementsMatch(t, []string{stuck}, identifiersOf(owed),
-		"the departing slice's entry must be narrowed to the pods still owed a cleanup")
-
-	// On recovery the retry repeats only that pod, and the entry is removed.
+	// On recovery the queued identifier is programmed by the next pass, and only it.
 	fx.bpf.UpdateEbpfMapsErrFor = nil
 	fx.reset()
-	require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+	require.NoError(t, fx.r.drainProgramming(context.TODO()))
 	fx.assertRulesCleared(stuck)
-	_, stillTracked := fx.r.policyEndpointSelectorMap.Load(departing)
-	assert.False(t, stillTracked,
-		"with nothing left owed, the departing slice must not keep an entry")
+	assert.NotContains(t, fx.bpf.IngressByIdentifier, other)
 }
 
-// TestPolicySlices_DeriveErrorDoesNotAbortRemainingIdentifiers covers the record-and-continue
-// on a rule-derivation failure in reconcilePolicyEndpoint, and the podIdentifier context the
+// TestPolicySlices_DeriveErrorDoesNotAbortRemainingIdentifiers covers one identifier's failed
+// rule derivation not stopping the programming of the others, and the podIdentifier context the
 // error carries.
 //
 // Two identifiers each additionally track a slice of another policy whose read fails, so both
@@ -177,7 +168,7 @@ func TestPolicySlices_LatencyObservedAfterFailedCleanup(t *testing.T) {
 // TestPolicySlices_TeardownLatencyOnlyForRealTeardowns covers the guard on
 // policyTearDownLatency. Every node reconciles every PE, so observing unconditionally adds a
 // series per PE name per node -- and GenerateName means those names are never reused and the
-// series are never removed. A pass that tore nothing down, or failed, must not record.
+// series are never removed. A pass that queued nothing to program must not record.
 func TestPolicySlices_TeardownLatencyOnlyForRealTeardowns(t *testing.T) {
 	t.Run("a delete with nothing to tear down records no sample", func(t *testing.T) {
 		fx := newPEFixture(t)
@@ -188,7 +179,7 @@ func TestPolicySlices_TeardownLatencyOnlyForRealTeardowns(t *testing.T) {
 			"an empty delete pass is not a teardown measurement")
 	})
 
-	t.Run("a failed delete records no sample, and the retry that succeeds does", func(t *testing.T) {
+	t.Run("a delete records one sample once programming applies it, retries included", func(t *testing.T) {
 		writeFailed := errors.New("map write failed")
 		stuck := identifierOf("stuck-aaa")
 		fx := newPEFixture(t)
@@ -202,21 +193,42 @@ func TestPolicySlices_TeardownLatencyOnlyForRealTeardowns(t *testing.T) {
 		before := teardownSampleCount(t, "np-2-aaaaa")
 		require.ErrorIs(t, fx.reconcileDeleted("np-2-aaaaa"), writeFailed)
 		assert.Equal(t, uint64(0), teardownSampleCount(t, "np-2-aaaaa")-before,
-			"a failed teardown must not be measured as one")
+			"the teardown is not applied until its identifier is programmed")
 
 		fx.bpf.UpdateEbpfMapsErrFor = nil
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		assert.Equal(t, uint64(1), teardownSampleCount(t, "np-2-aaaaa")-before,
+			"the retry that applies the teardown records it")
+		fx.assertRulesCleared(stuck)
+
 		require.NoError(t, fx.reconcileDeleted("np-2-aaaaa"))
 		assert.Equal(t, uint64(1), teardownSampleCount(t, "np-2-aaaaa")-before,
-			"the pass that actually tore the policy down must be measured")
+			"a repeat with nothing left to queue is not another measurement")
 	})
 }
 
-// selectorEntry reads one PolicyEndpoint's recorded pods, failing if it has none.
-func selectorEntry(t *testing.T, fx *peFixture, key EndpointRequest) []npatypes.Pod {
-	t.Helper()
-	v, ok := fx.r.policyEndpointSelectorMap.Load(key)
-	require.True(t, ok, "expected a selector entry for %v", key)
-	return v.([]npatypes.Pod)
+// TestPolicySlices_SetupLatencyEndsWhenEveryIdentifierIsProgrammed covers what
+// policySetupLatency measures: from the reconcile of a PolicyEndpoint until every pod
+// identifier it queued on this node is programmed.
+func TestPolicySlices_SetupLatencyEndsWhenEveryIdentifierIsProgrammed(t *testing.T) {
+	writeFailed := errors.New("map write failed")
+	web, api := identifierOf("web-aaa"), identifierOf("api-aaa")
+	fx := newPEFixture(t)
+	fx.setSlices(sliceSpec{name: "np-3-aaaaa", parent: "np-3",
+		pods:    []podRef{localPod("web-aaa", "10.1.1.2"), localPod("api-aaa", "10.1.1.3")},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+
+	fx.bpf.UpdateEbpfMapsErrFor = map[string]error{api: writeFailed}
+	before := setupSampleCount(t, "np-3-aaaaa")
+	require.ErrorIs(t, fx.reconcile("np-3-aaaaa"), writeFailed)
+	assert.Equal(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(web), "web is programmed")
+	assert.Equal(t, uint64(0), setupSampleCount(t, "np-3-aaaaa")-before,
+		"api is not programmed yet, so the PolicyEndpoint is not applied")
+
+	fx.bpf.UpdateEbpfMapsErrFor = nil
+	require.NoError(t, fx.r.drainProgramming(context.TODO()))
+	assert.Equal(t, uint64(1), setupSampleCount(t, "np-3-aaaaa")-before,
+		"the retry that programs the last identifier records the sample")
 }
 
 // identifiersOf returns the distinct identifiers of pods. The recorded set is the parent's
@@ -236,61 +248,24 @@ func identifiersOf(pods []npatypes.Pod) []string {
 	return out
 }
 
-// teardownSampleCount reads the teardown summary for one PolicyEndpoint name. Reading creates
-// the child if absent, which is harmless here: the assertions compare sample counts, and an
-// unobserved child reports zero.
 func teardownSampleCount(t *testing.T, peName string) uint64 {
+	return summarySampleCount(t, policyTearDownLatency, peName)
+}
+
+func setupSampleCount(t *testing.T, peName string) uint64 {
+	return summarySampleCount(t, policySetupLatency, peName)
+}
+
+// summarySampleCount reads a latency summary for one PolicyEndpoint name. Reading creates the
+// child if absent, which is harmless here: the assertions compare sample counts, and an
+// unobserved child reports zero.
+func summarySampleCount(t *testing.T, summary *prometheus.SummaryVec, peName string) uint64 {
 	t.Helper()
-	obs, err := policyTearDownLatency.GetMetricWithLabelValues(peName, fixtureNamespace)
+	obs, err := summary.GetMetricWithLabelValues(peName, fixtureNamespace)
 	require.NoError(t, err)
 	m := &dto.Metric{}
 	require.NoError(t, obs.(prometheus.Metric).Write(m))
 	return m.GetSummary().GetSampleCount()
-}
-
-// TestTrackFailedCleanups covers the shared helper both reconcilers commit through.
-func TestTrackFailedCleanups(t *testing.T) {
-	pod := func(name string) npatypes.Pod {
-		return npatypes.Pod{NamespacedName: nsName(name)}
-	}
-	targets := []npatypes.Pod{pod("web-aaa")}
-	failed := []npatypes.Pod{pod("stuck-aaa")}
-
-	t.Run("failed cleanups join the tracked set and contribute their identifiers", func(t *testing.T) {
-		ids := map[string]bool{identifierOf("web-aaa"): true}
-		pods, tracked := trackFailedCleanups(targets, failed, ids)
-
-		assert.ElementsMatch(t, []string{identifierOf("web-aaa"), identifierOf("stuck-aaa")}, identifiersOf(pods))
-		assert.True(t, tracked[identifierOf("stuck-aaa")],
-			"the failed pod's identifier must be committed so the retry derives it as stale again")
-		assert.True(t, tracked[identifierOf("web-aaa")])
-	})
-
-	t.Run("the caller's identifier map is not mutated", func(t *testing.T) {
-		ids := map[string]bool{identifierOf("web-aaa"): true}
-		_, _ = trackFailedCleanups(targets, failed, ids)
-
-		assert.Len(t, ids, 1, "the caller's identifier map must not gain the failed identifiers")
-	})
-
-	t.Run("the caller's target slice is not written through", func(t *testing.T) {
-		// Spare capacity is what makes a bare append write into the caller's own array, so
-		// asserting on len alone would never catch it: park a sentinel past len and check it
-		// survives.
-		withSpare := make([]npatypes.Pod, 2, 4)
-		withSpare[0], withSpare[1] = pod("web-aaa"), pod("sentinel-aaa")
-		caller := withSpare[:1]
-
-		_, _ = trackFailedCleanups(caller, failed, nil)
-
-		assert.Equal(t, "sentinel-aaa", withSpare[1].Name,
-			"the helper must clone before appending, or it overwrites what the caller still holds past len")
-	})
-
-	t.Run("a nil identifier map is usable", func(t *testing.T) {
-		_, tracked := trackFailedCleanups(nil, failed, nil)
-		assert.True(t, tracked[identifierOf("stuck-aaa")])
-	})
 }
 
 // TestAttachProbesForIdentifier covers the shared attach loop. Replicas of one workload share

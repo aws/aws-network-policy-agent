@@ -130,8 +130,8 @@ func (s peReuse) assertMoved(t *testing.T) {
 	}
 	assert.Equal(t, refsOf(reuseAlpha, s.alphaSibling), fx.identifierRefs(identifierOf("z-aaa")))
 	fx.assertIdentifierAbsent(identifierOf("old-aaa"))
-	_, tracked := fx.r.policyEndpointSelectorMap.Load(fx.request(s.x, reuseAlpha))
-	assert.False(t, tracked, "nothing may stay recorded for the name under alpha")
+	assert.Equal(t, []string{identifierOf("z-aaa")}, fx.r.localIdentifiers(fixtureNamespace, reuseAlpha),
+		"nothing may stay recorded under alpha for the moved name's pods")
 	got, _ := fx.parentIdentifiers(reuseAlpha, fixtureNamespace)
 	assert.Equal(t, []string{identifierOf("z-aaa")}, got)
 }
@@ -154,7 +154,7 @@ func TestPolicyEndpointNameReuse_AnyOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newPEReuse(t)
 			for _, req := range tt.order(s) {
-				require.NoError(t, s.fx.r.reconcile(context.TODO(), req), "%v", req)
+				require.NoError(t, s.fx.r.reconcileAndProgram(context.TODO(), req), "%v", req)
 			}
 			s.assertMoved(t)
 		})
@@ -201,16 +201,13 @@ func TestPolicyEndpointNameReuse_CleanupRetry(t *testing.T) {
 		s := newPEReuse(t)
 		s.fx.bpf.UpdateEbpfMapsErrFor = map[string]error{oldPod: writeFailed}
 		require.ErrorIs(t, s.fx.reconcileUnder(s.x, reuseAlpha), writeFailed)
-		pods, tracked := s.fx.r.policyEndpointSelectorMap.Load(s.fx.request(s.x, reuseAlpha))
-		require.True(t, tracked, "the failed pod must stay tracked for the retry")
-		assert.Len(t, pods, 1)
 
 		s.fx.bpf.UpdateEbpfMapsErrFor = nil
 		require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
 		require.NoError(t, s.fx.reconcileUnder(s.x, reuseAlpha))
 		s.assertMoved(t)
-		_, tracked = s.fx.r.policyEndpointSelectorMap.Load(s.fx.request(s.x, reuseBeta))
-		assert.True(t, tracked, "the retry must not drop the new parent's tracking")
+		assert.ElementsMatch(t, []string{identifierOf("new-aaa"), identifierOf("sib-aaa")},
+			s.fx.r.localIdentifiers(fixtureNamespace, reuseBeta), "the retry must not drop the new parent's tracking")
 	})
 
 	t.Run("a cleanup that keeps failing does not block the new parent", func(t *testing.T) {
@@ -219,7 +216,10 @@ func TestPolicyEndpointNameReuse_CleanupRetry(t *testing.T) {
 		for range 3 {
 			require.ErrorIs(t, s.fx.reconcileUnder(s.x, reuseAlpha), writeFailed)
 		}
-		require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
+		// The old pod's retry still fails alongside beta's programming, and fails alone.
+		err := s.fx.reconcileUnder(s.x, reuseBeta)
+		require.ErrorIs(t, err, writeFailed)
+		assert.NotContains(t, err.Error(), identifierOf("new-aaa"))
 		assert.ElementsMatch(t, []string{"192.168.90.2/32", "192.168.90.3/32"}, s.fx.ingressCIDRs(identifierOf("new-aaa")))
 
 		s.fx.bpf.UpdateEbpfMapsErrFor = nil
@@ -273,8 +273,7 @@ func TestPolicyEndpointNameReuse_MovesBack(t *testing.T) {
 			fx.assertRulesCleared(identifierOf("old-aaa"))
 			assert.Equal(t, []string{"192.168.90.3/32"}, fx.ingressCIDRs(identifierOf("new-aaa")))
 			assert.Equal(t, refsOf(reuseAlpha, x), fx.identifierRefs(identifierOf("new-aaa")))
-			_, tracked := fx.r.policyEndpointSelectorMap.Load(fx.request(x, reuseBeta))
-			assert.False(t, tracked)
+			assert.Empty(t, fx.r.localIdentifiers(fixtureNamespace, reuseBeta))
 		})
 	}
 }
@@ -323,8 +322,8 @@ func (s cpeReuse) assertMoved(t *testing.T) {
 		assert.Equal(t, refsOf(reuseBeta, s.x, s.betaSibling), fx.identifierRefs(identifierOf(pod)), pod)
 	}
 	fx.assertIdentifierAbsent(identifierOf("old-aaa"))
-	_, tracked := fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest(s.x, reuseAlpha))
-	assert.False(t, tracked, "nothing may stay recorded for the name under alpha")
+	assert.Equal(t, []string{identifierOf("z-aaa")}, fx.r.localIdentifiers(reuseAlpha),
+		"nothing may stay recorded under alpha for the moved name's pods")
 	got, _ := fx.parentIdentifiers(reuseAlpha)
 	assert.Equal(t, []string{identifierOf("z-aaa")}, got)
 }
@@ -347,7 +346,7 @@ func TestClusterPolicyEndpointNameReuse_AnyOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newCPEReuse(t)
 			for _, req := range tt.order(s) {
-				require.NoError(t, s.fx.r.reconcile(context.TODO(), req), "%v", req)
+				require.NoError(t, s.fx.r.reconcileAndProgram(context.TODO(), req), "%v", req)
 			}
 			s.assertMoved(t)
 		})
@@ -400,15 +399,13 @@ func TestClusterPolicyEndpointNameReuse_CleanupRetry(t *testing.T) {
 	s := newCPEReuse(t)
 	s.fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{identifierOf("old-aaa"): writeFailed}
 	require.ErrorIs(t, s.fx.reconcileUnder(s.x, reuseAlpha), writeFailed)
-	_, tracked := s.fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest(s.x, reuseAlpha))
-	require.True(t, tracked, "the failed pod must stay tracked for the retry")
 
 	s.fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 	require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
 	require.NoError(t, s.fx.reconcileUnder(s.x, reuseAlpha))
 	s.assertMoved(t)
-	_, tracked = s.fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest(s.x, reuseBeta))
-	assert.True(t, tracked, "the retry must not drop the new parent's tracking")
+	assert.ElementsMatch(t, []string{identifierOf("new-aaa"), identifierOf("sib-aaa")},
+		s.fx.r.localIdentifiers(reuseBeta), "the retry must not drop the new parent's tracking")
 }
 
 func TestClusterPolicyEndpointNameReuse_SharedPodKeepsOnlyNewDeny(t *testing.T) {

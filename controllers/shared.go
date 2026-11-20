@@ -3,8 +3,6 @@ package controllers
 import (
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
@@ -12,41 +10,13 @@ import (
 )
 
 // Helpers shared by the PolicyEndpoint and ClusterPolicyEndpoint reconcilers. Both follow the
-// same shape -- derive the pods a policy selects, clean up the ones it no longer does, attach
-// probes for what remains -- so the pieces that carry no controller-specific state live here
-// once rather than being kept in step by hand in both files.
+// same shape -- record what a policy selects, queue the affected pod identifiers, then attach
+// and program each identifier -- so the pieces that carry no controller-specific state live
+// here once rather than being kept in step by hand in both files.
 
-// trackFailedCleanups returns the pods to commit as this policy's tracked set, and the
-// identifier set to commit alongside them.
-//
-// The tracked set is the pods the policy still programs plus the pods whose cleanup failed.
-// Committing the failures keeps them discoverable, so the next reconcile derives exactly those
-// as stale again and retries only them; dropping them would lose the failure, because the
-// retry derives its cleanup list from what was committed.
-//
-// Neither input is mutated: targetPods is cloned before the append so a full backing array
-// cannot be written through, and the identifier map is cloned before the failures are added.
-func trackFailedCleanups(targetPods, failedCleanups []npatypes.Pod,
-	clusterWidePodIdentifiers map[string]bool) ([]npatypes.Pod, map[string]bool) {
-
-	trackedPods := append(slices.Clone(targetPods), failedCleanups...)
-
-	trackedPodIdentifiers := maps.Clone(clusterWidePodIdentifiers)
-	if trackedPodIdentifiers == nil {
-		// maps.Clone(nil) is nil, which cannot be assigned to below.
-		trackedPodIdentifiers = make(map[string]bool, len(failedCleanups))
-	}
-	for _, pod := range failedCleanups {
-		trackedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
-	}
-	return trackedPods, trackedPodIdentifiers
-}
-
-// attachOutcome counts what attachProbesForIdentifier did, so a caller can tell a pass that
-// only skipped from one that attached nothing at all.
+// attachOutcome counts what attachProbesForIdentifier skipped, so a caller can tell a pass that
+// only skipped from one that failed.
 type attachOutcome struct {
-	// attached is the number of pods whose probes are now in place.
-	attached int
 	// skipped is the number of pods whose attach cannot be retried into success.
 	skipped int
 }
@@ -94,7 +64,6 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 			continue
 		}
 
-		outcome.attached++
 		log().Debugf("eBPF probes in place for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 	return outcome, attachErr

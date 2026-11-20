@@ -8,6 +8,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMaxConcurrentReconcilesFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"one worker by default", nil, 1},
+		{"set", []string{"--max-concurrent-reconciles=4"}, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet("agent", pflag.ContinueOnError)
+			var cfg ControllerConfig
+			cfg.BindFlags(fs)
+			require.NoError(t, fs.Parse(tt.args))
+			assert.Equal(t, tt.want, cfg.MaxConcurrentReconciles)
+		})
+	}
+}
+
 func TestEnableTCPResetOnDenyFlag(t *testing.T) {
 	tests := []struct {
 		name string

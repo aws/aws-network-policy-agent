@@ -1,13 +1,10 @@
 package controllers
 
 import (
-	"context"
 	"errors"
 	"testing"
 
-	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
-	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -195,7 +192,7 @@ func TestPolicySlices_DeleteFlowFailureHandling(t *testing.T) {
 	})
 }
 
-// TestPolicySlices_AttachFailureHandling covers configureeBPFProbes. GetPodIdentifier strips
+// TestPolicySlices_AttachFailureHandling covers the programming pass's attach. GetPodIdentifier strips
 // the last name segment, so replicas of one workload share an identifier and the single pair
 // of eBPF maps behind it. One replica failing to attach must therefore not stop the others
 // from attaching, nor stop the shared maps from being written for the ones that did -- or a
@@ -270,11 +267,9 @@ func TestPolicySlices_AttachFailureHandling(t *testing.T) {
 	})
 }
 
-// TestPolicySlices_DeleteFlowProgrammingFailure covers the delete path when the call that
-// updates the pods the parent still selects fails while there is nothing to clean up, so
-// failedCleanups is empty. The departing PE's selector entry must be removed rather than
-// written as an empty set: nothing is owed a retry, and the entry is keyed by a PE that no
-// longer exists.
+// TestPolicySlices_DeleteFlowProgrammingFailure covers a slice delete whose reprogramming of
+// a pod the parent still selects fails. The deleted slice stops contributing right away, and
+// the retry programs the pod from the surviving sibling alone.
 func TestPolicySlices_DeleteFlowProgrammingFailure(t *testing.T) {
 	writeFailed := errors.New("map write failed")
 	resident := identifierOf("resident-aaa")
@@ -301,50 +296,33 @@ func TestPolicySlices_DeleteFlowProgrammingFailure(t *testing.T) {
 	require.ErrorIs(t, fx.reconcileDeleted("np-1-aaaaa"), writeFailed,
 		"the failure must be returned so the request requeues")
 
-	departed := fx.request("np-1-aaaaa", "np-1")
-	_, tracked := fx.r.policyEndpointSelectorMap.Load(departed)
-	assert.False(t, tracked,
-		"with no failed cleanups to retry, the deleted PE's entry must be removed, not stored empty")
+	assert.Equal(t, []string{"np-1-bbbbb"}, fx.identifierSlices(resident),
+		"the deleted slice stops contributing even while programming is owed")
 
-	// The retry succeeds and leaves nothing behind for the departed slice.
+	// The retry succeeds and leaves only the sibling's rules.
 	fx.bpf.UpdateEbpfMapsErrFor = nil
 	fx.reset()
 	require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
-	_, tracked = fx.r.policyEndpointSelectorMap.Load(departed)
-	assert.False(t, tracked)
+	assert.Equal(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(resident))
 }
 
-// TestPolicySlices_PriorPodsDedupedByIdentity covers deriveTargetPodsForParentNP reading a
-// parent's prior pods from every one of its slices. A StatefulSet pod keeps its name across
-// recreation but not its address, so the same pod can be recorded under two slices with
-// different PodIPs. Deduping on the whole struct would keep both copies, and
-// getPodListToBeCleanedUp matches on NamespacedName, so the pod would be cleaned up twice.
-func TestPolicySlices_PriorPodsDedupedByIdentity(t *testing.T) {
+// TestPolicySlices_LocalPodsDedupedByIdentity covers a parent's selected pods being recorded
+// by identity. A StatefulSet pod keeps its name across recreation but not its address, so two
+// slices can list the same pod with different PodIPs; it is one pod, attached once.
+func TestPolicySlices_LocalPodsDedupedByIdentity(t *testing.T) {
 	fx := newPEFixture(t)
 	fx.setSlices(
 		sliceSpec{name: "np-1-aaaaa", parent: "np-1",
-			pods:    []podRef{localPod("other-aaa", "10.1.1.9")},
+			pods:    []podRef{localPod("web-0", "10.1.1.5")},
 			ingress: []ruleRef{allow("192.168.90.1/32")}},
 		sliceSpec{name: "np-1-bbbbb", parent: "np-1",
-			pods:    []podRef{localPod("other-aaa", "10.1.1.9")},
+			pods:    []podRef{localPod("web-0", "10.1.1.7")},
 			ingress: []ruleRef{allow("192.168.90.2/32")}},
 	)
+	fx.reconcileAll()
 
-	// web-0 is no longer selected by either slice, but both still record it from the
-	// reconciles that did -- each with the address it had at the time.
 	web0 := types.NamespacedName{Name: "web-0", Namespace: fixtureNamespace}
-	for name, ip := range map[string]string{"np-1-aaaaa": "10.1.1.5", "np-1-bbbbb": "10.1.1.7"} {
-		fx.r.policyEndpointSelectorMap.Store(fx.request(name, "np-1"),
-			[]npatypes.Pod{{NamespacedName: web0, PodIP: policyk8sawsv1.NetworkAddress(ip)}})
-	}
-
-	_, _, podsToBeCleanedUp, _, _, err := fx.r.deriveTargetPodsForParentNP(
-		context.TODO(), "np-1", fixtureNamespace, "np-1-aaaaa")
-	require.NoError(t, err)
-
-	assert.Len(t, podsToBeCleanedUp, 1,
-		"a pod recorded under two slices with different IPs is one pod, and is cleaned up once")
-	if len(podsToBeCleanedUp) > 0 {
-		assert.Equal(t, web0, podsToBeCleanedUp[0].NamespacedName)
-	}
+	pods := fx.r.localPods(fixtureNamespace, "np-1")
+	require.Len(t, pods, 1, "a pod listed by two slices with different IPs is one pod")
+	assert.Equal(t, web0, pods[0].NamespacedName)
 }

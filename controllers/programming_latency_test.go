@@ -1,17 +1,15 @@
 package controllers
 
 import (
-	"context"
+	"sync"
 	"testing"
 	"time"
 
-	policyendpoint "github.com/aws/aws-network-policy-agent/api/v1alpha1"
-	mock_client "github.com/aws/aws-network-policy-agent/mocks/controller-runtime/client"
-	"github.com/golang/mock/gomock"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // histSampleCount reads the cumulative sample count of a package-level
@@ -25,233 +23,206 @@ func histSampleCount(t *testing.T, h prometheus.Histogram) uint64 {
 	return m.GetHistogram().GetSampleCount()
 }
 
-func newPEWithTriggerTime(name, namespace, triggerTime string) *policyendpoint.PolicyEndpoint {
-	pe := &policyendpoint.PolicyEndpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+func triggerAnnotations(triggerTime string) map[string]string {
+	if triggerTime == "" {
+		return nil
 	}
-	if triggerTime != "" {
-		pe.Annotations = map[string]string{LastChangeTriggerTimeAnnotation: triggerTime}
-	}
-	return pe
+	return map[string]string{LastChangeTriggerTimeAnnotation: triggerTime}
 }
 
-func TestObservePolicyProgrammingLatency(t *testing.T) {
+func TestChangeTriggerTime(t *testing.T) {
 	now := time.Now()
+	startedAt := now.Add(-1 * time.Hour)
 	fresh := now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
 	fresher := now.Add(-1 * time.Second).UTC().Format(time.RFC3339Nano)
 	beforeStart := now.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-	future := now.Add(1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	pe1 := EndpointRequest{Endpoint: types.NamespacedName{Name: "pe-1", Namespace: "ns"}, Parent: "np"}
+	pe2 := EndpointRequest{Endpoint: types.NamespacedName{Name: "pe-2", Namespace: "ns"}, Parent: "np"}
+	pe1UnderOtherParent := EndpointRequest{Endpoint: pe1.Endpoint, Parent: "other-np"}
 
-	type observeCall struct {
-		pe      *policyendpoint.PolicyEndpoint
-		outcome policyProgrammingOutcome
+	type call struct {
+		req         EndpointRequest
+		triggerTime string
 	}
-	obs := func(pe *policyendpoint.PolicyEndpoint) observeCall {
-		return observeCall{pe: pe, outcome: programmingLanded}
-	}
-
 	tests := []struct {
 		name     string
-		calls    []observeCall
-		observed uint64 // expected number of new observations
+		calls    []call
+		consumed int
 	}{
+		{name: "no annotations", calls: []call{{pe1, ""}}, consumed: 0},
+		{name: "unparseable annotation", calls: []call{{pe1, "not-a-timestamp"}}, consumed: 0},
+		{name: "annotation predates agent start (restart guard)", calls: []call{{pe1, beforeStart}}, consumed: 0},
+		{name: "fresh annotation consumed once", calls: []call{{pe1, fresh}}, consumed: 1},
 		{
-			name:     "no annotations",
-			calls:    []observeCall{obs(newPEWithTriggerTime("pe-1", "ns", ""))},
-			observed: 0,
+			name:     "repeat reconcile with unchanged annotation is skipped (issue #644)",
+			calls:    []call{{pe1, fresh}, {pe1, fresh}, {pe1, fresh}},
+			consumed: 1,
 		},
 		{
-			name:     "unparseable annotation",
-			calls:    []observeCall{obs(newPEWithTriggerTime("pe-1", "ns", "not-a-timestamp"))},
-			observed: 0,
+			name:     "changed annotation consumed again",
+			calls:    []call{{pe1, fresh}, {pe1, fresh}, {pe1, fresher}},
+			consumed: 2,
 		},
 		{
-			name:     "annotation predates agent start (restart guard)",
-			calls:    []observeCall{obs(newPEWithTriggerTime("pe-1", "ns", beforeStart))},
-			observed: 0,
+			name:     "same annotation on different PEs consumed per PE",
+			calls:    []call{{pe1, fresh}, {pe2, fresh}},
+			consumed: 2,
 		},
 		{
-			name:     "fresh annotation observed once",
-			calls:    []observeCall{obs(newPEWithTriggerTime("pe-1", "ns", fresh))},
-			observed: 1,
-		},
-		{
-			name: "repeat reconcile with unchanged annotation is skipped (issue #644)",
-			calls: []observeCall{
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-			},
-			observed: 1,
-		},
-		{
-			name: "changed annotation observed again",
-			calls: []observeCall{
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-				obs(newPEWithTriggerTime("pe-1", "ns", fresher)),
-			},
-			observed: 2,
-		},
-		{
-			name: "same annotation on different PEs observed per PE",
-			calls: []observeCall{
-				obs(newPEWithTriggerTime("pe-1", "ns", fresh)),
-				obs(newPEWithTriggerTime("pe-2", "ns", fresh)),
-			},
-			observed: 2,
-		},
-		{
-			name: "negative latency (clock skew) skipped but consumed",
-			calls: []observeCall{
-				obs(newPEWithTriggerTime("pe-1", "ns", future)),
-				obs(newPEWithTriggerTime("pe-1", "ns", future)),
-			},
-			observed: 0,
-		},
-		{
-			name: "programming failure leaves trigger time unconsumed for the pass that lands it",
-			// The retry that finally programs the change reports the full time, retry delay
-			// included; dropping it would hide exactly the slow recover-after-failure cases.
-			calls: []observeCall{
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
-			},
-			observed: 1,
-		},
-		{
-			name: "repeated failures observe once, on the pass that lands",
-			calls: []observeCall{
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingLanded},
-			},
-			observed: 1,
-		},
-		{
-			name: "new annotation after programming failure is observed",
-			calls: []observeCall{
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresh), outcome: programmingDeferred},
-				{pe: newPEWithTriggerTime("pe-1", "ns", fresher), outcome: programmingLanded},
-			},
-			observed: 1,
+			name:     "a name that moves to another parent is consumed again",
+			calls:    []call{{pe1, fresh}, {pe1UnderOtherParent, fresh}},
+			consumed: 2,
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &PolicyEndpointsReconciler{
-				trackerStartTime: now.Add(-1 * time.Hour),
-			}
-			before := histSampleCount(t, policyProgrammingLatency)
+			var consumedTimes sync.Map
+			consumed := 0
 			for _, c := range tt.calls {
-				r.observePolicyProgrammingLatency(c.pe, c.outcome)
+				if _, ok := changeTriggerTime(triggerAnnotations(c.triggerTime), startedAt, c.req, &consumedTimes); ok {
+					consumed++
+				}
 			}
-			assert.Equal(t, tt.observed, histSampleCount(t, policyProgrammingLatency)-before)
+			assert.Equal(t, tt.consumed, consumed)
 		})
 	}
 }
 
-func TestObservePolicyProgrammingLatency_CleanupResetsTracking(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	mockClient := mock_client.NewMockClient(mockCtrl)
-	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).Return(nil).AnyTimes()
+func newTestLatencyTracker() (*programmingLatencyTracker, prometheus.Histogram) {
+	histogram := prometheus.NewHistogram(prometheus.HistogramOpts{Name: "test_programming_latency_seconds"})
+	return newProgrammingLatencyTracker(histogram), histogram
+}
 
-	now := time.Now()
-	fresh := now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
-	r := &PolicyEndpointsReconciler{k8sClient: mockClient, trackerStartTime: now.Add(-1 * time.Hour)}
-	pe := newPEWithTriggerTime("pe-1", "ns", fresh)
+// pass runs one successful programming pass for podIdentifier.
+func pass(tracker *programmingLatencyTracker, podIdentifier string, wrote bool) {
+	tracker.finish(podIdentifier, tracker.begin(podIdentifier), wrote)
+}
+
+func TestProgrammingLatencyTracker(t *testing.T) {
+	triggeredAt := time.Now().Add(-2 * time.Second)
+
+	t.Run("one sample once every queued identifier is programmed", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns", "b@ns"})
+
+		pass(tracker, "a@ns", true)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram), "b@ns has not landed yet")
+		pass(tracker, "b@ns", true)
+		assert.Equal(t, uint64(1), histSampleCount(t, histogram))
+
+		pass(tracker, "a@ns", true)
+		pass(tracker, "b@ns", true)
+		assert.Equal(t, uint64(1), histSampleCount(t, histogram), "later passes do not re-observe a landed change")
+		assert.Empty(t, tracker.pending, "nothing is left pending")
+	})
+
+	t.Run("a failed pass defers the sample to the retry that lands it", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns"})
+
+		// Failed passes call begin but never finish.
+		tracker.begin("a@ns")
+		tracker.begin("a@ns")
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram))
+
+		pass(tracker, "a@ns", true)
+		require.Equal(t, uint64(1), histSampleCount(t, histogram))
+		m := &dto.Metric{}
+		require.NoError(t, histogram.Write(m))
+		assert.GreaterOrEqual(t, m.GetHistogram().GetSampleSum(), 2.0, "the sample covers the time since the trigger, retries included")
+	})
+
+	t.Run("a change with nothing written on this node is consumed without a sample", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns", "b@ns"})
+
+		pass(tracker, "a@ns", false)
+		pass(tracker, "b@ns", false)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram))
+		assert.Empty(t, tracker.pending)
+	})
+
+	t.Run("one identifier writing is enough for the change to be measured", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns", "b@ns"})
+
+		pass(tracker, "a@ns", true)
+		pass(tracker, "b@ns", false)
+		assert.Equal(t, uint64(1), histSampleCount(t, histogram))
+	})
+
+	t.Run("a change that queued nothing is not tracked", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, nil)
+		assert.Empty(t, tracker.pending)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram))
+	})
+
+	t.Run("a change tracked during a pass waits for the next pass", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		landing := tracker.begin("a@ns")
+		tracker.track(triggeredAt, []string{"a@ns"})
+		tracker.finish("a@ns", landing, true)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram), "the pass began before the change was queued")
+
+		pass(tracker, "a@ns", true)
+		assert.Equal(t, uint64(1), histSampleCount(t, histogram))
+	})
+
+	t.Run("two changes landed by one pass record one sample each", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns"})
+		tracker.track(triggeredAt.Add(time.Second), []string{"a@ns"})
+
+		pass(tracker, "a@ns", true)
+		assert.Equal(t, uint64(2), histSampleCount(t, histogram))
+	})
+
+	t.Run("an identifier that never lands holds a bounded number of changes", func(t *testing.T) {
+		tracker, _ := newTestLatencyTracker()
+		for i := 0; i < 3*maxPendingChangesPerIdentifier; i++ {
+			tracker.track(triggeredAt, []string{"stuck@ns"})
+		}
+		assert.Len(t, tracker.pending["stuck@ns"], maxPendingChangesPerIdentifier)
+	})
+
+	t.Run("negative latency (clock skew) is skipped", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(time.Now().Add(time.Hour), []string{"a@ns"})
+
+		pass(tracker, "a@ns", true)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram))
+		assert.Empty(t, tracker.pending, "a skewed change is still consumed")
+	})
+}
+
+// A reconcile for a slice that no longer belongs to the requested parent forgets the trigger
+// time consumed under that parent, so a recreated slice is observed again, and leaves the
+// entry under the slice's new parent alone.
+func TestReconcile_DepartingSliceForgetsItsTriggerTime(t *testing.T) {
+	fx := newPEFixture(t)
+	// After the reconciler started, or the restart guard ignores it.
+	fresh := time.Now().UTC().Format(time.RFC3339Nano)
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "beta",
+		pods:    []podRef{localPod("web-aaa", "10.1.1.1")},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+	pe := fx.store["np-1-aaaaa"]
+	pe.Annotations = triggerAnnotations(fresh)
+	fx.store["np-1-aaaaa"] = pe
+
+	alpha, beta := fx.request("np-1-aaaaa", "alpha"), fx.request("np-1-aaaaa", "beta")
+	fx.r.lastObservedTriggerTimes.Store(alpha, fresh)
 
 	before := histSampleCount(t, policyProgrammingLatency)
-	r.observePolicyProgrammingLatency(pe, programmingLanded)
-	r.observePolicyProgrammingLatency(pe, programmingLanded) // duplicate, skipped
+	require.NoError(t, fx.reconcileUnder("np-1-aaaaa", "beta"))
 	assert.Equal(t, uint64(1), histSampleCount(t, policyProgrammingLatency)-before)
 
-	// the real cleanup path must delete the tracking entry
-	err := r.cleanUpPolicyEndpoint(context.TODO(), peRequestOf(pe))
-	assert.NoError(t, err)
+	require.NoError(t, fx.reconcileUnder("np-1-aaaaa", "alpha"))
+	_, tracked := fx.r.lastObservedTriggerTimes.Load(alpha)
+	assert.False(t, tracked, "the departed parent's entry must be forgotten")
+	_, tracked = fx.r.lastObservedTriggerTimes.Load(beta)
+	assert.True(t, tracked, "the new parent's entry must survive the old parent's reconcile")
 
-	// a recreated PE with a fresh annotation is observed again
-	r.observePolicyProgrammingLatency(pe, programmingLanded)
-	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before)
-}
-
-func TestObserveClusterPolicyProgrammingLatency(t *testing.T) {
-	now := time.Now()
-	fresh := now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
-	fresher := now.Add(-1 * time.Second).UTC().Format(time.RFC3339Nano)
-	freshest := now.Add(-500 * time.Millisecond).UTC().Format(time.RFC3339Nano)
-
-	r := &ClusterPolicyEndpointsReconciler{trackerStartTime: now.Add(-1 * time.Hour)}
-	cpe := &policyendpoint.ClusterPolicyEndpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "cpe-1",
-			Annotations: map[string]string{LastChangeTriggerTimeAnnotation: fresh},
-		},
-	}
-
-	before := histSampleCount(t, clusterPolicyProgrammingLatency)
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded) // duplicate, skipped
-	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
-
-	cpe.Annotations[LastChangeTriggerTimeAnnotation] = fresher
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingDeferred) // not landed yet: left unconsumed
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)   // the pass that lands it observes
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded)   // now consumed, so not re-observed
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
-
-	cpe.Annotations[LastChangeTriggerTimeAnnotation] = freshest
-	r.observeClusterPolicyProgrammingLatency(cpe, programmingLanded) // changed annotation, observed
-	assert.Equal(t, uint64(3), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
-}
-
-// Trigger times are tracked per (slice, parent), so a name that moves to another parent is
-// observed again, and the old parent's cleanup leaves the new parent's entry alone.
-func TestObservePolicyProgrammingLatency_KeyedByParent(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	mockClient := mock_client.NewMockClient(mockCtrl)
-	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.PolicyEndpointList{}), gomock.Any()).Return(nil).AnyTimes()
-
-	now := time.Now()
-	r := &PolicyEndpointsReconciler{k8sClient: mockClient, trackerStartTime: now.Add(-1 * time.Hour)}
-	fresh := now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
-	alpha := newPEWithTriggerTime("pe-1", "ns", fresh)
-	alpha.Spec.PolicyRef.Name = "alpha"
-	beta := alpha.DeepCopy()
-	beta.Spec.PolicyRef.Name = "beta"
-
-	before := histSampleCount(t, policyProgrammingLatency)
-	r.observePolicyProgrammingLatency(alpha, programmingLanded)
-	r.observePolicyProgrammingLatency(beta, programmingLanded)
-	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before)
-
-	assert.NoError(t, r.cleanUpPolicyEndpoint(context.TODO(), peRequestOf(alpha)))
-	r.observePolicyProgrammingLatency(beta, programmingLanded)
-	assert.Equal(t, uint64(2), histSampleCount(t, policyProgrammingLatency)-before, "beta's entry must survive alpha's cleanup")
-}
-
-func TestObserveClusterPolicyProgrammingLatency_KeyedByParent(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	mockClient := mock_client.NewMockClient(mockCtrl)
-	mockClient.EXPECT().List(gomock.Any(), gomock.AssignableToTypeOf(&policyendpoint.ClusterPolicyEndpointList{}), gomock.Any()).Return(nil).AnyTimes()
-
-	now := time.Now()
-	r := &ClusterPolicyEndpointsReconciler{k8sClient: mockClient, trackerStartTime: now.Add(-1 * time.Hour)}
-	alpha := &policyendpoint.ClusterPolicyEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "cpe-1",
-		Annotations: map[string]string{LastChangeTriggerTimeAnnotation: now.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)}}}
-	alpha.Spec.PolicyRef.Name = "alpha"
-	beta := alpha.DeepCopy()
-	beta.Spec.PolicyRef.Name = "beta"
-
-	before := histSampleCount(t, clusterPolicyProgrammingLatency)
-	r.observeClusterPolicyProgrammingLatency(alpha, programmingLanded)
-	r.observeClusterPolicyProgrammingLatency(beta, programmingLanded)
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before)
-
-	assert.NoError(t, r.cleanUpClusterPolicyEndpoint(context.TODO(), cpeRequest(alpha.Name, "alpha")))
-	r.observeClusterPolicyProgrammingLatency(beta, programmingLanded)
-	assert.Equal(t, uint64(2), histSampleCount(t, clusterPolicyProgrammingLatency)-before, "beta's entry must survive alpha's cleanup")
+	require.NoError(t, fx.reconcileUnder("np-1-aaaaa", "beta"))
+	assert.Equal(t, uint64(1), histSampleCount(t, policyProgrammingLatency)-before, "a resync does not re-observe")
 }

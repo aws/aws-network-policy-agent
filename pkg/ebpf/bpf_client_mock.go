@@ -24,7 +24,11 @@ func NewMockBpfClient() *bpfClient {
 	}
 }
 
+// MockBpfClient is safe for concurrent use. Tests read its fields directly, which is safe once
+// the calls under test have returned.
 type MockBpfClient struct {
+	mu sync.Mutex
+
 	// AttacheBPFProbes returns this as "first pod of the identifier on this node"
 	AttachFirstPodInPodIdentifier bool
 	// podConfirmedLive passed to the most recent AttacheBPFProbes call
@@ -57,6 +61,12 @@ type MockBpfClient struct {
 	// podIdentifiers whose probes are detached: HasBPFContext reports false for them and
 	// every map write for them fails, as with the real client.
 	PodIdentifiersWithoutBPFContext map[string]bool
+
+	// podIdentifiers with an attached pod. HasBPFContext reports true only for these, as the
+	// real client registers a context on attach; set AllIdentifiersHaveBPFContext to report it
+	// for every identifier instead.
+	attachedIdentifiers          map[string]bool
+	AllIdentifiersHaveBPFContext bool
 
 	// Pods already deleted on the node. AttacheBPFProbes skips them, as production does;
 	// attaching any other pod registers its identifier's context.
@@ -111,6 +121,8 @@ type PodStateKey struct {
 // Reset clears every recorded call so a test can establish steady state through a first
 // reconcile and then assert only on what a later reconcile did.
 func (m *MockBpfClient) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = nil
 	m.LastAttachPodConfirmedLive = false
 	m.AttachedPods = nil
@@ -134,6 +146,8 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")
 	m.LastAttachPodConfirmedLive = podConfirmedLive
 	if m.AttacheBPFProbesErr != nil {
@@ -152,16 +166,22 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
-		m.ForgetIdentifier(podIdentifier)
+		m.forgetIdentifierLocked(podIdentifier)
 	}
 	if m.AttachedPods == nil {
 		m.AttachedPods = map[types.NamespacedName]bool{}
 	}
 	m.AttachedPods[pod] = true
+	if m.attachedIdentifiers == nil {
+		m.attachedIdentifiers = map[string]bool{}
+	}
+	m.attachedIdentifiers[podIdentifier] = true
 	return m.AttachFirstPodInPodIdentifier, nil
 }
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "DeleteBPFProbes")
 	return nil
 }
@@ -172,6 +192,12 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 // DeleteBPFProbes does not tear anything down, because the mock has no notion of a shared
 // program FD, so tests decide when an identifier really went away.
 func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forgetIdentifierLocked(podIdentifier)
+}
+
+func (m *MockBpfClient) forgetIdentifierLocked(podIdentifier string) {
 	delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
 	for k := range m.podStateSeeded {
 		if k.PodIdentifier == podIdentifier {
@@ -186,6 +212,8 @@ func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {
 }
 
 func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "UpdateEbpfMaps")
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
@@ -204,6 +232,8 @@ func (m *MockBpfClient) UpdateEbpfMaps(podIdentifier string, ingressFirewallRule
 }
 
 func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingressFirewallRules []fwrp.EbpfFirewallRules, egressFirewallRules []fwrp.EbpfFirewallRules) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "UpdateClusterPolicyEbpfMaps")
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
@@ -222,6 +252,8 @@ func (m *MockBpfClient) UpdateClusterPolicyEbpfMaps(podIdentifier string, ingres
 }
 
 func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, state int, updateIngress bool, updateEgress bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "UpdatePodStateEbpfMaps")
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
@@ -235,11 +267,15 @@ func (m *MockBpfClient) UpdatePodStateEbpfMaps(podIdentifier string, key int, st
 }
 
 func (m *MockBpfClient) ReAttachEbpfProbes() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "ReAttachEbpfProbes")
 	return nil
 }
 
 func (m *MockBpfClient) GetNetworkPolicyMode() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.NetworkPolicyMode == "" {
 		return "standard"
 	}
@@ -247,6 +283,8 @@ func (m *MockBpfClient) GetNetworkPolicyMode() string {
 }
 
 func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "CreatePodStateEbpfEntryIfNotExists")
 	if err := m.contextErr(podIdentifier); err != nil {
 		return err
@@ -261,7 +299,38 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 }
 
 func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {
-	return !m.PodIdentifiersWithoutBPFContext[podIdentifier]
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
+		return false
+	}
+	return m.AllIdentifiersHaveBPFContext || m.attachedIdentifiers[podIdentifier]
+}
+
+// Snapshot returns the rules and pod state last written for podIdentifier, safe to call while
+// other goroutines use the mock.
+func (m *MockBpfClient) Snapshot(podIdentifier string) (ingress, egress, clusterIngress, clusterEgress []fwrp.EbpfFirewallRules, podState map[int]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	podState = map[int]int{}
+	for k, v := range m.PodStateByIdentifier {
+		if k.PodIdentifier == podIdentifier {
+			podState[k.MapKey] = v
+		}
+	}
+	return m.IngressByIdentifier[podIdentifier], m.EgressByIdentifier[podIdentifier],
+		m.ClusterPolicyIngressByIdentifier[podIdentifier], m.ClusterPolicyEgressByIdentifier[podIdentifier], podState
+}
+
+// AttachIdentifier registers a context for podIdentifier as if one of its pods had attached.
+func (m *MockBpfClient) AttachIdentifier(podIdentifier string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.PodIdentifiersWithoutBPFContext, podIdentifier)
+	if m.attachedIdentifiers == nil {
+		m.attachedIdentifiers = map[string]bool{}
+	}
+	m.attachedIdentifiers[podIdentifier] = true
 }
 
 func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int) {

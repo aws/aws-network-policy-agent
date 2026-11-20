@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
+	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -15,10 +16,8 @@ import (
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 )
 
-// The #686 fix: a failed eBPF map write must reach controller-runtime so the
-// reconcile is retried. Before this change reconcilePolicyEndpoint returned
-// nil, the reconcile was recorded as a success, and nothing on the node ever
-// retried the write.
+// The #686 fix: a failed eBPF map write must be returned so the write is retried; a
+// pass recorded as a success leaves nothing on the node to ever retry it.
 func TestReconcilePolicyEndpoint_MapWriteFailurePropagates(t *testing.T) {
 	fx := newPEFixture(t)
 	fx.bpf.UpdateEbpfMapsErr = fmt.Errorf("ingress map write: %w",
@@ -77,10 +76,10 @@ func TestReconcilePolicyEndpoint_OneFailingIdentifierDoesNotBlockTheRest(t *test
 		"the failing identifier must not be recorded as programmed")
 }
 
-// A skipped pod must not hide a real failure. configureeBPFProbes joins the per-pod attach
+// A skipped pod must not hide a real failure. A programming pass joins the per-pod attach
 // errors with the map-write error, and errors.Is matches when any arm of a join carries
-// ErrProbeAttachSkipped, so before skips were tracked separately one skipped pod turned an
-// ENOMEM map write into a Warn and a nil return, and nothing retried it. That is the #686
+// ErrProbeAttachSkipped, so a skip carried in the error would turn an ENOMEM map write into
+// a Warn and a nil return, and nothing would retry it. That is the #686
 // bug reached through the skip path.
 func TestReconcilePolicyEndpoint_SkipDoesNotMaskMapWriteFailure(t *testing.T) {
 	fx := newPEFixture(t)
@@ -276,9 +275,9 @@ func TestReconcilePolicyEndpoint_OneFailingIdentifierIsOrderIndependent(t *testi
 	}
 }
 
-// Cleanup writes are programming. A pass whose only work was cleanup leaves the target loop
-// empty, so counting just programmed identifiers would drop its sample, including the
-// cleanup-only retry that finally lands. cleanupPod has two writing arms and both must count.
+// Cleanup writes are programming. A change whose only work was cleanup selects nothing, so
+// counting just selected identifiers would drop its sample, including the cleanup-only retry
+// that finally lands. Both the baseline write and the remaining-policies write must count.
 func TestReconcilePolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -298,8 +297,9 @@ func TestReconcilePolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing.T) {
 			fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
 				pods:    []podRef{},
 				ingress: []ruleRef{allow("192.168.90.1/32")}})
-			fx.r.policyEndpointSelectorMap.Store(fx.request("np-1-aaaaa", "np-1"),
-				[]npatypes.Pod{{NamespacedName: web, PodIP: "10.1.1.1"}})
+			fx.r.networkPolicyToLocalPodsMap.Store(utils.GetNetworkPolicyIdentifier("np-1", fixtureNamespace),
+				map[string][]npatypes.Pod{identifier: {{NamespacedName: web, PodIP: "10.1.1.1"}}})
+			fx.bpf.AttachIdentifier(identifier)
 			if tt.otherSelector {
 				fx.r.podIdentifierToPolicyEndpointMap.Store(identifier, refsOf("np-2", "np-2-aaaaa"))
 			}
@@ -325,8 +325,9 @@ func TestReconcileClusterPolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing
 	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 		pods:    []podRef{},
 		ingress: []ruleRef{deny("192.168.90.1/32")}})
-	fx.r.ClusterPolicyEndpointSelectorMap.Store(cpeRequest("cnp-1-aaaaa", "cnp-1"),
-		[]npatypes.Pod{{NamespacedName: web, PodIP: "10.1.1.1"}})
+	fx.r.clusterNetworkPolicyToLocalPodsMap.Store("cnp-1",
+		map[string][]npatypes.Pod{identifierOf("web-aaa"): {{NamespacedName: web, PodIP: "10.1.1.1"}}})
+	fx.bpf.AttachIdentifier(identifierOf("web-aaa"))
 
 	cpe := fx.store["cnp-1-aaaaa"]
 	cpe.Annotations = map[string]string{
@@ -337,4 +338,73 @@ func TestReconcileClusterPolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing
 	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 	assert.Equal(t, uint64(1), histSampleCount(t, clusterPolicyProgrammingLatency)-before,
 		"cleanup wrote a map, so the pass landed the change and must be measured")
+}
+
+// A policy that selects a workload only through its replica on another node still applies to
+// the replica here, which shares the identifier's maps. When the policy stops selecting the
+// workload, the identifier is not reprogrammed: during a rollout NPC can drop the last old
+// replica before it lists the new pod, and reprogramming would reset a new pod that CNI ADD
+// programmed with the policy's rules to the baseline until NPC lists it. The refs are pruned,
+// so the next pass for the identifier drops the policy's rules.
+func TestReconcilePolicyEndpoint_DroppingARemoteOnlySelectionDoesNotReprogramTheLocalReplica(t *testing.T) {
+	web := identifierOf("web-aaa")
+	fx := newPEFixture(t)
+	// The local replica was attached by its CNI ADD; NPC lists only the remote one.
+	fx.bpf.AttachIdentifier(web)
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+		pods:    []podRef{remotePod("web-bbb", "10.2.2.2")},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+	assert.Empty(t, fx.bpf.IngressByIdentifier[web], "a policy that selects no pod here does not program the identifier")
+
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+		pods:    []podRef{},
+		ingress: []ruleRef{allow("192.168.90.1/32")}})
+	fx.reset()
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+	assert.Empty(t, fx.bpf.CallLog, "nothing is written for an identifier the policy never selected a pod of here")
+	assert.Empty(t, fx.identifierRefs(web), "the policy's refs for the identifier are gone")
+}
+
+func TestReconcileClusterPolicyEndpoint_DroppingARemoteOnlySelectionDoesNotReprogramTheLocalReplica(t *testing.T) {
+	web := identifierOf("web-aaa")
+	fx := newCPEFixture(t)
+	fx.bpf.AttachIdentifier(web)
+	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+		pods:    []podRef{remotePod("web-bbb", "10.2.2.2")},
+		ingress: []ruleRef{deny("192.168.90.1/32")}})
+	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+	assert.Empty(t, fx.bpf.ClusterPolicyIngressByIdentifier[web], "a policy that selects no pod here does not program the identifier")
+
+	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
+		pods:    []podRef{},
+		ingress: []ruleRef{deny("192.168.90.1/32")}})
+	fx.reset()
+	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+	assert.Empty(t, fx.bpf.CallLog, "nothing is written for an identifier the policy never selected a pod of here")
+	assert.Empty(t, fx.identifierRefs(web), "the policy's refs for the identifier are gone")
+}
+
+// A live PolicyEndpoint that selects a pod but carries no rules and no isolation still puts the
+// pod in the applied state with an allow-all entry in each direction. Only an identifier no live
+// PolicyEndpoint selects goes to the baseline, which in strict mode is deny.
+func TestProgramIdentifier_EmptyLivePolicyEndpointAllowsEverythingInStrictMode(t *testing.T) {
+	web := identifierOf("web-aaa")
+	fx := newPEFixture(t)
+	fx.bpf.NetworkPolicyMode = string(utils.Strict)
+	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+		pods: []podRef{localPod("web-aaa", "10.1.1.1")}})
+
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+
+	state, ok := fx.podState(web)
+	require.True(t, ok)
+	assert.Equal(t, ebpf.POLICIES_APPLIED, state)
+	assert.Equal(t, []string{"0.0.0.0/0"}, fx.ingressCIDRs(web))
+	assert.Equal(t, []string{"0.0.0.0/0"}, fx.egressCIDRs(web))
+
+	fx.deleteSlice("np-1-aaaaa")
+	require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+	state, _ = fx.podState(web)
+	assert.Equal(t, ebpf.DEFAULT_DENY, state, "with no live PolicyEndpoint the pod returns to the strict-mode baseline")
 }

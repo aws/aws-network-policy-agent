@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"sync"
@@ -39,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	networking "k8s.io/api/networking/v1"
@@ -93,8 +95,9 @@ var (
 	prometheusRegistered = false
 )
 
-func msSince(start time.Time) float64 {
-	return float64(time.Since(start)) / float64(time.Millisecond)
+// milliseconds returns d in fractional milliseconds.
+func milliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
 }
 
 func prometheusRegister() {
@@ -109,11 +112,13 @@ func prometheusRegister() {
 // NewPolicyEndpointsReconciler constructs new PolicyEndpointReconciler
 func NewPolicyEndpointsReconciler(k8sClient client.Client, nodeIP string, ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
 	r := &PolicyEndpointsReconciler{
-		k8sClient:        k8sClient,
-		nodeIP:           nodeIP,
-		ebpfClient:       ebpfClient,
-		enableIPv6:       enableIPv6,
-		trackerStartTime: time.Now(),
+		k8sClient:          k8sClient,
+		nodeIP:             nodeIP,
+		ebpfClient:         ebpfClient,
+		enableIPv6:         enableIPv6,
+		trackerStartTime:   time.Now(),
+		programQueue:       newProgrammingQueue(policyEndpointProgrammerName),
+		programmingLatency: newProgrammingLatencyTracker(policyProgrammingLatency),
 	}
 
 	prometheusRegister()
@@ -136,14 +141,27 @@ type PolicyEndpointsReconciler struct {
 	// last-change-trigger-time annotation value consumed, so each trigger
 	// time is observed at most once
 	lastObservedTriggerTimes sync.Map
-	// Maps pod Identifier to list of PolicyEndpoint resources ([]utils.PolicyEndpointRef)
+	programmingLatency       *programmingLatencyTracker
+	deleteCleanups           deleteCleanups
+
+	// What each NetworkPolicy selects, as of its last reconcile. Only the PolicyEndpoint
+	// reconcile writes these, on a single worker; the programming workers and the CNI RPC path
+	// read them concurrently.
+	//
+	// Maps a pod identifier to the live PolicyEndpoints ([]utils.PolicyEndpointRef) of every
+	// NetworkPolicy that selects a pod of that identifier on any node
 	podIdentifierToPolicyEndpointMap sync.Map
-	// Mutex for operations on PodIdentifierToPolicyEndpointMap
+	// Serializes writes to podIdentifierToPolicyEndpointMap
 	podIdentifierToPolicyEndpointMapMutex sync.Mutex
-	// Maps a PolicyEndpoint's EndpointRequest to a list of local pods
-	policyEndpointSelectorMap sync.Map
-	// Maps a Network Policy to list of selected pod Identifiers
+	// Maps a NetworkPolicy to the pod identifiers it selects on any node ([]string)
 	networkPolicyToPodIdentifierMap sync.Map
+	// Maps a NetworkPolicy to the pods it selects on this node, by pod identifier
+	// (map[string][]npatypes.Pod)
+	networkPolicyToLocalPodsMap sync.Map
+
+	// Pod identifiers whose eBPF maps need programming
+	programQueue priorityqueue.PriorityQueue[string]
+
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
 	enableIPv6 bool
@@ -153,7 +171,7 @@ type PolicyEndpointsReconciler struct {
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=policyendpoints/status,verbs=get
 
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req EndpointRequest) (ctrl.Result, error) {
-	log().Infof("Received a new reconcile request %v", req)
+	log().Debugf("Received a new reconcile request %v", req)
 	if err := r.reconcile(ctx, req); err != nil {
 		log().Errorf("Reconcile error: %v", err)
 		return ctrl.Result{}, err
@@ -161,484 +179,243 @@ func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req EndpointR
 	return ctrl.Result{}, nil
 }
 
+// reconcile is stage 1 for one slice event: it recomputes the slice's parent NetworkPolicy and
+// queues the identifiers to program. A slice that is gone, being deleted, or now owned by another
+// parent simply no longer contributes to req.Parent; its new parent has its own request.
 func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req EndpointRequest) error {
+	start := time.Now()
 	policyEndpoint := &policyk8sawsv1.PolicyEndpoint{}
+	live := true
 	if err := r.k8sClient.Get(ctx, req.Endpoint, policyEndpoint, client.UnsafeDisableDeepCopy); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.cleanUpPolicyEndpoint(ctx, req)
+		if !apierrors.IsNotFound(err) {
+			log().Errorf("Unable to get policy endpoint spec for policyendpoint %s: %v", req.Endpoint, err)
+			return err
 		}
-		log().Errorf("Unable to get policy endpoint spec for policyendpoint %s: %v", req.Endpoint, err)
+		live = false
+	} else if policyEndpoint.Spec.PolicyRef.Name != req.Parent || !policyEndpoint.DeletionTimestamp.IsZero() {
+		live = false
+	}
+	if !live {
+		r.lastObservedTriggerTimes.Delete(req)
+	}
+
+	queued, err := r.reconcileNetworkPolicy(ctx, req.Endpoint.Namespace, req.Parent, !live)
+	if err != nil {
 		return err
 	}
-	// A slice now owned by another parent is gone from req.Parent; its new parent has its own request
-	if policyEndpoint.Spec.PolicyRef.Name != req.Parent || !policyEndpoint.DeletionTimestamp.IsZero() {
-		return r.cleanUpPolicyEndpoint(ctx, req)
+	if live {
+		if triggeredAt, ok := changeTriggerTime(policyEndpoint.Annotations, r.trackerStartTime, req, &r.lastObservedTriggerTimes); ok {
+			r.programmingLatency.track(triggeredAt, queued)
+		}
 	}
-	return r.reconcilePolicyEndpoint(ctx, policyEndpoint)
+	// The PolicyEndpoint is set up or torn down on this node once every identifier it queued is
+	// programmed. Only a reconcile that queued work on this node is a measurement. Observing
+	// unconditionally would add a label series per PE name per node -- every node reconciles
+	// every PE, GenerateName means the names are never reused, and nothing ever removes a series.
+	latency := policySetupLatency
+	if !live {
+		latency = policyTearDownLatency
+	}
+	r.programmingLatency.trackFunc(start, queued, func(elapsed time.Duration) {
+		latency.WithLabelValues(req.Endpoint.Name, req.Endpoint.Namespace).Observe(milliseconds(elapsed))
+	})
+	queueIdentifiers(r.programQueue, queued)
+	log().Debugf("Reconciled NetworkPolicy %s/%s for %s: queued %d identifier(s)",
+		req.Endpoint.Namespace, req.Parent, req.Endpoint.Name, len(queued))
+	return nil
 }
 
-// cleanUpPolicyEndpoint removes the slice's contribution under req.Parent and reprograms the
-// parent's remaining slices. It touches only state recorded under req.Parent, so it is safe to
-// repeat and to run before or after the slice's reconcile under a new parent.
-func (r *PolicyEndpointsReconciler) cleanUpPolicyEndpoint(ctx context.Context, req EndpointRequest) error {
-	log().Infof("Clean Up PolicyEndpoint resources for %s under %s", req.Endpoint, req.Parent)
-
-	r.lastObservedTriggerTimes.Delete(req)
-
-	start := time.Now()
-
-	// Get all podIdentifiers since we need to decide if pinpath has to be deleted on local node
-	parentNP := req.Parent
-	resourceName := req.Endpoint.Name
-	resourceNamespace := req.Endpoint.Namespace
-	targetPods, podIdentifiers, podsToBeCleanedUp, parentPEList, clusterWidePodIdentifiers, err :=
-		r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+// reconcileNetworkPolicy recomputes what parentNP selects from its live PolicyEndpoints and
+// records it. It returns the pod identifiers whose maps on this node may have changed.
+// sliceDeleted reports that the reconcile is for a slice of parentNP that is gone.
+func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, namespace, parentNP string, sliceDeleted bool) ([]string, error) {
+	policyEndpoints, err := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, namespace)
 	if err != nil {
 		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
-		return err
+		return nil, err
+	}
+	names := lo.Map(policyEndpoints, func(pe policyk8sawsv1.PolicyEndpoint, _ int) string { return pe.Name })
+	selected, localPods := r.selectedPods(policyEndpoints)
+
+	for podIdentifier := range selected {
+		utils.SetParentPolicyEndpoints(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex,
+			podIdentifier, parentNP, names)
+	}
+	networkPolicyIdentifier := utils.GetNetworkPolicyIdentifier(parentNP, namespace)
+	stale := utils.DeriveStalePodIdentifiers(&r.networkPolicyToPodIdentifierMap, networkPolicyIdentifier, selected)
+	for _, podIdentifier := range stale {
+		utils.DeleteParentFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
+			&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP)
+		r.deleteCleanups.forgetParent(podIdentifier, parentNP)
 	}
 
-	// Remove the deleted PE from every identifier that recorded it under this parent. Derive
-	// prunes only identifiers that went stale, so one still selected via a sibling slice keeps
-	// this entry, and inserts are append-only. Uses the selector map's full prior set, not
-	// podsToBeCleanedUp, which omits pods a sibling still selects.
-	//
-	// A retry may see a smaller set than the first pass did, depending on what the entry
-	// holds by then, and DeletePolicyEndpointFromPodIdentifierMap is idempotent either way.
-	if priorPods, ok := r.policyEndpointSelectorMap.Load(req); ok {
-		for _, pod := range priorPods.([]npatypes.Pod) {
+	var priorLocalPods map[string][]npatypes.Pod
+	if v, ok := r.networkPolicyToLocalPodsMap.Load(networkPolicyIdentifier); ok {
+		priorLocalPods = v.(map[string][]npatypes.Pod)
+	}
+	commitPolicySelection(&r.networkPolicyToPodIdentifierMap, &r.networkPolicyToLocalPodsMap,
+		networkPolicyIdentifier, selected, localPods)
+
+	log().Debugf("NetworkPolicy %s/%s: %d PolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
+		namespace, parentNP, len(policyEndpoints), len(selected), len(localPods), len(stale))
+	queued := identifiersToProgram(r.ebpfClient, localPods, priorLocalPods)
+	r.deleteCleanups.record(parentNP, queued, sliceDeleted, localPods)
+	return queued, nil
+}
+
+// selectedPods returns every pod identifier the PolicyEndpoints select on any node, and their
+// selected pods on this node by identifier. Host-network pods are skipped: they have no veth to
+// attach to.
+func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv1.PolicyEndpoint) (map[string]bool, map[string][]npatypes.Pod) {
+	selected := make(map[string]bool)
+	localPods := make(map[string][]npatypes.Pod)
+	nodeIP := net.ParseIP(r.nodeIP)
+	for i := range policyEndpoints {
+		pe := &policyEndpoints[i]
+		ignored := 0
+		var firstIgnored types.NamespacedName
+		for _, pod := range pe.Spec.PodSelectorEndpoints {
+			// PolicyEndpoints only select pods in their own namespace.
+			if pod.Namespace != pe.Namespace {
+				if ignored == 0 {
+					firstIgnored = types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+				}
+				ignored++
+				continue
+			}
+			if string(pod.PodIP) == string(pod.HostIP) {
+				log().Debugf("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
+					pod.Name, pod.Namespace, pod.PodIP)
+				continue
+			}
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
-			utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
-				&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier,
-				utils.PolicyEndpointRef{Name: resourceName, Parent: parentNP})
+			selected[podIdentifier] = true
+			if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
+				localPods[podIdentifier] = append(localPods[podIdentifier], npatypes.Pod{
+					NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
+			}
+		}
+		if ignored > 0 {
+			log().Warnf("Ignored %d podSelectorEndpoints in PolicyEndpoint %s/%s with a different namespace (first: %s)",
+				ignored, pe.Namespace, pe.Name, firstIgnored)
 		}
 	}
-
-	log().Infof("cleanUpPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
-
-	// Program the pods this PE still selects and clean up the deselected ones, regardless of
-	// whether either step fails, so a failing cleanup does not strand the pods programmed in
-	// the same pass. The cleanup failures are tracked below so the retry repeats only them.
-	//
-	// Failures from the first call are a subset of targetPods, which trackedPods already
-	// carries, so they are deliberately not added to failedCleanups -- that set feeds the
-	// departing PE's selector entry, and a pod that failed to PROGRAM must not be recorded
-	// there as one of its prior pods or the retry would treat it as needing cleanup.
-	_, _, updateErr := r.updatePolicyEnforcementStatusForPods(ctx, parentNP, targetPods, podIdentifiers, false)
-	if updateErr != nil {
-		updateErr = fmt.Errorf("update active pods for policyendpoint %s: %w", resourceName, updateErr)
+	for podIdentifier, pods := range localPods {
+		localPods[podIdentifier] = uniquePods(pods)
 	}
-	failedCleanups, _, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, parentNP, podsToBeCleanedUp, podIdentifiers, true)
-	if cleanupErr != nil {
-		cleanupErr = fmt.Errorf("clean up deselected pods for policyendpoint %s: %w", resourceName, cleanupErr)
-	}
-	// Only a pass that actually tore something down, and succeeded at it, is a teardown
-	// measurement. Observing unconditionally would also add a label series per PE name per
-	// node -- every node reconciles every PE, GenerateName means the names are never reused,
-	// and nothing ever removes a series -- so empty and failed passes would grow cardinality
-	// without recording anything meaningful.
-	if updateErr == nil && cleanupErr == nil && (len(targetPods) > 0 || len(podsToBeCleanedUp) > 0) {
-		policyTearDownLatency.WithLabelValues(resourceName, resourceNamespace).Observe(msSince(start))
-	}
-
-	// Commit the pods this PE still programs plus the pods whose cleanup failed, with their
-	// identifiers, so the retry derives the failed ones as stale again and repeats only those.
-	trackedPods, trackedPodIdentifiers := trackFailedCleanups(targetPods, failedCleanups, clusterWidePodIdentifiers)
-	r.commitPolicyEndpointState(parentNP, resourceNamespace, trackedPods, trackedPodIdentifiers, parentPEList)
-
-	// Until every cleanup succeeds, keep this PE's selector entry holding the pods that failed
-	// so the retry finds them. commitPolicyEndpointState already stored/deleted the entries for
-	// the PEs in parentPEList; only touch this request's entry when the PE is not one of them,
-	// or we would clobber what commit just wrote.
-	err = errors.Join(updateErr, cleanupErr)
-	if !slices.Contains(parentPEList, resourceName) {
-		if len(failedCleanups) > 0 {
-			r.policyEndpointSelectorMap.Store(req, failedCleanups)
-		} else {
-			r.policyEndpointSelectorMap.Delete(req)
-		}
-	}
-
-	return err
+	return selected, localPods
 }
 
-// updatePolicyEnforcementStatusForPods runs cleanupPod over each pod and returns the pods
-// it failed on, so the caller can keep tracking them and retry only those on the next
-// reconcile.
-//
-// Despite the name, this is not cleanup-only: cleanUpPolicyEndpoint also calls it on
-// targetPods, the pods the parent policy still selects. For those, cleanupPod re-derives
-// the surviving rules and reprograms them, which is what drops the departing slice's
-// contribution while leaving the rest of the parent's policy in place.
-func (r *PolicyEndpointsReconciler) updatePolicyEnforcementStatusForPods(ctx context.Context, parentNP string,
-	targetPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, int, error) {
-	var failed []npatypes.Pod
-	var err error
-	cleaned := 0
-	// 1. If the pods are already deleted, we move on.
-	// 2. If the pods have another policy or policies active against them, we update the maps to purge the entries
-	//    introduced by the current policy.
-	// 3. If there are no more active policies against this pod, we update pod_state to default deny/allow
-	for _, targetPod := range targetPods {
-		podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
-		log().Infof("Updating Pod: Name: %s Namespace: %s PodIdentifier: %s", targetPod.Name, targetPod.Namespace, podIdentifier)
-
-		wrote, cleanupErr := r.cleanupPod(ctx, targetPod, parentNP, isDeleteFlow)
-		if cleanupErr != nil {
-			failed = append(failed, targetPod)
-			err = errors.Join(err, fmt.Errorf("pod %s/%s: %w",
-				targetPod.Namespace, targetPod.Name, cleanupErr))
-			// we don't want to return an error right away but instead attempt to clean up all the pods
-			// in the list before returning
-			continue
-		}
-		if wrote {
-			cleaned++
-		}
+// commitPolicySelection records what a policy selects, or forgets the policy once it selects nothing.
+func commitPolicySelection(policyToPodIdentifiers, policyToLocalPods *sync.Map, policyKey string,
+	selected map[string]bool, localPods map[string][]npatypes.Pod) {
+	if len(selected) == 0 {
+		policyToPodIdentifiers.Delete(policyKey)
+	} else {
+		policyToPodIdentifiers.Store(policyKey, slices.Sorted(maps.Keys(selected)))
 	}
-	return failed, cleaned, err
+	if len(localPods) == 0 {
+		policyToLocalPods.Delete(policyKey)
+	} else {
+		policyToLocalPods.Store(policyKey, localPods)
+	}
 }
 
-func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint) error {
-	log().Infof("Processing Policy Endpoint  Name: %s Namespace %s", policyEndpoint.Name, policyEndpoint.Namespace)
-	start := time.Now()
-
-	// Identify pods local to the node. PolicyEndpoint resource will include `HostIP` field and
-	// network policy agent relies on it to filter local pods
-	parentNP := policyEndpoint.Spec.PolicyRef.Name
-	resourceNamespace := policyEndpoint.Namespace
-	resourceName := policyEndpoint.Name
-
-	targetPods, podIdentifiers, podsToBeCleanedUp, parentPEList, clusterWidePodIdentifiers, err :=
-		r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
+// programIdentifier is stage 2 for one pod identifier. It brings the identifier's eBPF maps in
+// line with every NetworkPolicy recorded as selecting it, attaching probes for its selected pods
+// on this node first. Any failure, including an attach failure after the maps were written, is
+// returned so the identifier is retried.
+func (r *PolicyEndpointsReconciler) programIdentifier(ctx context.Context, podIdentifier string) error {
+	changes := r.programmingLatency.begin(podIdentifier)
+	pass, err := r.programIdentifierMaps(ctx, podIdentifier)
 	if err != nil {
-		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
+		log().Errorf("Programming network policies for podIdentifier %s failed, will retry: %v", podIdentifier, err)
 		return err
 	}
-
-	// Programming runs whether or not cleanup succeeded, so a failing cleanup does not hold
-	// back the other pods this policy selects. podIdentifiers has the pod identifiers of the
-	// targetPods from the derived PEs.
-	failedCleanups, cleaned, cleanupErr := r.updatePolicyEnforcementStatusForPods(ctx, parentNP, podsToBeCleanedUp, podIdentifiers, false)
-	if cleanupErr != nil {
-		cleanupErr = fmt.Errorf("clean up deselected pods for policyendpoint %s: %w", policyEndpoint.Name, cleanupErr)
+	// Pods that cannot attach yet are not retried, since retrying cannot help, but they are
+	// local and a later pass can still program them; that pass reports the latency.
+	if !pass.wrote && pass.skipped > 0 {
+		return nil
 	}
-
-	// Track the pods programmed below, so they can be cleaned up later, and the pods whose
-	// cleanup failed, so the retry still finds them and repeats only those.
-	trackedPods, trackedPodIdentifiers := trackFailedCleanups(targetPods, failedCleanups, clusterWidePodIdentifiers)
-	r.commitPolicyEndpointState(parentNP, resourceNamespace, trackedPods, trackedPodIdentifiers, parentPEList)
-
-	// Program the podIdentifiers local to the node.
-	programmed := 0
-	skipped := 0
-	var programmingErr error
-	for podIdentifier := range podIdentifiers {
-		// Derive Ingress IPs from the PolicyEndpoint
-		podNamespace, ok := utils.GetPodNamespaceFromPodIdentifier(podIdentifier)
-		if !ok {
-			programmingErr = errors.Join(programmingErr, fmt.Errorf(
-				"podIdentifier %s in policyendpoint %s has no namespace", podIdentifier, policyEndpoint.Name))
-			continue
-		}
-		ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier,
-			podNamespace, parentNP, false)
-		if err != nil {
-			// Record and continue: a derive failure for one identifier must not abort the
-			// loop for every identifier after it. The returned error requeues the request.
-			programmingErr = errors.Join(programmingErr, fmt.Errorf(
-				"parse policyendpoint %s for podIdentifier %s: %w", policyEndpoint.Name, podIdentifier, err))
-			continue
-		}
-
-		if len(ingressRules) == 0 && !isIngressIsolated {
-			//Add allow-all entry to Ingress rule set
-			log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-			r.addCatchAllEntry(&ingressRules)
-		}
-
-		if len(egressRules) == 0 && !isEgressIsolated {
-			//Add allow-all entry to Egress rule set
-			log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-			r.addCatchAllEntry(&egressRules)
-		}
-
-		// Setup/configure eBPF probes/maps for local pods
-		result, err := r.configureeBPFProbes(podIdentifier, targetPods, ingressRules, egressRules)
-		switch {
-		case err != nil:
-			// Checked before the skip case: a skip travels in result, not in err, so a real
-			// failure here is never mistaken for one. Record and continue so every other
-			// identifier is still programmed. The returned error requeues the request, so this
-			// pod is retried instead of left unprogrammed until the PE next changes.
-			programmingErr = errors.Join(programmingErr, fmt.Errorf(
-				"configure eBPF probes for podIdentifier %s: %w", podIdentifier, err))
-		case result.programmed:
-			programmed++
-		case result.skipped > 0:
-			// Retrying cannot resolve this, so do not report it as a failure.
-			skipped += result.skipped
-			log().Warnf("Skipped eBPF programming for podIdentifier %s: %d pod(s) cannot attach yet",
-				podIdentifier, result.skipped)
-		default:
-			// No context on this node and nothing skipped, so this identifier had nothing to do.
-			log().Debugf("No eBPF programming needed for podIdentifier %s on this node", podIdentifier)
-		}
-		duration := msSince(start)
-		policySetupLatency.WithLabelValues(policyEndpoint.Name, policyEndpoint.Namespace).Observe(duration)
-	}
-
-	// Three outcomes, because the trigger annotation has to be handled differently in each.
-	// A failing pass leaves it unconsumed so the retry that finally lands the change records
-	// it, retry delay included -- otherwise the histogram would drop exactly the slow
-	// recover-after-failure cases it most needs to show. A pass that wrote something records
-	// the sample. A pass with nothing to do on this node consumes the trigger without a
-	// sample: leaving it would let a later resync of the unchanged PE, or a sibling slice
-	// gaining a local pod, measure from the original change and report that staleness as
-	// programming latency. Cleanup writes count as work, so a cleanup-only pass that finally
-	// succeeds is still measured.
-	outcome := programmingNoWork
-	switch {
-	case cleanupErr != nil || programmingErr != nil:
-		outcome = programmingDeferred
-	case programmed > 0 || cleaned > 0:
-		outcome = programmingLanded
-	case skipped > 0:
-		// Deferred rather than consumed: these pods are local and a later pass can still
-		// attach and program them, and that latency is real. Consuming here would drop it.
-		outcome = programmingDeferred
-	}
-	r.observePolicyProgrammingLatency(policyEndpoint, outcome)
-
-	return errors.Join(cleanupErr, programmingErr)
+	r.programmingLatency.finish(podIdentifier, changes, pass.wrote)
+	return nil
 }
 
-func (r *PolicyEndpointsReconciler) commitPolicyEndpointState(
-	parentNP string,
-	resourceNamespace string,
-	newTargetPods []npatypes.Pod,
-	clusterWidePodIdentifiers map[string]bool,
-	parentPEList []string,
-) {
-	for _, peName := range parentPEList {
-		key := EndpointRequest{Endpoint: types.NamespacedName{Name: peName, Namespace: resourceNamespace}, Parent: parentNP}
-		if len(newTargetPods) > 0 {
-			r.policyEndpointSelectorMap.Store(key, newTargetPods)
-		} else {
-			r.policyEndpointSelectorMap.Delete(key)
-		}
+// programIdentifierMaps reports whether it wrote the identifier's maps and how many of its pods
+// could not attach.
+func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, podIdentifier string) (programmingPass, error) {
+	refs := r.deleteCleanups.without(podIdentifier, r.policyEndpointRefs(podIdentifier))
+	namespace, ok := utils.GetPodNamespaceFromPodIdentifier(podIdentifier)
+	if !ok {
+		// Identifiers come from GetPodIdentifier, so this cannot happen; retrying cannot help.
+		log().Errorf("Skipping policy programming for podIdentifier %s: it has no namespace", podIdentifier)
+		return programmingPass{}, nil
 	}
 
-	// Store the cluster wide pod identifiers associated with this network policy
-	// since this map helps track stale identifiers and cleanup from PodIdentifier to PolicyEndpoint mappings
-	networkPolicyIdentifier := utils.GetNetworkPolicyIdentifier(parentNP, resourceNamespace)
-	if len(clusterWidePodIdentifiers) == 0 {
-		r.networkPolicyToPodIdentifierMap.Delete(networkPolicyIdentifier)
-		return
-	}
-	clusterWidePodIdentifiersList := make([]string, 0, len(clusterWidePodIdentifiers))
-	for pid := range clusterWidePodIdentifiers {
-		clusterWidePodIdentifiersList = append(clusterWidePodIdentifiersList, pid)
-	}
-	r.networkPolicyToPodIdentifierMap.Store(networkPolicyIdentifier, clusterWidePodIdentifiersList)
-}
+	parents := lo.Map(refs, func(ref utils.PolicyEndpointRef, _ int) string {
+		return utils.GetNetworkPolicyIdentifier(ref.Parent, namespace)
+	})
+	attached, attachErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier,
+		localPodsOf(&r.networkPolicyToLocalPodsMap, podIdentifier, parents))
 
-// observePolicyProgrammingLatency emits the E2E latency histogram from the
-// last-change-trigger-time annotation. Each annotation value is observed at most
-// once per PE: it is consumed once the change has landed, so stale
-// rewrites/resyncs/relists never re-observe it.
-//
-// A pass that has not landed the change leaves the annotation unconsumed, so the
-// later pass that does land it reports the full time including any retry delay.
-// policyProgrammingOutcome says what a reconcile pass did with the change its trigger
-// annotation refers to. A bool cannot express it, because consuming the trigger and recording
-// a sample are separate decisions: a pass with nothing to do on this node must consume without
-// measuring, or a later resync measures from a change that landed long ago.
-type policyProgrammingOutcome int
-
-const (
-	// programmingNoWork: the change does not apply to this node. Consume, no sample.
-	programmingNoWork policyProgrammingOutcome = iota
-	// programmingLanded: maps were written here. Consume and record the sample.
-	programmingLanded
-	// programmingDeferred: the pass failed. Neither, so the retry that lands it measures.
-	programmingDeferred
-)
-
-func (r *PolicyEndpointsReconciler) observePolicyProgrammingLatency(pe *policyk8sawsv1.PolicyEndpoint, outcome policyProgrammingOutcome) {
-	if pe.Annotations == nil {
-		return
-	}
-	triggerTimeStr, ok := pe.Annotations[LastChangeTriggerTimeAnnotation]
-	if !ok || triggerTimeStr == "" {
-		return
-	}
-	triggerTime, err := time.Parse(time.RFC3339Nano, triggerTimeStr)
-	if err != nil {
-		log().Debugf("Failed to parse %s annotation: %v", LastChangeTriggerTimeAnnotation, err)
-		return
-	}
-	if !triggerTime.After(r.trackerStartTime) {
-		return
-	}
-	peKey := EndpointRequest{Endpoint: types.NamespacedName{Namespace: pe.Namespace, Name: pe.Name}, Parent: pe.Spec.PolicyRef.Name}
-	if prev, ok := r.lastObservedTriggerTimes.Load(peKey); ok && prev.(string) == triggerTimeStr {
-		return
-	}
-	if outcome == programmingDeferred {
-		// Left unconsumed on purpose: the pass that lands the change observes it.
-		log().Debugf("Deferring E2E policy programming latency for PE %s/%s: change has not landed yet", pe.Namespace, pe.Name)
-		return
-	}
-	// Consume before the suppression check below: the change has landed, so a
-	// clock-skew-suppressed observation must not be re-emitted (inflated) by a
-	// later resync of the same annotation.
-	r.lastObservedTriggerTimes.Store(peKey, triggerTimeStr)
-	if outcome == programmingNoWork {
-		// Consumed without measuring: nothing on this node implements this change, so any
-		// elapsed time here is the age of the annotation, not programming latency.
-		log().Debugf("No local work for PE %s/%s: consuming trigger without a latency sample", pe.Namespace, pe.Name)
-		return
-	}
-	latency := time.Since(triggerTime).Seconds()
-	if latency < 0 {
-		// Clock skew between NPC (control plane) and this node
-		log().Debugf("Skipping negative E2E policy programming latency %.3fs for PE %s/%s", latency, pe.Namespace, pe.Name)
-		return
-	}
-	policyProgrammingLatency.Observe(latency)
-	log().Debugf("E2E policy programming latency: %.3fs for PE %s/%s", latency, pe.Namespace, pe.Name)
-}
-
-// probeConfigResult reports what configureeBPFProbes actually did. The caller needs the three
-// cases apart: maps written, nothing on this node to write, and pods that can never attach.
-// Returning only an error cannot express them, and treating "no error" as "programmed" counts
-// a pass that wrote nothing.
-type probeConfigResult struct {
-	// programmed is true when the identifier's maps were written on this pass.
-	programmed bool
-	// skipped is the number of pods whose probe attach cannot be retried into success.
-	skipped int
-}
-
-func (r *PolicyEndpointsReconciler) configureeBPFProbes(podIdentifier string,
-	targetPods []npatypes.Pod, ingressRules, egressRules []fwrp.EbpfFirewallRules) (probeConfigResult, error) {
-	attached, configureProbesErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier, targetPods)
-	result := probeConfigResult{skipped: attached.skipped}
-
-	// AttacheBPFProbes skips pods already deleted from the node, so the PolicyEndpoint can
-	// still list a pod that has no programs here. There is nothing to program until a new
-	// pod attaches, so this returns without programmed set: counting it would consume the
-	// change's trigger time for work that never happened.
+	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return result, configureProbesErr
+		r.deleteCleanups.forget(podIdentifier)
+		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
-	if err := r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED); err != nil {
-		return result, errors.Join(configureProbesErr, fmt.Errorf("map updates failed for podIdentifier %s: %w", podIdentifier, err))
+	policyEndpoints, err := r.policyEndpointsOf(ctx, namespace, podIdentifier, refs)
+	if err != nil {
+		return programmingPass{}, errors.Join(attachErr, fmt.Errorf("get policy endpoints for podIdentifier %s: %w", podIdentifier, err))
 	}
-	result.programmed = true
-	return result, configureProbesErr
+	ingressRules, egressRules, state := r.firewallRulesFor(policyEndpoints)
+	if err := r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, state); err != nil {
+		return programmingPass{}, errors.Join(attachErr, err)
+	}
+	return programmingPass{wrote: true, skipped: attached.skipped}, attachErr
 }
 
-// cleanupPod reconciles one pod's programming after its policy stopped selecting it. It
-// reports whether it wrote any map, so the caller can tell a cleanup that did real work from
-// one that found nothing on this node and count the former as programming.
-func (r *PolicyEndpointsReconciler) cleanupPod(ctx context.Context, targetPod npatypes.Pod,
-	parentNP string, isDeleteFlow bool) (bool, error) {
-
-	var err error
-	var ingressRules, egressRules []fwrp.EbpfFirewallRules
-	var isIngressIsolated, isEgressIsolated bool
-	noActiveIngressPolicies, noActiveEgressPolicies := false, false
-
-	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
-
-	// The map consulted below is populated for pods on every node, so it cannot tell us
-	// whether this node still holds programs for the identifier. Only the eBPF context can,
-	// and every write below needs it, so when it is gone there is nothing here to clean up.
-	if !r.ebpfClient.HasBPFContext(podIdentifier) {
-		log().Debugf("Skipping policy cleanup for podIdentifier %s: no eBPF context registered", podIdentifier)
-		return false, nil
+func (r *PolicyEndpointsReconciler) policyEndpointRefs(podIdentifier string) []utils.PolicyEndpointRef {
+	if refs, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		return refs.([]utils.PolicyEndpointRef)
 	}
+	return nil
+}
 
-	// If the pod identifier is not in the PI→PE map, no policy tracks this pod anymore.
-	// Restore baseline state directly — this handles the case where stale pruning already
-	// removed the entry before cleanupPod runs.
-	if _, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); !ok {
-
-		state := DEFAULT_ALLOW
-		if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
-			state = DEFAULT_DENY
+// policyEndpointsOf resolves podIdentifier's refs against the informer cache and returns the
+// slices that apply to it, dropping slices that are gone, being deleted, or whose name was reused
+// under another parent.
+//
+// A grouped PolicyEndpoint carries the rules of one resolved-port group and applies only to the
+// pods its group lists, matched within its own policy. Ungrouped ones apply to every pod of their
+// policy, so a controller that does not set the field behaves as before. The pod's groups come
+// from the slices that list it on every call, so a group the pod has left contributes nothing.
+func (r *PolicyEndpointsReconciler) policyEndpointsOf(ctx context.Context, namespace, podIdentifier string,
+	refs []utils.PolicyEndpointRef) ([]*policyk8sawsv1.PolicyEndpoint, error) {
+	policyEndpoints := make([]*policyk8sawsv1.PolicyEndpoint, 0, len(refs))
+	groups := map[string]bool{}
+	for _, ref := range refs {
+		pe := &policyk8sawsv1.PolicyEndpoint{}
+		if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: namespace}, pe, client.UnsafeDisableDeepCopy); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, err
 		}
-		log().Infof("No entry in podIdentifierToPolicyEndpointMap for podIdentifier: %s. Restoring pod_state to baseline, networkPolicyMode: %s",
-			podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
-
-		if err := r.updateeBPFMaps(podIdentifier, nil, nil, state); err != nil {
-			// No policy tracks this pod anymore, but the baseline pod_state write failed.
-			// Returning the error propagates it up to Reconcile, so controller-runtime
-			// requeues and retries the baseline restore. This matters because a pod with no
-			// active policies must land on its baseline state (DEFAULT_ALLOW, or DEFAULT_DENY
-			// in strict mode); leaving it unwritten could keep stale enforcement in place.
-			return false, fmt.Errorf("baseline restore failed for podIdentifier %s, requeueing for retry: %w", podIdentifier, err)
+		if pe.Spec.PolicyRef.Name != ref.Parent || !pe.DeletionTimestamp.IsZero() {
+			continue
 		}
-		return true, nil
+		if pe.Spec.TargetGroup != "" && slices.ContainsFunc(pe.Spec.PodSelectorEndpoints, func(pod policyk8sawsv1.PodEndpoint) bool {
+			return utils.GetPodIdentifier(pod.Name, pod.Namespace) == podIdentifier
+		}) {
+			groups[targetGroupKey(pe.Spec.PolicyRef.Name, pe.Spec.TargetGroup)] = true
+		}
+		policyEndpoints = append(policyEndpoints, pe)
 	}
-
-	// Detach eBPF probes attached to the local pods (if required). We should detach eBPF probes if this
-	// is the only PolicyEndpoint resource that applies to this pod. If not, just update the Ingress/Egress Map contents
-	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err = r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, targetPod.Namespace,
-		parentNP, isDeleteFlow)
-	if err != nil {
-		return false, fmt.Errorf("derive firewall rules for podIdentifier %s: %w", podIdentifier, err)
-	}
-
-	if len(ingressRules) == 0 && !isIngressIsolated {
-		noActiveIngressPolicies = true
-	}
-	if len(egressRules) == 0 && !isEgressIsolated {
-		noActiveEgressPolicies = true
-	}
-
-	// We update pod_state to default allow/deny if there are no other policies applied
-	if noActiveIngressPolicies && noActiveEgressPolicies {
-		state := DEFAULT_ALLOW
-		if utils.IsStrictMode(r.GeteBPFClient().GetNetworkPolicyMode()) {
-			state = DEFAULT_DENY
-		}
-
-		log().Infof("No active policies. Updating pod_state map for podIdentifier: %s networkPolicyMode: %s", podIdentifier, r.GeteBPFClient().GetNetworkPolicyMode())
-		if err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, state); err != nil {
-			return false, fmt.Errorf("apply baseline state for podIdentifier %s: %w", podIdentifier, err)
-		}
-	} else {
-		// We've additional PolicyEndpoint resources configured against this pod
-		// Update the Maps and move on
-		log().Infof("Active policies against this pod. Skip Detaching probes and Update Maps... ")
-		if noActiveIngressPolicies {
-			// Add an allow-all entry to ingress rule set so ingress traffic
-			// isn't dropped by the eBPF dataplane.
-			log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-			r.addCatchAllEntry(&ingressRules)
-		}
-		if noActiveEgressPolicies {
-			// Add an allow-all entry to egress rule set so egress traffic
-			// isn't dropped by the eBPF dataplane. Without this, egress_map
-			// ends up not having the catch all rule while pod_state_map stays
-			// at POLICIES_APPLIED and the eBPF dataplane drops all egress traffic.
-			log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-			r.addCatchAllEntry(&egressRules)
-		}
-
-		if err = r.updateeBPFMaps(podIdentifier, ingressRules, egressRules, ebpf.POLICIES_APPLIED); err != nil {
-			return false, fmt.Errorf("apply remaining policies for podIdentifier %s: %w", podIdentifier, err)
-		}
-	}
-
-	// Both arms above write a map, so reaching here means cleanup did real work.
-	return true, nil
+	return slices.DeleteFunc(policyEndpoints, func(pe *policyk8sawsv1.PolicyEndpoint) bool {
+		return pe.Spec.TargetGroup != "" && !groups[targetGroupKey(pe.Spec.PolicyRef.Name, pe.Spec.TargetGroup)]
+	}), nil
 }
 
 // targetGroupKey scopes a group to the policy that produced it. A group key is a content hash of
@@ -648,123 +425,81 @@ func targetGroupKey(parentNP, targetGroup string) string {
 	return parentNP + "/" + targetGroup
 }
 
-// podIdentifierTargetGroups returns the groups this podIdentifier belongs to, each scoped to its
-// parent policy. A pod belongs to a group when a PolicyEndpoint carrying that group lists it. An
-// empty result means the pod only appears in ungrouped PolicyEndpoints, which is every cluster
-// whose controller does not group and every policy whose pods agree on their named ports.
-func (r *PolicyEndpointsReconciler) podIdentifierTargetGroups(ctx context.Context,
-	refs []utils.PolicyEndpointRef, podIdentifier, resourceNamespace string) map[string]struct{} {
-	groups := make(map[string]struct{})
-	pe := &policyk8sawsv1.PolicyEndpoint{}
-	for _, ref := range refs {
-		peNamespacedName := types.NamespacedName{Name: ref.Name, Namespace: resourceNamespace}
-		if err := r.k8sClient.Get(ctx, peNamespacedName, pe, client.UnsafeDisableDeepCopy); err != nil {
-			continue
-		}
-		// Same guard as the rule loop: the name may have been reused under another parent.
-		if pe.Spec.TargetGroup == "" || pe.Spec.PolicyRef.Name != ref.Parent {
-			continue
-		}
-		for _, p := range pe.Spec.PodSelectorEndpoints {
-			if utils.GetPodIdentifier(p.Name, p.Namespace) == podIdentifier {
-				groups[targetGroupKey(pe.Spec.PolicyRef.Name, pe.Spec.TargetGroup)] = struct{}{}
-				break
-			}
-		}
+// firewallRulesFor returns the rule sets and pod state to program for the given policies. With
+// no live PolicyEndpoint that is the baseline state; otherwise a direction with neither rules
+// nor isolation allows everything.
+func (r *PolicyEndpointsReconciler) firewallRulesFor(policyEndpoints []*policyk8sawsv1.PolicyEndpoint) ([]fwrp.EbpfFirewallRules,
+	[]fwrp.EbpfFirewallRules, int) {
+	if len(policyEndpoints) == 0 {
+		return nil, nil, r.baselinePodState()
 	}
-	return groups
+	ingressRules, egressRules, isIngressIsolated, isEgressIsolated := r.deriveFirewallRules(policyEndpoints)
+	if len(ingressRules) == 0 && !isIngressIsolated {
+		r.addCatchAllEntry(&ingressRules)
+	}
+	if len(egressRules) == 0 && !isEgressIsolated {
+		r.addCatchAllEntry(&egressRules)
+	}
+	return ingressRules, egressRules, ebpf.POLICIES_APPLIED
 }
 
-func (r *PolicyEndpointsReconciler) deriveIngressAndEgressFirewallRules(ctx context.Context,
-	podIdentifier string, resourceNamespace string, parentNP string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, bool, bool, error) {
+// baselinePodState is the pod state of a pod no policy applies to.
+func (r *PolicyEndpointsReconciler) baselinePodState() int {
+	if utils.IsStrictMode(r.ebpfClient.GetNetworkPolicyMode()) {
+		return DEFAULT_DENY
+	}
+	return DEFAULT_ALLOW
+}
+
+func (r *PolicyEndpointsReconciler) deriveFirewallRules(policyEndpoints []*policyk8sawsv1.PolicyEndpoint) ([]fwrp.EbpfFirewallRules,
+	[]fwrp.EbpfFirewallRules, bool, bool) {
 	var ingressRules, egressRules []fwrp.EbpfFirewallRules
 	isIngressIsolated, isEgressIsolated := false, false
-	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
-	if policyEndpointList, ok := r.podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		refs := policyEndpointList.([]utils.PolicyEndpointRef)
-		log().Infof("Total number of PolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(refs))
-		// Derived fresh every time rather than tracked, so a stale map entry for a group this pod
-		// has since left cannot contribute rules.
-		targetGroups := r.podIdentifierTargetGroups(ctx, refs, podIdentifier, resourceNamespace)
-		for _, ref := range refs {
-			peNamespacedName := types.NamespacedName{
-				Name:      ref.Name,
-				Namespace: resourceNamespace,
-			}
-
-			if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE, client.UnsafeDisableDeepCopy); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return nil, nil, isIngressIsolated, isEgressIsolated, err
-			}
-
-			// The name was reused under another parent; this entry's cleanup is still pending
-			if currentPE.Spec.PolicyRef.Name != ref.Parent {
-				continue
-			}
-
-			if isDeleteFlow && ref.Parent == parentNP {
-				log().Debugf("PE belongs to same NP. Ignore and move on since it's a delete flow parentNP %s currentPE %s", parentNP, ref.Name)
-				continue
-			}
-
-			// A grouped PolicyEndpoint carries the rules of one resolved-port group and applies
-			// only to that group's pods, matched within its own policy. Ungrouped ones always
-			// apply, so a controller that does not set the field behaves exactly as before.
-			if currentPE.Spec.TargetGroup != "" {
-				if _, ok := targetGroups[targetGroupKey(currentPE.Spec.PolicyRef.Name, currentPE.Spec.TargetGroup)]; !ok {
-					log().Debugf("Skipping PE %s: target group %s of policy %s does not contain podIdentifier %s",
-						ref.Name, currentPE.Spec.TargetGroup, currentPE.Spec.PolicyRef.Name, podIdentifier)
-					continue
-				}
-			}
-
-			// currentPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
-			// makes appends to Except/L4Info reallocate, but their existing elements, and the
-			// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
-			// processing must treat them as read-only. Guarded by
-			// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
-			for _, endPointInfo := range currentPE.Spec.Ingress {
-				ingressRules = append(ingressRules,
-					fwrp.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: slices.Clip(endPointInfo.Except),
-						L4Info: slices.Clip(endPointInfo.Ports),
-					})
-			}
-
-			for _, endPointInfo := range currentPE.Spec.Egress {
-				if endPointInfo.CIDR == "" && endPointInfo.DomainName == "" {
-					log().Warnf("both CIDR and DomainName are empty in PE name %s, NS: %s", currentPE.Name, currentPE.Namespace)
-					continue
-				}
-				if endPointInfo.CIDR == "" {
-					log().Infof("CIDR is empty, skipping the egress rule %s, NS: %s", currentPE.Name, currentPE.Namespace)
-					continue
-				}
-
-				egressRules = append(egressRules,
-					fwrp.EbpfFirewallRules{
-						IPCidr: endPointInfo.CIDR,
-						Except: slices.Clip(endPointInfo.Except),
-						L4Info: slices.Clip(endPointInfo.Ports),
-					})
-			}
-			log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
-			ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(currentPE, len(ingressRules), len(egressRules))
-			isIngressIsolated = isIngressIsolated || ingressIsolated
-			isEgressIsolated = isEgressIsolated || egressIsolated
+	for _, currentPE := range policyEndpoints {
+		// currentPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
+		// makes appends to Except/L4Info reallocate, but their existing elements, and the
+		// Protocol/Port/EndPort pointers inside each Port, still belong to the cache: rule
+		// processing must treat them as read-only. Guarded by
+		// TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged.
+		for _, endPointInfo := range currentPE.Spec.Ingress {
+			ingressRules = append(ingressRules,
+				fwrp.EbpfFirewallRules{
+					IPCidr: endPointInfo.CIDR,
+					Except: slices.Clip(endPointInfo.Except),
+					L4Info: slices.Clip(endPointInfo.Ports),
+				})
 		}
+
+		for _, endPointInfo := range currentPE.Spec.Egress {
+			if endPointInfo.CIDR == "" && endPointInfo.DomainName == "" {
+				log().Warnf("both CIDR and DomainName are empty in PE name %s, NS: %s", currentPE.Name, currentPE.Namespace)
+				continue
+			}
+			if endPointInfo.CIDR == "" {
+				log().Infof("CIDR is empty, skipping the egress rule %s, NS: %s", currentPE.Name, currentPE.Namespace)
+				continue
+			}
+
+			egressRules = append(egressRules,
+				fwrp.EbpfFirewallRules{
+					IPCidr: endPointInfo.CIDR,
+					Except: slices.Clip(endPointInfo.Except),
+					L4Info: slices.Clip(endPointInfo.Ports),
+				})
+		}
+		ingressIsolated, egressIsolated := r.deriveDefaultPodIsolation(currentPE, len(ingressRules), len(egressRules))
+		isIngressIsolated = isIngressIsolated || ingressIsolated
+		isEgressIsolated = isEgressIsolated || egressIsolated
 	}
+	log().Infof("Total no.of - ingressRules %d egressRules %d", len(ingressRules), len(egressRules))
 	if len(ingressRules) > 0 {
 		isIngressIsolated = false
 	}
 	if len(egressRules) > 0 {
 		isEgressIsolated = false
 	}
-	return ingressRules, egressRules, isIngressIsolated, isEgressIsolated, nil
+	return ingressRules, egressRules, isIngressIsolated, isEgressIsolated
 }
 
 func (r *PolicyEndpointsReconciler) deriveDefaultPodIsolation(policyEndpoint *policyk8sawsv1.PolicyEndpoint,
@@ -802,131 +537,6 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(podIdentifier string,
 	return nil
 }
 
-func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
-	parentNP, resourceNamespace, resourceName string) ([]npatypes.Pod, map[string]bool, []npatypes.Pod, []string, map[string]bool, error) {
-	var targetPods, podsToBeCleanedUp, priorTargetPods []npatypes.Pod
-	podIdentifiers := make(map[string]bool)            // node-local only
-	clusterWidePodIdentifiers := make(map[string]bool) // all identifiers this NP selects (any node) - dedupe across PEs
-
-	parentPEObjects, err := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
-	if err != nil {
-		return nil, nil, nil, nil, nil, err
-	}
-	parentPEList := lo.Map(parentPEObjects, func(pe policyk8sawsv1.PolicyEndpoint, _ int) string {
-		return pe.Name
-	})
-
-	log().Infof("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
-
-	// Gather the pods (local to the node) this policy's rules were applied to in previous
-	// reconciles, from every one of the parent's slices -- not just the reconciled one -- so a
-	// slice reconciled before it has an entry of its own (a new slice created in the same
-	// update that deselects a pod) still finds that pod under a sibling and cleans it up. The
-	// selector map is keyed by name, namespace and parent, so a same-named slice in another
-	// namespace, or one recorded under another parent, is not read.
-	for _, peName := range lo.Uniq(append([]string{resourceName}, parentPEList...)) {
-		key := EndpointRequest{Endpoint: types.NamespacedName{Name: peName, Namespace: resourceNamespace}, Parent: parentNP}
-		if existingPods, ok := r.policyEndpointSelectorMap.Load(key); ok {
-			priorTargetPods = append(priorTargetPods, existingPods.([]npatypes.Pod)...)
-		}
-	}
-	// Dedupe on identity, not on the whole struct: the same pod can be recorded under two
-	// slices with different PodIPs (a StatefulSet pod keeps its name across recreation but
-	// not its address), and GetPodListToBeCleanedUp matches on NamespacedName, so both copies
-	// would land in podsToBeCleanedUp and the pod would be cleaned up twice.
-	priorTargetPods = lo.UniqBy(priorTargetPods, func(pod npatypes.Pod) types.NamespacedName {
-		return pod.NamespacedName
-	})
-
-	if len(parentPEList) == 0 {
-		podsToBeCleanedUp = append(podsToBeCleanedUp, priorTargetPods...)
-		parentPEList = []string{resourceName}
-		log().Infof("No PEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
-	} else {
-		for _, currentPE := range parentPEObjects {
-			log().Infof("Processing PE Name %s", currentPE.Name)
-			localTargetPods, localTargetPodIdentifiers, clusterWideTargetPodIdentifiers := r.deriveTargetPods(ctx, &currentPE, parentNP, parentPEList)
-			log().Infof("Adding to current targetPods Total pods: %d", len(localTargetPods))
-			targetPods = append(targetPods, localTargetPods...)
-			for podIdentifier := range localTargetPodIdentifiers {
-				podIdentifiers[podIdentifier] = true
-			}
-
-			for podIdentifier := range clusterWideTargetPodIdentifiers {
-				clusterWidePodIdentifiers[podIdentifier] = true
-			}
-		}
-	}
-
-	// Diff the previous selected-identifier set (from networkPolicyToPodIdentifierMap)
-	// against the current one. Both sides cover every identifier this NP selects on any
-	// node, so non-local identifiers that are no longer selected are flagged stale and
-	// pruned from podIdentifierToPolicyEndpointMap which maintains this mapping cluster-wide
-	// for optimization purposes
-	networkPolicyIdentifier := utils.GetNetworkPolicyIdentifier(parentNP, resourceNamespace)
-	stalePodIdentifiers := utils.DeriveStalePodIdentifiers(&r.networkPolicyToPodIdentifierMap,
-		networkPolicyIdentifier, clusterWidePodIdentifiers)
-
-	// A stale identifier still holds the slices from the reconcile that last selected it,
-	// including deleted ones and ones whose names moved to another parent, so drop every entry
-	// of this parent rather than only its live slices
-	for _, podIdentifier := range stalePodIdentifiers {
-		utils.DeleteParentFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
-			&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP)
-	}
-
-	if len(priorTargetPods) > 0 {
-		podsToBeCleanedUp = utils.GetPodListToBeCleanedUp(priorTargetPods, targetPods, podIdentifiers)
-	}
-	return targetPods, podIdentifiers, podsToBeCleanedUp, parentPEList, clusterWidePodIdentifiers, nil
-}
-
-// Derives list of local pods the policy endpoint resource selects.
-// Function returns:
-//   - targetPods: node-local pods selected by this PE (drives eBPF programming)
-//   - podIdentifiers: identifiers of the local targetPods
-//   - clusterwidePodIdentifiers: every identifier this PE selects, on any node
-func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentNP string, parentPEList []string) ([]npatypes.Pod, map[string]bool, map[string]bool) {
-	var targetPods []npatypes.Pod
-	podIdentifiers := make(map[string]bool)            // node-local only - drives eBPF programming
-	clusterwidePodIdentifiers := make(map[string]bool) // every identifier this NetworkPolicy selects (any node) - mirrors podIdentifierToPolicyEndpointMap inserts
-
-	// Pods are grouped by Host IP. Individual node agents will filter (local) pods
-	// by the Host IP value.
-	nodeIP := net.ParseIP(r.nodeIP)
-	var otherNamespaceEntries int
-	var firstOtherNamespaceEntry types.NamespacedName
-	for _, pod := range policyEndpoint.Spec.PodSelectorEndpoints {
-		// PolicyEndpoints only select pods in their own namespace.
-		if pod.Namespace != policyEndpoint.Namespace {
-			if otherNamespaceEntries == 0 {
-				firstOtherNamespaceEntry = types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
-			}
-			otherNamespaceEntries++
-			continue
-		}
-		if string(pod.PodIP) == string(pod.HostIP) {
-			log().Infof("Skipping hostNetwork pod: name: %s namespace: %s (PodIP == HostIP: %s)",
-				pod.Name, pod.Namespace, pod.PodIP)
-			continue
-		}
-		podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
-		clusterwidePodIdentifiers[podIdentifier] = true
-		if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
-			targetPods = append(targetPods, npatypes.Pod{NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
-			podIdentifiers[podIdentifier] = true
-			log().Infof("Found a matching Pod: name: %s namespace: %s podIdentifier: %s", pod.Name, pod.Namespace, podIdentifier)
-		}
-		utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP, parentPEList)
-	}
-	if otherNamespaceEntries > 0 {
-		log().Warnf("Ignored %d podSelectorEndpoints in PolicyEndpoint %s/%s with a different namespace (first: %s)",
-			otherNamespaceEntries, policyEndpoint.Namespace, policyEndpoint.Name, firstOtherNamespaceEntry)
-	}
-	return targetPods, podIdentifiers, clusterwidePodIdentifiers
-}
-
 func (r *PolicyEndpointsReconciler) addCatchAllEntry(firewallRules *[]fwrp.EbpfFirewallRules) {
 	//Add allow-all entry to firewall rule set
 	var catchAllCIDR string
@@ -941,30 +551,28 @@ func (r *PolicyEndpointsReconciler) addCatchAllEntry(firewallRules *[]fwrp.EbpfF
 		})
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
-	return setupEndpointController(mgr, "policyendpoint", &policyk8sawsv1.PolicyEndpoint{},
-		policyEndpointParent, r, controller.TypedOptions[EndpointRequest]{})
+// SetupWithManager sets up both stages with the Manager: the PolicyEndpoint controller on a
+// single worker, and the programming controller on programmingWorkers.
+func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, programmingWorkers int) error {
+	if err := setupEndpointController(mgr, "policyendpoint", &policyk8sawsv1.PolicyEndpoint{},
+		policyEndpointParent, r, controller.TypedOptions[EndpointRequest]{}); err != nil {
+		return err
+	}
+	return setupProgrammer(mgr, policyEndpointProgrammerName, r.programQueue, programmingWorkers, r.programIdentifier)
 }
 
 func policyEndpointParent(pe *policyk8sawsv1.PolicyEndpoint) string { return pe.Spec.PolicyRef.Name }
 
-// derivePolicyEndpointsOfParentNP returns the parent NetworkPolicy's slices as objects, not
-// just names, mirroring getClusterPolicyEndpointsOfParentCNP. The List already carries every
-// slice's full spec, so returning the objects saves the caller a per-name Get -- and, more
-// importantly, leaves it with no call inside its loop that can fail partway. A mid-loop
-// failure there would be observed after podIdentifierToPolicyEndpointMap had already been
-// written for the slices processed before it, while networkPolicyToPodIdentifierMap is only
-// written on the commit path the failure skips. The two maps would then disagree, and since
-// staleness is computed as "previously selected minus currently selected", the names left in
-// podIdentifierToPolicyEndpointMap could never be pruned again.
+// derivePolicyEndpointsOfParentNP returns the parent NetworkPolicy's live slices as objects,
+// mirroring getClusterPolicyEndpointsOfParentCNP. A slice being deleted is left out, so it stops
+// contributing as soon as its deletion starts.
 func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.Context, parentNP, resourceNamespace string) ([]policyk8sawsv1.PolicyEndpoint, error) {
 	policyEndpointList := &policyk8sawsv1.PolicyEndpointList{}
 	if err := r.k8sClient.List(ctx, policyEndpointList, &client.ListOptions{
 		Namespace: resourceNamespace,
 	}, client.UnsafeDisableDeepCopy); err != nil {
-		// A List failure is propagated, never reported as an empty list. Callers read an empty
-		// parent PE list as "this NetworkPolicy is fully deleted" and tear down enforcement, so
+		// A List failure is propagated, never reported as an empty list. An empty parent PE list
+		// reads as "this NetworkPolicy is fully deleted" and tears down enforcement, so
 		// collapsing a transient API/cache error into that case would open traffic.
 		return nil, fmt.Errorf(
 			"list PolicyEndpoints in namespace %q: %w",
@@ -975,9 +583,8 @@ func (r *PolicyEndpointsReconciler) derivePolicyEndpointsOfParentNP(ctx context.
 
 	var parentPolicyEndpoints []policyk8sawsv1.PolicyEndpoint
 	for _, policyEndpoint := range policyEndpointList.Items {
-		if policyEndpoint.Spec.PolicyRef.Name == parentNP {
+		if policyEndpoint.Spec.PolicyRef.Name == parentNP && policyEndpoint.DeletionTimestamp.IsZero() {
 			parentPolicyEndpoints = append(parentPolicyEndpoints, policyEndpoint)
-			log().Debugf("Found another PE resource for the parent NP name %s", policyEndpoint.Name)
 		}
 	}
 	return parentPolicyEndpoints, nil
@@ -990,12 +597,14 @@ func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
 
-	ingressRules, egressRules, isIngressIsolated, isEgressIsolated, err := r.deriveIngressAndEgressFirewallRules(context.Background(), podIdentifier,
-		podNamespace, "", false)
+	// The CNI ADD writes these rules, with every policy that selects the identifier.
+	r.deleteCleanups.forget(podIdentifier)
+	policyEndpoints, err := r.policyEndpointsOf(context.Background(), podNamespace, podIdentifier, r.policyEndpointRefs(podIdentifier))
 	if err != nil {
 		log().Errorf("Error deriving firewall rules: %v", err)
-		return ingressRules, egressRules, nil
+		return nil, nil, nil
 	}
+	ingressRules, egressRules, isIngressIsolated, isEgressIsolated := r.deriveFirewallRules(policyEndpoints)
 
 	if len(ingressRules) == 0 && !isIngressIsolated {
 		// No active ingress rules for this pod, but we only should land here

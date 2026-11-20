@@ -5,34 +5,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
-
-	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 )
-
-// GetPodListToBeCleanedUp compares old and new pod sets to determine which pods need cleanup.
-//
-// A pod is matched on NamespacedName, not on the whole struct: identity is the name, and
-// npatypes.Pod also carries PodIP, which the same pod can legitimately change (a StatefulSet
-// pod keeps its name across recreation but not its address). Comparing the whole struct would
-// treat a re-addressed pod as absent from the new set, which reads as "no longer selected"
-// when it still is. The podIdentifiers guard below happens to mask that today -- a pod in the
-// new set always has its identifier there too -- so this is a clarification rather than a
-// behaviour change, and it keeps the comparison from depending on that coincidence.
-func GetPodListToBeCleanedUp(oldPodSet []npatypes.Pod, newPodSet []npatypes.Pod, podIdentifiers map[string]bool) []npatypes.Pod {
-	var podsToBeCleanedUp []npatypes.Pod
-
-	for _, oldPod := range oldPodSet {
-		oldPodIdentifier := GetPodIdentifier(oldPod.Name, oldPod.Namespace)
-
-		stillSelected := slices.ContainsFunc(newPodSet, func(newPod npatypes.Pod) bool {
-			return newPod.NamespacedName == oldPod.NamespacedName
-		})
-		if !stillSelected && !podIdentifiers[oldPodIdentifier] {
-			podsToBeCleanedUp = append(podsToBeCleanedUp, oldPod)
-		}
-	}
-	return podsToBeCleanedUp
-}
 
 // GetNetworkPolicyIdentifier returns an injective in-memory key for a namespaced
 // NetworkPolicy. "/" cannot appear in either Kubernetes name component.
@@ -67,11 +40,6 @@ func comparePolicyEndpointRefs(a, b PolicyEndpointRef) int {
 	return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Parent, b.Parent))
 }
 
-// DeletePolicyEndpointFromPodIdentifierMap removes a policy endpoint from a pod's identifier map.
-func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpoint PolicyEndpointRef) {
-	deleteFromPodIdentifierMap(podIdentifierToPolicyEndpointMap, mutex, podIdentifier, func(ref PolicyEndpointRef) bool { return ref == policyEndpoint })
-}
-
 // DeleteParentFromPodIdentifierMap removes every policy endpoint of parent from a pod's identifier
 // map, for an identifier the parent no longer selects. This includes slices whose names have since
 // moved to another parent, so a name that later moves back cannot revive the entry.
@@ -79,8 +47,8 @@ func DeleteParentFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map
 	deleteFromPodIdentifierMap(podIdentifierToPolicyEndpointMap, mutex, podIdentifier, func(ref PolicyEndpointRef) bool { return ref.Parent == parent })
 }
 
-// The stored list must stay sorted (see UpdatePodIdentifierToPolicyEndpointMap), so this filters
-// in order into a new slice; readers load the list without the mutex.
+// The stored list must stay sorted (see SetParentPolicyEndpoints), so this filters in order into
+// a new slice; readers load the list without the mutex.
 func deleteFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, remove func(PolicyEndpointRef) bool) {
 	mutex.Lock()
 	defer mutex.Unlock()
@@ -101,50 +69,56 @@ func deleteFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mute
 	}
 }
 
-// UpdatePodIdentifierToPolicyEndpointMap adds the supplied policy endpoints of parent to the ones
-// already tracked for this pod identifier, skipping duplicates. It never removes an entry.
+// SetParentPolicyEndpoints makes parent's entries for podIdentifier exactly the given policy
+// endpoint names, leaving every other parent's entries alone. An empty list removes the parent's
+// entries, and the identifier's key once no parent has any.
 //
-// The stored list is kept sorted so membership is a binary search. This function and
-// deleteFromPodIdentifierMap are its only writers and must both preserve the
-// order. The list is replaced rather than modified in place because readers (e.g. the CNI
-// RPC path) load it without the mutex.
-//
-// The cost of append-only: a name that leaves the live slice set while the identifier is still
-// selected is never pruned, so the key survives. Bounded by resharding, not pod churn. See the
-// skipped subtests in controllers/{cluster,}policyendpoints_slice_test.go.
-func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier, parent string, policyEndpointList []string) {
+// The stored list is kept sorted, and this function and deleteFromPodIdentifierMap are its only
+// writers. It is replaced rather than modified in place because readers (the programming workers
+// and the CNI RPC path) load it without the mutex.
+func SetParentPolicyEndpoints(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier, parent string, policyEndpointNames []string) {
 	mutex.Lock()
 	defer mutex.Unlock()
+
+	want := make([]PolicyEndpointRef, 0, len(policyEndpointNames))
+	for _, name := range policyEndpointNames {
+		want = append(want, PolicyEndpointRef{Name: name, Parent: parent})
+	}
+	slices.SortFunc(want, comparePolicyEndpointRefs)
+	want = slices.Compact(want)
 
 	var current []PolicyEndpointRef
 	if currentSet, ok := podIdentifierMap.Load(podIdentifier); ok {
 		current = currentSet.([]PolicyEndpointRef)
 	}
-	var missing []PolicyEndpointRef
-	for _, policyEndpointResourceName := range policyEndpointList {
-		ref := PolicyEndpointRef{Name: policyEndpointResourceName, Parent: parent}
-		if _, tracked := slices.BinarySearchFunc(current, ref, comparePolicyEndpointRefs); !tracked {
-			log().Debugf("Adding policy endpoint %s of %s for podIdentifier %s", ref.Name, ref.Parent, podIdentifier)
-			missing = append(missing, ref)
+	var others, have []PolicyEndpointRef
+	for _, ref := range current {
+		if ref.Parent == parent {
+			have = append(have, ref)
+		} else {
+			others = append(others, ref)
 		}
 	}
-	if len(missing) == 0 {
+	if slices.Equal(have, want) {
 		return
 	}
-	slices.SortFunc(missing, comparePolicyEndpointRefs)
-	missing = slices.Compact(missing)
-	policyEndpoints := make([]PolicyEndpointRef, 0, len(current)+len(missing))
+
+	merged := make([]PolicyEndpointRef, 0, len(others)+len(want))
 	i, j := 0, 0
-	for i < len(current) && j < len(missing) {
-		if comparePolicyEndpointRefs(current[i], missing[j]) < 0 {
-			policyEndpoints = append(policyEndpoints, current[i])
+	for i < len(others) && j < len(want) {
+		if comparePolicyEndpointRefs(others[i], want[j]) < 0 {
+			merged = append(merged, others[i])
 			i++
 		} else {
-			policyEndpoints = append(policyEndpoints, missing[j])
+			merged = append(merged, want[j])
 			j++
 		}
 	}
-	policyEndpoints = append(policyEndpoints, current[i:]...)
-	policyEndpoints = append(policyEndpoints, missing[j:]...)
-	podIdentifierMap.Store(podIdentifier, policyEndpoints)
+	merged = append(merged, others[i:]...)
+	merged = append(merged, want[j:]...)
+	if len(merged) == 0 {
+		podIdentifierMap.Delete(podIdentifier)
+		return
+	}
+	podIdentifierMap.Store(podIdentifier, merged)
 }

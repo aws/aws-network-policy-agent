@@ -19,7 +19,7 @@ const (
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
 	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
-	defaultMaxConcurrentReconciles     = 3
+	defaultMaxConcurrentReconciles     = 1
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
@@ -44,7 +44,9 @@ type ControllerConfig struct {
 	LogFileMaxSize int
 	// Count of rotated Network Policy Agent local log files
 	LogFileMaxBackups int
-	// MaxConcurrentReconciles specifies the max number of reconcile loops
+	// MaxConcurrentReconciles is the number of workers programming pod identifiers' eBPF maps,
+	// for each of the PolicyEndpoint and ClusterPolicyEndpoint controllers. The reconciles that
+	// queue that work always run on a single worker.
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
 	EnablePolicyEventLogs bool
@@ -82,7 +84,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&cfg.LogFileMaxBackups, flagLogFileMaxBackups, defaultLogFileMaxBackups, ""+
 		"Set the controller maximum number of rotated log files to retain")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
-		"Maximum number of concurrent reconcile loops")
+		"Number of concurrent workers programming pod identifiers' eBPF maps, per policy controller")
 	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")
 	fs.BoolVar(&cfg.EnableCloudWatchLogs, flagEnableCloudWatchLogs, false, "If enabled, policy decision logs will be streamed to CloudWatch, requires \"enable-policy-event-logs=true\"")
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
