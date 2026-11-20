@@ -533,10 +533,6 @@ func ConvIntToIPv4(ipaddr uint32) net.IP {
 	return ip
 }
 
-func ConvIPv4ToInt(ipaddr net.IP) uint32 {
-	return uint32(ipaddr[0])<<24 | uint32(ipaddr[1])<<16 | uint32(ipaddr[2])<<8 | uint32(ipaddr[3])
-}
-
 func ConvIntToIPv4NetworkOrder(ipaddr uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, ipaddr)
@@ -546,11 +542,6 @@ func ConvIntToIPv4NetworkOrder(ipaddr uint32) net.IP {
 func ConvByteToIPv6(ipaddr [16]byte) net.IP {
 	ip := net.IP(ipaddr[:])
 	return ip
-}
-
-func ConvIPv6ToByte(ipaddr net.IP) []byte {
-	ipaddrBytes := ipaddr.To16()
-	return ipaddrBytes
 }
 
 type ConntrackKeyV6 struct {
