@@ -2158,121 +2158,37 @@ func TestBpfClient_AttacheBPFProbes_IngressAttachFailureUnloadsBoth(t *testing.T
 	assertNotRegistered(t, client, pod)
 }
 
-// fakeHooks keeps the program FD on each host TC hook. Replace swaps or creates,
-// as in the kernel; the agent never attaches or detaches, so either fails the
-// test.
-type fakeHooks struct {
-	t        *testing.T
-	ingress  map[string]int // host tc-ingress hook: pod egress programs
-	egress   map[string]int // host tc-egress hook: pod ingress programs
-	callErr  map[string]error
-	replaced map[string]int // per replace call name
-}
+// Each hook gets one replace with the loaded program, and nothing is rolled
+// back. The strict mock fails the test on any attach, detach or cleanup.
+func TestBpfClient_AttacheBPFProbes_ReplacesEachHook(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	bpffs := recordBPFFS(t)
+	stubHostVeth(t)
 
-var _ tc.BpfTc = &fakeHooks{}
+	pod := types.NamespacedName{Name: "job-c-x1", Namespace: "ns"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	ingressLoad, ingressProgFD := loadedProgram(t, podIdentifier, "ingress")
+	egressLoad, egressProgFD := loadedProgram(t, podIdentifier, "egress")
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(ingressLoad, nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
 
-func newFakeHooks(t *testing.T) *fakeHooks {
-	return &fakeHooks{t: t, ingress: map[string]int{}, egress: map[string]int{}, callErr: map[string]error{}, replaced: map[string]int{}}
-}
-
-func (f *fakeHooks) replace(hook map[string]int, name string, iface string, fd int) error {
-	if err := f.callErr[name+"/"+iface]; err != nil {
-		delete(f.callErr, name+"/"+iface)
-		return err
-	}
-	f.replaced[name]++
-	hook[iface] = fd
-	return nil
-}
-
-func (f *fakeHooks) TCIngressReplace(iface string, fd int, _ string) error {
-	return f.replace(f.ingress, "TCIngressReplace", iface, fd)
-}
-func (f *fakeHooks) TCEgressReplace(iface string, fd int, _ string) error {
-	return f.replace(f.egress, "TCEgressReplace", iface, fd)
-}
-func (f *fakeHooks) TCIngressAttach(iface string, _ int, _ string) error {
-	f.t.Errorf("TCIngressAttach(%s) called; the agent attaches with replace", iface)
-	return nil
-}
-func (f *fakeHooks) TCEgressAttach(iface string, _ int, _ string) error {
-	f.t.Errorf("TCEgressAttach(%s) called; the agent attaches with replace", iface)
-	return nil
-}
-func (f *fakeHooks) TCIngressDetach(iface string) error {
-	f.t.Errorf("TCIngressDetach(%s) called; the attach path must not leave the hook empty", iface)
-	return nil
-}
-func (f *fakeHooks) TCEgressDetach(iface string) error {
-	f.t.Errorf("TCEgressDetach(%s) called; the attach path must not leave the hook empty", iface)
-	return nil
-}
-func (f *fakeHooks) CleanupQdiscs(bool, bool) error {
-	f.t.Errorf("CleanupQdiscs called")
-	return nil
-}
-func (f *fakeHooks) GetAllAttachedProgIds() (map[string]int, map[string]int, error) {
-	return nil, nil, errors.New("not implemented")
-}
-
-// replaceFor is the replace call for a pod direction's program: pod ingress
-// runs on the host egress hook.
-func replaceFor(direction string) string {
-	if direction == "ingress" {
-		return "TCEgressReplace"
-	}
-	return "TCIngressReplace"
-}
-
-// contextProgFDs returns the program FDs the identifier's context holds.
-func contextProgFDs(t *testing.T, client *bpfClient, podIdentifier string) (ingress, egress int) {
-	t.Helper()
-	value, ok := client.policyEndpointeBPFContext.Load(podIdentifier)
-	require.True(t, ok)
-	return value.(BPFContext).ingressPgmInfo.Program.ProgFD, value.(BPFContext).egressPgmInfo.Program.ProgFD
-}
-
-// A filter still on the hook, as after an agent restart, is replaced in place.
-func TestBpfClient_AttacheBPFProbes_ExistingFilterIsReplaced(t *testing.T) {
-	for _, direction := range []string{"ingress", "egress"} {
-		t.Run(direction, func(t *testing.T) {
-			client, _ := newRaceTestBpfClient(t)
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			bpffs := recordBPFFS(t)
-			stubHostVeth(t)
-
-			pod := types.NamespacedName{Name: "job-c-x1", Namespace: "ns"}
-			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
-			ingressLoad, ingressProgFD := loadedProgram(t, podIdentifier, "ingress")
-			egressLoad, egressProgFD := loadedProgram(t, podIdentifier, "egress")
-			mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-			gomock.InOrder(
-				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(ingressLoad, nil, nil),
-				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
-			)
-			hooks := newFakeHooks(t)
-			const oldProgFD = 4242
-			if direction == "ingress" {
-				hooks.egress["mockedveth0"] = oldProgFD
-			} else {
-				hooks.ingress["mockedveth0"] = oldProgFD
-			}
-			client.bpfSDKClient = mockSDKClient
-			client.bpfTCClient = hooks
-
-			_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
-			require.NoError(t, err)
-			assert.Equal(t, map[string]int{"TCEgressReplace": 1, "TCIngressReplace": 1}, hooks.replaced)
-			assert.Equal(t, ingressProgFD, hooks.egress["mockedveth0"])
-			assert.Equal(t, egressProgFD, hooks.ingress["mockedveth0"])
-			podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
-			_, ingressRegistered := client.ingressPodToProgMap.Load(podKey)
-			_, egressRegistered := client.egressPodToProgMap.Load(podKey)
-			assert.True(t, ingressRegistered && egressRegistered)
-			assert.Empty(t, bpffs.unpinned, "a successful replace must not roll anything back")
-		})
-	}
+	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+	require.NoError(t, err)
+	podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+	_, ingressRegistered := client.ingressPodToProgMap.Load(podKey)
+	_, egressRegistered := client.egressPodToProgMap.Load(podKey)
+	assert.True(t, ingressRegistered && egressRegistered)
+	assert.Empty(t, bpffs.unpinned, "a successful replace must not roll anything back")
 }
 
 // A failed replace fails the attach like any attach error: the programs this
@@ -2316,51 +2232,8 @@ func TestBpfClient_AttacheBPFProbes_ReplaceFailureUnloads(t *testing.T) {
 	}
 }
 
-// A rollback keeps the filter it attached. The retry must leave every hook
-// running the new programs, not the rolled-back ones.
-func TestBpfClient_AttacheBPFProbes_RetryAfterRollbackReplacesFilter(t *testing.T) {
-	client, _ := newRaceTestBpfClient(t)
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	recordBPFFS(t)
-	stubHostVeth(t)
-
-	pod := types.NamespacedName{Name: "job-d-x1", Namespace: "ns"}
-	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
-	firstIngress, firstIngressFD := loadedProgram(t, podIdentifier, "ingress")
-	firstEgress, _ := loadedProgram(t, podIdentifier, "egress")
-	ingressLoad, ingressProgFD := loadedProgram(t, podIdentifier, "ingress")
-	egressLoad, egressProgFD := loadedProgram(t, podIdentifier, "egress")
-	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-	gomock.InOrder(
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(firstIngress, nil, nil),
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(firstEgress, nil, nil),
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(ingressLoad, nil, nil),
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
-	)
-	hooks := newFakeHooks(t)
-	hooks.callErr["TCIngressReplace/mockedveth0"] = errors.New("Link not found")
-	client.bpfSDKClient = mockSDKClient
-	client.bpfTCClient = hooks
-
-	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
-	require.ErrorContains(t, err, "Link not found")
-	require.False(t, client.HasBPFContext(podIdentifier))
-	require.Equal(t, firstIngressFD, hooks.egress["mockedveth0"], "the rollback keeps the attached filter")
-
-	first, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
-	require.NoError(t, err)
-	assert.True(t, first)
-	ctxIngress, ctxEgress := contextProgFDs(t, client, podIdentifier)
-	assert.Equal(t, ingressProgFD, ctxIngress)
-	assert.Equal(t, egressProgFD, ctxEgress)
-	assert.Equal(t, ctxIngress, hooks.egress["mockedveth0"], "the pod-ingress hook must run the context's program")
-	assert.Equal(t, ctxEgress, hooks.ingress["mockedveth0"], "the pod-egress hook must run the context's program")
-	assert.Equal(t, map[string]int{"TCEgressReplace": 2, "TCIngressReplace": 1}, hooks.replaced)
-}
-
-// ReAttachEbpfProbes replaces a filter the startup cleanup left behind.
-func TestBpfClient_ReAttachEbpfProbes_ExistingFilterIsReplaced(t *testing.T) {
+// ReAttachEbpfProbes replaces the filter of each veth whose program it reloads.
+func TestBpfClient_ReAttachEbpfProbes_ReplacesFilter(t *testing.T) {
 	for _, direction := range []string{"ingress", "egress"} {
 		t.Run(direction, func(t *testing.T) {
 			client, _ := newRaceTestBpfClient(t)
@@ -2373,21 +2246,18 @@ func TestBpfClient_ReAttachEbpfProbes_ExistingFilterIsReplaced(t *testing.T) {
 			load, progFD := loadedProgram(t, podIdentifier, direction)
 			mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 			mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(load, nil, nil)
-			hooks := newFakeHooks(t)
-			hook := hooks.egress
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 			if direction == "ingress" {
 				client.interfaceNametoIngressPinPath = pinPaths
+				mockTCClient.EXPECT().TCEgressReplace("eni1", progFD, gomock.Any()).Return(nil)
 			} else {
 				client.interfaceNametoEgressPinPath = pinPaths
-				hook = hooks.ingress
+				mockTCClient.EXPECT().TCIngressReplace("eni1", progFD, gomock.Any()).Return(nil)
 			}
-			hook["eni1"] = 4242
 			client.bpfSDKClient = mockSDKClient
-			client.bpfTCClient = hooks
+			client.bpfTCClient = mockTCClient
 
 			assert.NoError(t, client.ReAttachEbpfProbes())
-			assert.Equal(t, progFD, hook["eni1"])
-			assert.Equal(t, map[string]int{replaceFor(direction): 1}, hooks.replaced)
 			assert.True(t, client.HasBPFContext(podIdentifier))
 		})
 	}
@@ -3136,6 +3006,9 @@ type hookWatcher struct {
 	filters  []hookFilterCounts
 	detaches int
 	replaces map[string]int
+	// fail holds an error for a replace method to return once, without
+	// calling the SDK.
+	fail map[string]error
 }
 
 // hookFilterCounts is the filter count on the hook that carries the pod's
@@ -3168,12 +3041,20 @@ func (w *hookWatcher) TCIngressAttach(name string, progFD int, funcName string) 
 func (w *hookWatcher) TCEgressReplace(name string, progFD int, funcName string) error {
 	defer w.record("TCEgressReplace")
 	w.replaces["TCEgressReplace"]++
+	if err := w.fail["TCEgressReplace"]; err != nil {
+		delete(w.fail, "TCEgressReplace")
+		return err
+	}
 	return w.BpfTc.TCEgressReplace(name, progFD, funcName)
 }
 
 func (w *hookWatcher) TCIngressReplace(name string, progFD int, funcName string) error {
 	defer w.record("TCIngressReplace")
 	w.replaces["TCIngressReplace"]++
+	if err := w.fail["TCIngressReplace"]; err != nil {
+		delete(w.fail, "TCIngressReplace")
+		return err
+	}
 	return w.BpfTc.TCIngressReplace(name, progFD, funcName)
 }
 
@@ -3292,4 +3173,66 @@ func TestPolicyEventDatapathScope(t *testing.T) {
 			assert.Equal(t, tt.wantMsg, gotMsg)
 		})
 	}
+}
+
+// progID returns the kernel ID of the program fd refers to.
+func progID(t *testing.T, fd int) uint32 {
+	t.Helper()
+	info, err := goebpfprogs.GetBPFprogInfo(fd)
+	require.NoError(t, err)
+	return info.ID
+}
+
+// TestRetryAfterRollbackReplacesFilterKernel: a failed attach unloads what it
+// loaded but keeps the filter it already replaced, which runs a program the
+// agent no longer has. The retry loads new programs and must leave each hook
+// running them.
+func TestRetryAfterRollbackReplacesFilterKernel(t *testing.T) {
+	dir, _ := requireBPFKernelTests(t)
+	v4 := family{"v4", netip.MustParseAddrPort("10.0.0.1:40000"), netip.MustParseAddrPort("10.0.1.2:80"),
+		EVENTS_BINARY, TC_EGRESS_BINARY, []string{TC_INGRESS_BINARY}}
+	first := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	retry := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	// The hook checks below tell the two loads apart only by program ID.
+	require.NotEqual(t, progID(t, first.ingressFD), progID(t, retry.ingressFD))
+	require.NotEqual(t, progID(t, first.egressFD), progID(t, retry.egressFD))
+	pod := types.NamespacedName{Namespace: "default", Name: "rollback-0"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	link := enterTestNetns(t, cniHostVethName(pod))
+	recordBPFFS(t)
+
+	// The SDK client returns the loaded programs; only their FDs reach the kernel.
+	loaded := func(direction string, fd int) map[string]goelf.BpfData {
+		data, _ := loadedProgram(t, podIdentifier, direction)
+		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
+		d := data[pinPath]
+		d.Program.ProgFD = fd
+		data[pinPath] = d
+		return data
+	}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", first.ingressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", first.egressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", retry.ingressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", retry.egressFD), nil, nil),
+	)
+	watcher := &hookWatcher{BpfTc: tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}), t: t, link: link,
+		replaces: map[string]int{}, fail: map[string]error{"TCIngressReplace": errors.New("replace failed")}}
+	client, _ := newRaceTestBpfClient(t)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = watcher
+
+	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.ErrorContains(t, err, "replace failed")
+	require.False(t, client.HasBPFContext(podIdentifier))
+	require.Equal(t, [2][]uint32{{progID(t, first.ingressFD)}, nil}, hookIDs(t, link), "the rollback keeps the filter it replaced")
+
+	_, err = client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.NoError(t, err)
+	assert.Equal(t, [2][]uint32{{progID(t, retry.ingressFD)}, {progID(t, retry.egressFD)}}, hookIDs(t, link),
+		"each hook must run the retry's program")
+	assert.Zero(t, watcher.detaches)
 }
