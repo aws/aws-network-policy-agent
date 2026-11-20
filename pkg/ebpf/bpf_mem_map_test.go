@@ -127,3 +127,53 @@ func TestSummarizeKeys(t *testing.T) {
 	assert.Equal(t, "a, b, c", summarizeKeys([]string{"a", "b", "c"}))
 	assert.Equal(t, "a, b, c and 2 more", summarizeKeys([]string{"a", "b", "c", "d", "e"}))
 }
+
+func TestRefreshFromRules_CleanRefreshRecordsFingerprint(t *testing.T) {
+	m, f := newTestMap(map[string][]byte{key(8): val(8)})
+	assert.False(t, m.ProgrammedFrom("fp-a"), "a map loaded from the kernel holds no known rules")
+
+	assert.NoError(t, m.RefreshFromRules("fp-a", map[string][]byte{key(1): val(1)}))
+	assert.True(t, m.ProgrammedFrom("fp-a"))
+	assert.False(t, m.ProgrammedFrom("fp-b"))
+	assert.False(t, m.ProgrammedFrom(""), "an empty fingerprint must never match")
+	assert.Equal(t, map[string][]byte{key(1): val(1)}, f.entries)
+
+	assert.NoError(t, m.RefreshFromRules("fp-b", map[string][]byte{key(2): val(2)}))
+	assert.True(t, m.ProgrammedFrom("fp-b"))
+	assert.False(t, m.ProgrammedFrom("fp-a"), "only the latest rules are recorded")
+}
+
+// A refresh that did not land everything must not be recorded, or the next call with the
+// same rules would skip the diff that retries the failure.
+func TestRefreshFromRules_FailedUpdateRecordsNoFingerprint(t *testing.T) {
+	m, f := newTestMap(nil)
+	assert.NoError(t, m.RefreshFromRules("fp-a", map[string][]byte{key(1): val(1)}))
+	f.updateErrs[key(2)] = fmt.Errorf("unable to update map: %w", unix.ENOMEM)
+
+	assert.Error(t, m.RefreshFromRules("fp-b", map[string][]byte{key(1): val(1), key(2): val(2)}))
+	assert.False(t, m.ProgrammedFrom("fp-b"))
+	assert.False(t, m.ProgrammedFrom("fp-a"), "the map no longer holds fp-a's entries either")
+}
+
+// BulkRefresh swallows delete failures (see TestBulkRefresh_FailedDeleteIsRetriedNextRefresh),
+// so RefreshFromRules has to notice them itself.
+func TestRefreshFromRules_FailedDeleteRecordsNoFingerprint(t *testing.T) {
+	m, f := newTestMap(map[string][]byte{key(8): val(8)})
+	f.deleteErrs[key(8)] = fmt.Errorf("unable to delete map entry: %w", unix.EPERM)
+
+	assert.NoError(t, m.RefreshFromRules("fp-a", map[string][]byte{key(1): val(1)}))
+	assert.False(t, m.ProgrammedFrom("fp-a"), "the stale key is still in the kernel")
+
+	delete(f.deleteErrs, key(8))
+	assert.NoError(t, m.RefreshFromRules("fp-a", map[string][]byte{key(1): val(1)}))
+	assert.True(t, m.ProgrammedFrom("fp-a"))
+	assert.NotContains(t, f.entries, key(8))
+	assert.Equal(t, 2, f.deleteCalls[key(8)])
+}
+
+func TestBulkRefresh_ForgetsFingerprint(t *testing.T) {
+	m, _ := newTestMap(nil)
+	assert.NoError(t, m.RefreshFromRules("fp-a", map[string][]byte{key(1): val(1)}))
+	assert.NoError(t, m.BulkRefresh(map[string][]byte{key(1): val(1)}))
+	assert.False(t, m.ProgrammedFrom("fp-a"), "a refresh without rules says nothing about them")
+}
