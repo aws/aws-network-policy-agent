@@ -7,7 +7,7 @@ Guidance for coding agents and human contributors working in this repository.
 The AWS Network Policy Agent enforces Kubernetes NetworkPolicy and ClusterNetworkPolicy on EKS nodes with eBPF. It runs on each node as a container in the `aws-node` DaemonSet.
 
 - `main.go`: agent entry point. `controllers/`: reconcilers for PolicyEndpoint and ClusterPolicyEndpoint objects.
-- `pkg/ebpf/`: loads, attaches and recovers the BPF programs through `github.com/aws/aws-ebpf-sdk-go`. `pkg/ebpf/c/`: the BPF C sources, four tc programs and two events programs, v4 and v6. The two ingress sources are also built with `-DNPA_CT_SHORTEN_ON_DENY` into the ct-deny objects (code in `ct_deny.h`), so the image ships six tc objects and two events objects. The agent picks the ct-deny or the regular ingress object once at startup.
+- `pkg/ebpf/`: loads, attaches and recovers the BPF programs through `github.com/aws/aws-ebpf-sdk-go`. `pkg/ebpf/c/`: the BPF C sources, four tc programs and two events programs, v4 and v6. The two ingress sources are also built with `-DNPA_CT_SHORTEN_ON_DENY` into the ct-deny objects (code in `ct_deny.h`), so the image ships six tc objects and two events objects, plus `tc.shared.bpf.o`, which holds no programs, only node-wide maps the tc programs share (`tc_shared.h`). New node-wide maps the tc programs share go in `tc.shared.bpf.c`, not the events binary, so changing them does not recreate `aws_conntrack_map`. The agent picks the ct-deny or the regular ingress object once at startup.
 - `pkg/fwruleprocessor/`: turns policy rules into BPF map entries. `pkg/rpc/`: the gRPC server the VPC CNI calls on pod add and delete.
 - `cmd/cli`, `cmd/cliv6`: the `aws-eks-na-cli` node tools. `test/`: ginkgo integration suites and framework.
 
@@ -22,8 +22,9 @@ The AWS Network Policy Agent enforces Kubernetes NetworkPolicy and ClusterNetwor
 CI:
 
 - `.github/workflows/pr-tests.yaml` runs on pushes to `main` and on PRs to `main` and `release*`: `check-format`, `vet`, `build-linux` and `make test`. On PRs it also runs `make docker-buildx`, a deprecated-apiGroups check and `govulncheck`. Only the docker job compiles the C.
-- A PR comment `/test cyclonus <full-sha>` from a user with write access runs `pr-cyclonus-tests.yaml`: cyclonus plus the `policy`, `ebpf`, `clusternetworkpolicy` and `strict` suites, on IPv4 and IPv6 clusters.
-- `nightly-kernel-tests.yaml` runs `scripts/run-kernel-smoke-tests.sh` (`policy`, `ebpf`, then `strict`) daily across AL2023 kernel lines, on IPv4 and IPv6. New eBPF tests belong in one of those suites.
+- A PR comment `/test cyclonus <full-sha>` from a user with write access runs `pr-cyclonus-tests.yaml`: cyclonus plus the `policy`, `ebpf`, `clusternetworkpolicy`, `agentflags` and `strict` suites, on IPv4 and IPv6 clusters.
+- `nightly-kernel-tests.yaml` runs `scripts/run-kernel-smoke-tests.sh` (`policy`, `ebpf`, `agentflags`, then `strict`) daily across AL2023 kernel lines, on IPv4 and IPv6. New eBPF tests belong in one of those suites.
+- `agentflags`, and the conntrack GC specs in `ebpf`, change the agent's args on aws-node. Both scripts run those suites through `run_suite_restoring_agent_args` in `scripts/lib/tests.sh`, which saves the args first and restores them after the suite, or on exit if the script stops mid-suite, so a killed run can't leave a flag on for the suites after it. `agentflags` also runs late, after the suites that expect the stock agent and before `strict`.
 - `restart`, `leak`, `upgrade` and `soak` are not run by any workflow. Verifier rejections show up only on a real kernel.
 
 ## Hard rules

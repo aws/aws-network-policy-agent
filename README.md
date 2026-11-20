@@ -44,6 +44,19 @@ Set this flag to `true` to enable the collection & logging of policy decision lo
 
 > Notice: Enabling this feature requires one CPU core per node.
 
+#### `policy-event-logs-scope`
+
+Type: String
+
+Default: all
+
+Requires `enable-policy-event-logs=true`. Selects which policy verdicts produce policy events:
+
+- `all`: ACCEPT and DENY events are emitted by the datapath. ACCEPT events are only logged when `log-level` is `debug`.
+- `deny`: DENY events only. The datapath does not emit ACCEPT events, so there are no ACCEPT flow lines and no ACCEPT CloudWatch events at any log level.
+
+Invalid values fall back to `all`. If `deny` is set while `enable-policy-event-logs` is `false`, the agent logs a warning and the flag has no effect.
+
 #### `enable-cloudwatch-logs`
 
 Type: Boolean
@@ -100,7 +113,7 @@ Default: debug
 
 Sets the logging verbosity for the Network Policy Agent. Valid options are: debug, info, warn, error.
 DENY flow logs are always logged, regardless of the log level.
-ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true
+ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true. With `--policy-event-logs-scope=deny`, ACCEPT flow logs are not emitted at any log level.
 
 #### `conntrack-cache-cleanup-period` (from v1.0.7+)
 
@@ -124,6 +137,16 @@ Network Policy agent maintains a local conntrack cache. Ideally this should be o
 $ cat /proc/sys/net/netfilter/nf_conntrack_max
 262144
 ```
+
+#### `enable-tcp-reset-on-deny`
+
+Type: Boolean
+
+Default: false
+
+If enabled, a TCP connection attempt (SYN) that a policy denies is answered with a TCP RST instead of being dropped silently, and the client sees "connection refused" at once instead of a timeout. This lets EC2 free the connection's tracking state on both the client's and the server's instance at once; a silently dropped SYN keeps it for about two minutes. Consider it if floods of denied connections, for example through a Network Load Balancer, exhaust the instance's connection tracking allowance (`conntrack_allowance_exceeded`).
+
+It is off by default because a RST tells the sender that the address exists and is blocked by policy, which a silent drop does not. Only bare SYNs are answered; other denied packets are still dropped. Enable it only where denied traffic comes from inside your own network, such as internal services; leave it off where pods are reachable from the internet or other networks you don't control. See [the proposal](docs/proposals/tcp-reset-on-deny.md).
 
 ## Network Policy Agent CLI
 The Amazon VPC CNI plugin for Kubernetes installs eBPF SDK collection of tools on the nodes. You can use the eBPF SDK tools to identify issues with network policies. For example, the following command lists the programs that are running on the node.

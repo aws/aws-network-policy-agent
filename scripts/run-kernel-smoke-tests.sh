@@ -1,11 +1,15 @@
 #!/bin/bash
 
-# Runs the kernel-sensitive test suites against an existing cluster. Both
+# Runs the kernel-sensitive test suites against an existing cluster. The
 # suites run identically on IPv4 and IPv6 clusters, so every kernel line in
 # the nightly matrix gets the same coverage:
 #   policy.test - network policy enforcement through the agent's TC programs
 #   ebpf.test   - eBPF program behavior, including the conntrack shortening of
 #                 denied connections on kernels with the nf_conntrack kfuncs
+#   restart.test - agent restarts: conntrack state survives and a deny policy
+#                 holds while the agent re-attaches pods' programs
+#   agentflags.test - agent flags set on aws-node, such as TCP reset on deny
+#                 (changes aws-node and restores it, so it runs before strict)
 #   strict.test - strict enforcement mode (mutates aws-node, so it runs last)
 #
 # Parameters:
@@ -36,7 +40,11 @@ echo "Making ginkgo test binaries"
 
 run_ginkgo_suite policy.test 15m
 
-run_ginkgo_suite ebpf.test 15m
+run_suite_restoring_agent_args ebpf.test 15m
+
+run_ginkgo_suite restart.test 15m
+
+run_suite_restoring_agent_args agentflags.test 15m
 
 enable_strict_mode
 

@@ -4,7 +4,6 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -184,6 +183,15 @@ func GetPodIdentifier(podName, podNamespace string) string {
 		podIdentifierPrefix = strings.Join(tmpName[:len(tmpName)-1], "-")
 	}
 	return podIdentifierPrefix + "@" + podNamespace
+}
+
+// GetPodNamespaceFromPodIdentifier returns the namespace of an identifier built by GetPodIdentifier.
+func GetPodNamespaceFromPodIdentifier(podIdentifier string) (string, bool) {
+	i := strings.LastIndex(podIdentifier, "@")
+	if i < 0 {
+		return "", false
+	}
+	return podIdentifier[i+1:], true
 }
 
 // LegacyGetPodIdentifier replicates the pre-fix GetPodIdentifier algorithm
@@ -471,14 +479,6 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	return protocol
 }
 
-// IsFileExistsError reports whether err is EEXIST, as returned by netlink when a
-// tc filter or qdisc already exists. netlink appends the kernel's extended ack
-// message to the errno when error reporting is on, so compare the errno, not the
-// text.
-func IsFileExistsError(err error) bool {
-	return errors.Is(err, unix.EEXIST)
-}
-
 func IsInvalidFilterListError(error string) bool {
 	errCode := strings.Split(error, ":")
 	if errCode[0] == ErrInvalidFilterList {
@@ -524,10 +524,6 @@ func ConvIntToIPv4(ipaddr uint32) net.IP {
 	return ip
 }
 
-func ConvIPv4ToInt(ipaddr net.IP) uint32 {
-	return uint32(ipaddr[0])<<24 | uint32(ipaddr[1])<<16 | uint32(ipaddr[2])<<8 | uint32(ipaddr[3])
-}
-
 func ConvIntToIPv4NetworkOrder(ipaddr uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, ipaddr)
@@ -537,11 +533,6 @@ func ConvIntToIPv4NetworkOrder(ipaddr uint32) net.IP {
 func ConvByteToIPv6(ipaddr [16]byte) net.IP {
 	ip := net.IP(ipaddr[:])
 	return ip
-}
-
-func ConvIPv6ToByte(ipaddr net.IP) []byte {
-	ipaddrBytes := ipaddr.To16()
-	return ipaddrBytes
 }
 
 type ConntrackKeyV6 struct {

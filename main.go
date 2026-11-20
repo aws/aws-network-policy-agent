@@ -75,6 +75,9 @@ func main() {
 		os.Exit(1)
 	}
 	log := logger.New(ctrlConfig.LogLevel, ctrlConfig.LogFile, ctrlConfig.LogFileMaxSize, ctrlConfig.LogFileMaxBackups)
+	// Runs when main returns or panics. os.Exit skips it, so each os.Exit below follows an
+	// Errorf, which writes out the buffered lines itself.
+	defer logger.Sync()
 	log.Infof("Starting network policy agent: %s, log level: %s", version.String(), ctrlConfig.LogLevel)
 
 	ctrl.SetLogger(logger.GetControllerRuntimeLogger())
@@ -102,6 +105,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	policyEventsDenyOnly, validScope := config.ParsePolicyEventLogsScope(ctrlConfig.PolicyEventLogsScope)
+	if !validScope {
+		log.Warnf("Invalid --policy-event-logs-scope=%q; using \"all\" (valid values: all, deny)", ctrlConfig.PolicyEventLogsScope)
+	}
 	ctx := ctrl.SetupSignalHandler()
 
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
@@ -119,7 +126,8 @@ func main() {
 		npMode, isMultiNICEnabled := lo.Must2(getNetworkPolicyConfigsFromIpamd(ctx, log))
 
 		ebpfClient := lo.Must1(ebpf.NewBpfClient(ctx, nodeIP, ctrlConfig.EnablePolicyEventLogs, ctrlConfig.EnableCloudWatchLogs,
-			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel))
+			ctrlConfig.EnableIPv6, ctrlConfig.ConntrackCacheCleanupPeriod, ctrlConfig.ConntrackCacheTableSize, npMode, isMultiNICEnabled, ctrlConfig.LogLevel,
+			ctrlConfig.EnableTCPResetOnDeny, policyEventsDenyOnly))
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
@@ -211,7 +219,7 @@ func getNetworkPolicyConfigsFromIpamd(ctx context.Context, log logger.Logger) (s
 	log.Infof("Trying to establish GRPC connection to ipamd at %s", LOCAL_IPAMD_ADDRESS)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType())
+	grpcConn, err := rpcclient.New().Dial(ctx, LOCAL_IPAMD_ADDRESS, rpcclient.GetDefaultServiceRetryConfig(), rpcclient.GetInsecureConnectionType(), rpcclient.GetFastReconnectParams())
 	if err != nil {
 		log.Errorf("Failed to connect to ipamd at %s: %v", LOCAL_IPAMD_ADDRESS, err)
 		return "", false, err

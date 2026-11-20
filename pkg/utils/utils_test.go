@@ -1,15 +1,12 @@
 package utils
 
 import (
-	"errors"
-	"fmt"
 	"net"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -846,27 +843,6 @@ func TestGetHostVethName_PrefixMatches(t *testing.T) {
 	}
 }
 
-func TestIsFileExistsError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "bare EEXIST", err: unix.EEXIST, want: true},
-		// netlink appends the extended ack message when error reporting is on.
-		{name: "EEXIST with extended ack message", err: fmt.Errorf("%w: %s", unix.EEXIST, "Filter already exists"), want: true},
-		{name: "wrapped EEXIST", err: fmt.Errorf("attach ingress: %w", unix.EEXIST), want: true},
-		{name: "text without the errno", err: errors.New("file exists"), want: false},
-		{name: "other errno", err: unix.ENOENT, want: false},
-		{name: "nil", err: nil, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsFileExistsError(tt.err))
-		})
-	}
-}
-
 func TestIsInvalidFilterListError(t *testing.T) {
 	type args struct {
 		error string
@@ -998,5 +974,22 @@ func TestGetHostVethName_MatchesCNINaming(t *testing.T) {
 			assert.Equal(t, tt.want, got,
 				"host-veth naming must stay in step with the VPC CNI")
 		})
+	}
+}
+
+func TestGetPodNamespaceFromPodIdentifier(t *testing.T) {
+	for _, tc := range []struct{ name, namespace string }{
+		{"web-6d4b75cb6d-zzzzz", "team-a"},
+		{"standalone", "default"},
+		{"my.dotted-pod-1", "kube-system"},
+	} {
+		id := GetPodIdentifier(tc.name, tc.namespace)
+		if got, ok := GetPodNamespaceFromPodIdentifier(id); !ok || got != tc.namespace {
+			t.Errorf("GetPodNamespaceFromPodIdentifier(%q) = %q, %v, want %q, true", id, got, ok, tc.namespace)
+		}
+	}
+	legacy := LegacyGetPodIdentifier("web-6d4b75cb6d-zzzzz", "team-a")
+	if got, ok := GetPodNamespaceFromPodIdentifier(legacy); ok || got != "" {
+		t.Errorf("GetPodNamespaceFromPodIdentifier(%q) = %q, %v, want \"\", false", legacy, got, ok)
 	}
 }
