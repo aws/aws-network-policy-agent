@@ -16,11 +16,13 @@ import (
 )
 
 // TestPolicyEventReaderSkipsAcceptKernel drives the production reader loop
-// (events.ConfigurePolicyEventsLogging) over a real ring buffer. With scope
-// deny at debug level, an ACCEPT record must not reach the flow log, while a
-// DENY record must. The DENY line is awaited first: once it is logged, the
-// reader has already consumed the ACCEPT record before it, so the ACCEPT's
-// absence is meaningful.
+// (events.ConfigurePolicyEventsLogging) over a real ring buffer. The datapath
+// is set to scope all, so the kernel writes ACCEPT records. The reader runs
+// with denyOnly at debug level and must skip them: an ACCEPT record must not
+// reach the flow log, while a DENY record must. Removing the reader's skip
+// makes the ACCEPT line appear, so the test fails. The DENY line is awaited
+// first: once it is logged, the reader has already consumed the ACCEPT record
+// before it, so the ACCEPT's absence is meaningful.
 func TestPolicyEventReaderSkipsAcceptKernel(t *testing.T) {
 	dir, _ := requireBPFKernelTests(t)
 	fam := family{"v4", netip.MustParseAddrPort("10.0.0.1:40000"), netip.MustParseAddrPort("10.0.1.2:80"),
@@ -37,7 +39,9 @@ func TestPolicyEventReaderSkipsAcceptKernel(t *testing.T) {
 			logger.DEFAULT_LOG_FILE_MAX_SIZE, logger.DEFAULT_LOG_FILE_MAX_BACKUPS)
 	})
 
-	require.NoError(t, writeTCConfig(progs.config, false, POLICY_EVENT_SCOPE_DENY))
+	// Datapath scope all: the kernel writes the ACCEPT record, so the only thing
+	// keeping it out of the log is the reader loop's skip under denyOnly below.
+	require.NoError(t, writeTCConfig(progs.config, false, POLICY_EVENT_SCOPE_ALL))
 	dupFD, err := unix.Dup(int(progs.events.MapFD))
 	require.NoError(t, err)
 	// ConfigurePolicyEventsLogging owns the FD it is given and starts the reader.
