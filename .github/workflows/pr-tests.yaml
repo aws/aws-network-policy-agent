@@ -48,13 +48,15 @@ jobs:
         # These tests create a network namespace and conntrack flows, so they
         # need root and skip under make test. Build as the runner user and run
         # the binary with sudo, so no root-owned files land in the Go caches.
+        # The binary is built with coverage, and its profile is uploaded with
+        # make test's, since the conntrack GC is covered mostly by these tests.
         env:
           BPF_KERNEL_TESTS: required
         run: |
           sudo modprobe nf_conntrack
-          go test -c -o "$RUNNER_TEMP/conntrack.test" ./pkg/ebpf/conntrack/
+          go test -c -cover -covermode=atomic -o "$RUNNER_TEMP/conntrack.test" ./pkg/ebpf/conntrack/
           cd pkg/ebpf/conntrack
-          sudo --preserve-env=BPF_KERNEL_TESTS "$RUNNER_TEMP/conntrack.test" -test.run 'Kernel$' -test.v
+          sudo --preserve-env=BPF_KERNEL_TESTS "$RUNNER_TEMP/conntrack.test" -test.run 'Kernel$' -test.v -test.coverprofile="$RUNNER_TEMP/coverage-conntrack-kernel.txt"
       - name: BPF program kernel tests
         # These tests load the agent's compiled TC programs and run them on
         # test packets, so they need root and the BPF objects, which are
@@ -76,7 +78,7 @@ jobs:
       - name: Upload code coverage
         uses: codecov/codecov-action@v4
         with:
-          files: coverage.txt,${{ runner.temp }}/coverage-bpf-kernel.txt
+          files: coverage.txt,${{ runner.temp }}/coverage-conntrack-kernel.txt,${{ runner.temp }}/coverage-bpf-kernel.txt
           disable_search: true
           flags: unittest
           fail_ci_if_error: false
