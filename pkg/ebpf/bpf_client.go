@@ -1181,7 +1181,6 @@ func (l *bpfClient) deleteBPFProbes(podIdentifier string) error {
 }
 
 func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction string) error {
-	var err error
 	var peBPFContext BPFContext
 	value, ok := l.policyEndpointeBPFContext.Load(podIdentifier)
 	if ok {
@@ -1189,46 +1188,30 @@ func (l *bpfClient) deleteBPFProgramAndMaps(podIdentifier string, direction stri
 	}
 
 	pgmPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
-	mapPinpath, clusterPolicyMapPinpath := utils.GetBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
-	podStateMapPinPath := utils.GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
-
-	log().Infof("Deleting: Program: %s Map: %s Map: %s", pgmPinPath, mapPinpath, podStateMapPinPath)
-
 	pgmInfo := peBPFContext.ingressPgmInfo
-	mapToDelete, clusterPolicyMap := pgmInfo.Maps[utils.TC_INGRESS_MAP], pgmInfo.Maps[utils.TC_CLUSTER_POLICY_INGRESS_MAP]
-	podStateMapToDelete := pgmInfo.Maps[utils.TC_INGRESS_POD_STATE_MAP]
 	if direction == "egress" {
 		pgmInfo = peBPFContext.egressPgmInfo
-		mapToDelete, clusterPolicyMap = pgmInfo.Maps[utils.TC_EGRESS_MAP], pgmInfo.Maps[utils.TC_CLUSTER_POLICY_EGRESS_MAP]
-		podStateMapToDelete = pgmInfo.Maps[utils.TC_EGRESS_POD_STATE_MAP]
 	}
+
+	log().Infof("Deleting: Program: %s", pgmPinPath)
 
 	var errs []error
 	if pgmInfo.Program.ProgFD != 0 {
-		log().Infof("Found the Program and Map to delete - Program: %s Map: %s Map: %s", pgmPinPath, mapPinpath, podStateMapPinPath)
-		err = unpinProgram(&pgmInfo.Program, pgmPinPath)
+		log().Infof("Found the Program and Maps to delete for pod %s direction %s", podIdentifier, direction)
+		err := unpinProgram(&pgmInfo.Program, pgmPinPath)
 		if err != nil {
 			log().Errorf("Failed to delete the Program: %v", err)
 			errs = append(errs, err)
 			closeAfterFailedUnpin(pgmInfo.Program.ProgFD)
 		}
-		err = unpinMap(&mapToDelete, mapPinpath)
-		if err != nil {
-			log().Errorf("Failed to delete the Map: %v", err)
-			errs = append(errs, err)
-			closeAfterFailedUnpin(int(mapToDelete.MapFD))
-		}
-		err = unpinMap(&podStateMapToDelete, podStateMapPinPath)
-		if err != nil {
-			log().Errorf("Failed to delete PodState Map: %v", err)
-			errs = append(errs, err)
-			closeAfterFailedUnpin(int(podStateMapToDelete.MapFD))
-		}
-		err = unpinMap(&clusterPolicyMap, clusterPolicyMapPinpath)
-		if err != nil {
-			log().Errorf("Failed to delete the cluster policy Map: %v", err)
-			errs = append(errs, err)
-			closeAfterFailedUnpin(int(clusterPolicyMap.MapFD))
+		for _, name := range utils.NamespacedBPFMapsForDirection(direction) {
+			m := pgmInfo.Maps[name]
+			pinPath := utils.GetBPFMapPinPath(podIdentifier, name)
+			if err := unpinMap(&m, pinPath); err != nil {
+				log().Errorf("Failed to delete map %s: %v", name, err)
+				errs = append(errs, err)
+				closeAfterFailedUnpin(int(m.MapFD))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -1461,17 +1444,35 @@ var (
 	unpinMap     = (*goebpfmaps.BpfMap).UnPinMap
 )
 
-// closeLoadedObjects closes the FDs of a discarded load. loadedMaps holds only
-// the maps the load created, not the global maps.
-func closeLoadedObjects(progInfo map[string]goelf.BpfData, loadedMaps map[string]goebpfmaps.BpfMap) {
-	for _, bpfData := range progInfo {
-		if bpfData.Program.ProgFD > 0 {
-			closeFD(bpfData.Program.ProgFD)
+// closeLoadedObjects unpins and closes the objects of a discarded load.
+// progInfo keys are the program pin paths. loadedMaps holds only the maps the
+// load created (not global maps); their pin paths are derived from podIdentifier.
+// Unpinning before closing prevents partial-load FDs from staying open and
+// prevents their pins from being recovered into a live BPF context on agent
+// restart. PinMap and PinProg overwrite any existing pin before creating a new
+// one, so stale pins from a failed load do not block retries.
+// Unpin by path is safe: for callers holding podIdentifierLocks no concurrent
+// load for the same identifier can own the pins being removed. The one caller
+// that does not hold that lock — ReAttachEbpfProbes — is safe because it runs
+// before the RPC server starts, so no concurrent caller exists.
+func closeLoadedObjects(progInfo map[string]goelf.BpfData, loadedMaps map[string]goebpfmaps.BpfMap, podIdentifier string) {
+	for pinPath, bpfData := range progInfo {
+		prog := bpfData.Program
+		if prog.ProgFD > 0 {
+			fd := prog.ProgFD // capture before unpin zeroes it
+			if err := unpinProgram(&prog, pinPath); err != nil {
+				closeFD(fd)
+			}
 		}
 	}
-	for _, bpfMap := range loadedMaps {
-		if bpfMap.MapFD > 0 {
-			closeFD(int(bpfMap.MapFD))
+	for mapName, bpfMap := range loadedMaps {
+		m := bpfMap
+		if m.MapFD > 0 {
+			fd := int(m.MapFD) // capture before unpin zeroes it
+			pinPath := utils.GetBPFMapPinPath(podIdentifier, mapName)
+			if err := unpinMap(&m, pinPath); err != nil {
+				closeFD(fd)
+			}
 		}
 	}
 }
@@ -1497,21 +1498,32 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	bpfData, ok := progInfo[pinPath]
 	if !ok {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoPinPath").Inc()
-		closeLoadedObjects(progInfo, loadedMaps)
+		closeLoadedObjects(progInfo, loadedMaps, podIdentifier)
 		return nil, -1, fmt.Errorf("no program data found at pinPath %s for pod %s direction %s", pinPath, podIdentifier, direction)
 	}
 
 	progFD := bpfData.Program.ProgFD
 	if progFD == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-InvalidFD").Inc()
-		closeLoadedObjects(progInfo, loadedMaps)
+		closeLoadedObjects(progInfo, loadedMaps, podIdentifier)
 		return nil, -1, fmt.Errorf("program loaded with invalid FD 0 for pod %s direction %s", podIdentifier, direction)
 	}
 
+	// Kept for the LoadBpfFile-NoMaps metric; the per-map loop below would also
+	// catch this, but would not distinguish it from a partial map set.
 	if len(bpfData.Maps) == 0 {
 		sdkAPIErr.WithLabelValues("LoadBpfFile-NoMaps").Inc()
-		closeLoadedObjects(progInfo, loadedMaps)
+		closeLoadedObjects(progInfo, loadedMaps, podIdentifier)
 		return nil, -1, fmt.Errorf("program loaded but has no associated maps for pod %s direction %s progFD %d", podIdentifier, direction, progFD)
+	}
+
+	for _, name := range utils.NamespacedBPFMapsForDirection(direction) {
+		m, ok := bpfData.Maps[name]
+		if !ok || m.MapFD == 0 {
+			sdkAPIErr.WithLabelValues("LoadBpfFile-MissingMap").Inc()
+			closeLoadedObjects(progInfo, loadedMaps, podIdentifier)
+			return nil, -1, fmt.Errorf("program loaded missing map %s for pod %s direction %s", name, podIdentifier, direction)
+		}
 	}
 
 	log().Infof("Prog Load Succeeded for %s, progFD: %d, pinpath: %s, maps: %d", direction, progFD, pinPath, len(bpfData.Maps))
