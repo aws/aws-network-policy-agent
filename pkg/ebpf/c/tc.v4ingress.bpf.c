@@ -363,6 +363,16 @@ int handle_ingress(struct __sk_buff *skb)
 			return BPF_OK;
 		}
 
+		// The L4 pointers above are at a fixed 20-byte offset, which is only
+		// where the L4 header is when the IP header carries no options. With
+		// options (ihl > 5) that offset is still inside the IP header, so the
+		// values read there are not this packet's ports. Reject instead of
+		// parsing at a variable offset, which the verifier dislikes: pod
+		// traffic does not use IPv4 options.
+		if (ip->ihl != HEADER_LEN_WORDS(sizeof(struct iphdr))) {
+			return BPF_DROP;
+		}
+
 		switch (ip->protocol) {
 			case IPPROTO_TCP:
 				if (data + sizeof(*ip) + sizeof(*l4_tcp_hdr) > data_end) {
