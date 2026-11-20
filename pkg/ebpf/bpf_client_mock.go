@@ -21,6 +21,7 @@ func NewMockBpfClient() *bpfClient {
 		hostMask:                        "/32",
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
+		podIPs:                          newPodIPRegistry(),
 	}
 }
 
@@ -263,6 +264,9 @@ func (m *MockBpfClient) CreatePodStateEbpfEntryIfNotExists(podIdentifier string,
 func (m *MockBpfClient) HasBPFContext(podIdentifier string) bool {
 	return !m.PodIdentifiersWithoutBPFContext[podIdentifier]
 }
+
+func (m *MockBpfClient) RegisterPodIP(_ string, _ types.NamespacedName) {}
+func (m *MockBpfClient) DeregisterPodIP(_ types.NamespacedName)         {}
 
 func (m *MockBpfClient) recordPodState(podIdentifier string, key int, state int) {
 	if m.PodStateByIdentifier == nil {

@@ -45,7 +45,7 @@ func TestPolicyEventReaderSkipsAcceptKernel(t *testing.T) {
 	dupFD, err := unix.Dup(int(progs.events.MapFD))
 	require.NoError(t, err)
 	// ConfigurePolicyEventsLogging owns the FD it is given and starts the reader.
-	require.NoError(t, events.ConfigurePolicyEventsLogging(false, dupFD, false, true))
+	require.NoError(t, events.ConfigurePolicyEventsLogging(false, dupFD, false, true, nil))
 
 	// One allowed connection (ACCEPT, which scope deny must not log) and one
 	// denied connection (DENY, which must be logged).
