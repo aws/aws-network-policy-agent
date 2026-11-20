@@ -2197,7 +2197,8 @@ func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T
 // When only one direction's binary changes, the recovered entries of that
 // direction are not kept. The FDs the SDK opened for them (program and per-pod
 // maps, including the pod state map) belong to the caller and must be closed,
-// while the node-wide maps in the same entry stay open.
+// while the kept ingress entry (per-pod maps and the node-wide conntrack map)
+// stays open.
 func TestRecoverBPFStateClosesFDsOfUpdatedDirection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2211,6 +2212,12 @@ func TestRecoverBPFStateClosesFDsOfUpdatedDirection(t *testing.T) {
 	recovered := map[string]goelf.BpfData{
 		ingressPin: {
 			Program: goebpfprogs.BpfProgram{ProgFD: 10},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_INGRESS_MAP:                {MapFD: 11},
+				utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 12},
+				utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 13},
+				AWS_CONNTRACK_MAP:                   {MapFD: 5},
+			},
 		},
 		egressPin: {
 			Program: goebpfprogs.BpfProgram{ProgFD: 20},
@@ -2228,6 +2235,11 @@ func TestRecoverBPFStateClosesFDsOfUpdatedDirection(t *testing.T) {
 	mockTCClient.EXPECT().CleanupQdiscs(false, true).Return(nil)
 
 	c := NewMockBpfClient()
+	// The kept ingress entry would load its maps from the kernel; mark them as
+	// already loaded so the test stays kernel-free.
+	c.ingressInMemoryMap = new(sync.Map)
+	c.ingressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
+	c.clusterPolicyIngressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
 	ctx := new(sync.Map)
 	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, ctx, new(sync.Map), false, true, false)
 	require.NoError(t, err)
