@@ -372,12 +372,9 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 			}
 
 			if enableCloudWatchLogs {
-				// Apply same filtering as local logging:
-				// DENY always published, ACCEPT only at debug level
-				if isDenyVerdict || debugEnabled {
-					message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
-					publishDataToCloudwatch(ctx, message)
-				}
+				// Only DENY events and, at debug level, ACCEPT events reach this point.
+				message := "Node: " + nodeName + ";" + "SIP: " + srcIP + ";" + "SPORT: " + strconv.Itoa(int(srcPort)) + ";" + "DIP: " + destIP + ";" + "DPORT: " + strconv.Itoa(int(destPort)) + ";" + "PROTOCOL: " + protocol + ";" + "PolicyVerdict: " + verdict + ";" + "Tier: " + tier
+				publishDataToCloudwatch(ctx, message)
 			}
 		}
 	}()

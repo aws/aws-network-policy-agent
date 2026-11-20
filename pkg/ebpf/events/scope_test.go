@@ -6,6 +6,17 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 )
 
+// setFlowLogLevel sets the global logger to level for the duration of t and
+// restores the default logger when the test ends.
+func setFlowLogLevel(t *testing.T, level string) {
+	t.Helper()
+	logger.New(level, "stdout", logger.DEFAULT_LOG_FILE_MAX_SIZE, logger.DEFAULT_LOG_FILE_MAX_BACKUPS)
+	t.Cleanup(func() {
+		logger.New(logger.DEFAULT_LOG_LEVEL, logger.DEFAULT_LOG_LOCATION,
+			logger.DEFAULT_LOG_FILE_MAX_SIZE, logger.DEFAULT_LOG_FILE_MAX_BACKUPS)
+	})
+}
+
 // Non-DENY events produce output only at debug level and only when the scope
 // is not deny-only.
 func TestConsumeNonDeny(t *testing.T) {
@@ -40,9 +51,11 @@ func TestAcceptEventsConsumed(t *testing.T) {
 		{level: "error", denyOnly: false, want: false},
 	}
 	for _, tt := range tests {
-		logger.New(tt.level, "stdout", logger.DEFAULT_LOG_FILE_MAX_SIZE, logger.DEFAULT_LOG_FILE_MAX_BACKUPS)
-		if got := AcceptEventsConsumed(tt.denyOnly); got != tt.want {
-			t.Errorf("AcceptEventsConsumed(level=%s, denyOnly=%v) = %v, want %v", tt.level, tt.denyOnly, got, tt.want)
-		}
+		t.Run(tt.level, func(t *testing.T) {
+			setFlowLogLevel(t, tt.level)
+			if got := AcceptEventsConsumed(tt.denyOnly); got != tt.want {
+				t.Errorf("AcceptEventsConsumed(level=%s, denyOnly=%v) = %v, want %v", tt.level, tt.denyOnly, got, tt.want)
+			}
+		})
 	}
 }

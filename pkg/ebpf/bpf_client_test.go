@@ -3065,3 +3065,25 @@ func TestReattachAfterRestartKeepsPodFilteredKernel(t *testing.T) {
 	assert.Zero(t, watcher.detaches, "the pod's filters were detached")
 	assert.Equal(t, before, hookIDs(t, link), "the pod runs the same programs after the restart")
 }
+
+func TestPolicyEventDatapathScope(t *testing.T) {
+	tests := []struct {
+		name           string
+		denyOnly       bool
+		acceptConsumed bool
+		wantVal        uint32
+		wantMsg        string
+	}{
+		{"scope all at debug", false, true, POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"},
+		{"scope all above debug", false, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"},
+		{"scope deny at debug", true, true, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+		{"scope deny above debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVal, gotMsg := policyEventDatapathScope(tt.denyOnly, tt.acceptConsumed)
+			assert.Equal(t, tt.wantVal, gotVal)
+			assert.Equal(t, tt.wantMsg, gotMsg)
+		})
+	}
+}

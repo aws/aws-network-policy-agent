@@ -372,10 +372,14 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		return nil, err
 	}
 	// The scope comes from the flag and the log level and is written on every start.
-	// With event logs off it is 'all', so a stale 'deny' from an earlier start is cleared.
-	policyEventScope, scopeMsg := POLICY_EVENT_SCOPE_ALL, ""
+	// With event logs off nothing reads the ring, so the scope is 'deny': no ACCEPT
+	// events are written, and a stale 'all' from an earlier start is cleared.
+	policyEventScope, scopeMsg := POLICY_EVENT_SCOPE_DENY, "Policy event logs disabled: ACCEPT events are not emitted"
 	if enablePolicyEventLogs {
 		policyEventScope, scopeMsg = policyEventDatapathScope(policyEventsDenyOnly, events.AcceptEventsConsumed(policyEventsDenyOnly))
+	}
+	if policyEventsDenyOnly && !enablePolicyEventLogs {
+		log().Warn("--policy-event-logs-scope=deny has no effect without --enable-policy-event-logs=true")
 	}
 	if err := writeTCConfig(tcConfigMap, enableTCPResetOnDeny, policyEventScope); err != nil {
 		log().Errorf("Unable to write the TC programs' config, exiting..error: %v", err)
