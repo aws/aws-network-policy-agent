@@ -109,13 +109,17 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
 	}
+	// Validate policy event logs scope
+	if _, valid := ParsePolicyEventLogsScope(cfg.PolicyEventLogsScope); !valid {
+		return errors.New("Invalid --policy-event-logs-scope, valid values are all or deny")
+	}
 	return nil
 }
 
 // ParsePolicyEventLogsScope returns whether --policy-event-logs-scope selects
 // DENY-only events. "all" and "" select both verdicts; "deny" selects DENY
 // only (case-insensitive, surrounding spaces ignored). Any other value returns
-// valid=false and falls back to both verdicts, so a typo never hides events.
+// valid=false; the caller is expected to fail startup rather than guess.
 func ParsePolicyEventLogsScope(raw string) (denyOnly bool, valid bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "all":
