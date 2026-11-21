@@ -69,3 +69,16 @@ func TestPolicyEventLogsScopeFlagDefault(t *testing.T) {
 	assert.True(t, denyOnly)
 	assert.True(t, valid)
 }
+
+func TestValidControllerFlagsPolicyEventLogsScope(t *testing.T) {
+	check := func(scope string) error {
+		cfg := ControllerConfig{ConntrackCacheTableSize: 512 * 1024, PolicyEventLogsScope: scope}
+		return cfg.ValidControllerFlags()
+	}
+	for _, scope := range []string{"", "all", "deny", "DENY", " deny "} {
+		assert.NoError(t, check(scope), "scope %q should be accepted", scope)
+	}
+	for _, scope := range []string{"dney", "deny-only", "accept", "bogus"} {
+		assert.Error(t, check(scope), "scope %q should be rejected", scope)
+	}
+}
