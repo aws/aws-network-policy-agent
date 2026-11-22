@@ -93,7 +93,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"This frees connection tracking state on the client and in EC2 at once, but tells the client that the port is blocked")
 	fs.StringVar(&cfg.PolicyEventLogsScope, flagPolicyEventLogsScope, defaultPolicyEventLogsScope, ""+
 		"Which policy verdicts produce policy events: \"all\" (ACCEPT and DENY) or \"deny\" (DENY only; ACCEPT events "+
-		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Invalid values fall back to \"all\". "+
+		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Any other value makes the agent exit at startup. "+
 		"Requires enable-policy-event-logs=true.")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
