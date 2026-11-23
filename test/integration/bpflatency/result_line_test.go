@@ -1,11 +1,10 @@
 package bpflatency
 
 // A plain Go test for the result line. It needs no cluster: run it with
-// `go test ./test/integration/bpflatency -run TestResultLine`.
+// `go test ./test/integration/bpflatency -run 'TestResultLine|TestMetricsURL'`.
 
 import (
 	"encoding/json"
-	"math"
 	"strings"
 	"testing"
 
@@ -13,15 +12,29 @@ import (
 )
 
 func TestResultLine(t *testing.T) {
-	before := map[fwutils.LatencyKey]fwutils.LatencySeries{
-		{API: loadAPI}: {Count: 10, SumMs: 2000},
+	bounds := []float64{1, 10, 250, 500, 1000}
+	hist := func(sum float64, cum ...uint64) fwutils.ProbeHistogram {
+		h := fwutils.ProbeHistogram{SumMs: sum, Count: cum[len(cum)-1]}
+		for i, c := range cum {
+			h.Buckets = append(h.Buckets, fwutils.Bucket{UpperMs: bounds[i], Count: c})
+		}
+		return h
 	}
-	after := map[fwutils.LatencyKey]fwutils.LatencySeries{
-		{API: loadAPI}:          {Count: 30, SumMs: 6200, Quantiles: map[float64]float64{0.5: 208.5049, 0.99: 317.42}},
-		{API: attachIngressAPI}: {Count: 10, SumMs: 13.5, Quantiles: map[float64]float64{0.5: math.NaN(), 0.99: 1.52}},
-		// attachEgressAPI: an agent without the quantiles, and no calls.
+	loadIngress := fwutils.ProbeKey{Op: opLoad, Direction: "ingress"}
+	attachIngress := fwutils.ProbeKey{Op: opAttach, Direction: "ingress"}
+	before := map[fwutils.ProbeKey]fwutils.ProbeHistogram{
+		loadIngress: hist(2000, 0, 0, 10, 10, 10),
 	}
-	line, err := resultLine(runInfo{Kernel: "6.12.100", OS: "AL2023", Arch: "amd64", IPFamily: "IPv4", Pods: 10}, before, after)
+	after := map[fwutils.ProbeKey]fwutils.ProbeHistogram{
+		// 20 new loads: 10 in (250, 500] and 10 in (500, 1000].
+		loadIngress: hist(13000, 0, 0, 10, 20, 30),
+		// 10 attaches, the first scrape had none.
+		attachIngress: hist(13.5, 9, 10, 10, 10, 10),
+		// No egress series: no egress calls.
+	}
+	info := runInfo{Kernel: "6.12.100", OS: "AL2023", Arch: "amd64", InstanceType: "t3.large",
+		AgentImage: "example/agent:v1", IPFamily: "IPv4", Pods: 10}
+	line, _, err := resultLine(info, before, after)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,33 +43,63 @@ func TestResultLine(t *testing.T) {
 	}
 
 	var got struct {
-		Kernel   string `json:"kernel"`
-		IPFamily string `json:"ipFamily"`
-		Pods     int    `json:"pods"`
-		APIs     map[string]struct {
-			New    uint64   `json:"new"`
-			MeanMs *float64 `json:"meanMs"`
-			P50Ms  *float64 `json:"p50Ms"`
-			P99Ms  *float64 `json:"p99Ms"`
-		} `json:"apis"`
+		runInfo
+		Results map[string]opResult `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, resultLinePrefix)), &got); err != nil {
 		t.Fatalf("not JSON: %v: %s", err, line)
 	}
-	if got.Kernel != "6.12.100" || got.IPFamily != "IPv4" || got.Pods != 10 {
-		t.Errorf("run info = %+v", got)
+	if got.runInfo != info {
+		t.Errorf("run info = %+v, want %+v", got.runInfo, info)
 	}
 
-	load := got.APIs[loadAPI]
-	if load.New != 20 || *load.MeanMs != 210 || *load.P50Ms != 208.5 || *load.P99Ms != 317.42 {
-		t.Errorf("load = new %d mean %v p50 %v p99 %v, want 20 210 208.5 317.42", load.New, *load.MeanMs, *load.P50Ms, *load.P99Ms)
+	checkMs := func(name, field string, v *float64, want float64) {
+		t.Helper()
+		if v == nil {
+			t.Errorf("%s %s = null, want %v", name, field, want)
+		} else if *v != want {
+			t.Errorf("%s %s = %v, want %v", name, field, *v, want)
+		}
 	}
-	ingress := got.APIs[attachIngressAPI]
-	if ingress.P50Ms != nil || ingress.P99Ms == nil || *ingress.P99Ms != 1.52 {
-		t.Errorf("ingress: want null p50 (NaN) and p99 1.52, got %+v", ingress)
+	load, ok := got.Results["load/ingress"]
+	if !ok {
+		t.Fatalf("no load/ingress in %v", got.Results)
 	}
-	egress := got.APIs[attachEgressAPI]
+	if load.New != 20 {
+		t.Errorf("load/ingress new = %d, want 20", load.New)
+	}
+	checkMs("load/ingress", "mean", load.MeanMs, 550)
+	checkMs("load/ingress", "p50", load.P50Ms, 500)
+	checkMs("load/ingress", "p99", load.P99Ms, 990)
+
+	attach, ok := got.Results["attach/ingress"]
+	if !ok {
+		t.Fatalf("no attach/ingress in %v", got.Results)
+	}
+	checkMs("attach/ingress", "p50", attach.P50Ms, 0.56)
+
+	egress, ok := got.Results["load/egress"]
+	if !ok {
+		t.Fatalf("no load/egress in %v", got.Results)
+	}
 	if egress.New != 0 || egress.MeanMs != nil || egress.P50Ms != nil || egress.P99Ms != nil {
-		t.Errorf("egress: want no calls and all null, got %+v", egress)
+		t.Errorf("load/egress: want no calls and all null, got %+v", egress)
+	}
+}
+
+func TestMetricsURL(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want string
+	}{
+		{"", "http://127.0.0.1:8162/metrics"},
+		{"0.0.0.0", "http://127.0.0.1:8162/metrics"},
+		{"::", "http://127.0.0.1:8162/metrics"},
+		{"::1", "http://[::1]:8162/metrics"},
+		{"10.0.0.5", "http://10.0.0.5:8162/metrics"},
+	} {
+		if got := metricsURL(tc.host, 8162); got != tc.want {
+			t.Errorf("metricsURL(%q) = %q, want %q", tc.host, got, tc.want)
+		}
 	}
 }

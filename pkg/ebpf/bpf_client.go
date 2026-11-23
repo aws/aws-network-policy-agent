@@ -114,12 +114,21 @@ var (
 		prometheus.SummaryOpts{
 			Name: "awsnodeagent_aws_ebpf_sdk_latency_ms",
 			Help: "eBPF SDK API call latency in ms",
-			// p50 and p99 over the summary's default 10-minute window, so a
-			// slower program load or attach shows up in the tail and not only
-			// in the mean that _sum and _count give.
-			Objectives: map[float64]float64{0.5: 0.05, 0.99: 0.001},
 		},
 		[]string{"api", "error"},
+	)
+
+	// probeLatency is the time to load a pod's TC program and to attach it,
+	// per direction. It is a histogram so that the buckets of two scrapes can
+	// be subtracted to get the quantiles of only the calls in between, and
+	// summed across nodes.
+	probeLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "awsnodeagent_ebpf_probe_latency_ms",
+			Help:    "Time to load or attach a pod's TC program in ms, by op (load, attach) and direction",
+			Buckets: probeLatencyBucketsMs,
+		},
+		[]string{"op", "direction", "error"},
 	)
 
 	sdkAPIErr = prometheus.NewCounterVec(
@@ -153,6 +162,16 @@ var (
 	prometheusRegistered = false
 )
 
+// probeLatencyBucketsMs cover attaches (about 0.2-12 ms in baseline runs) and
+// loads (about 200-700 ms). The integration test's default ceilings (10 and
+// 50 ms per attach, 1000 and 2000 ms per load) are bucket bounds, so a
+// quantile check against them is exact.
+var probeLatencyBucketsMs = []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000}
+
+func observeProbeLatency(op, direction string, ms float64, err error) {
+	probeLatency.WithLabelValues(op, direction, fmt.Sprint(err != nil)).Observe(ms)
+}
+
 type pod_state struct {
 	state uint8
 }
@@ -164,6 +183,7 @@ func msSince(start time.Time) float64 {
 func prometheusRegister() {
 	if !prometheusRegistered {
 		metrics.Registry.MustRegister(sdkAPILatency)
+		metrics.Registry.MustRegister(probeLatency)
 		metrics.Registry.MustRegister(sdkAPIErr)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINRetries)
 		metrics.Registry.MustRegister(sdkProgLoadEAGAINExhausted)
@@ -1019,6 +1039,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 			ingressProgFD, _, err = l.attachIngressBPFProbe(hostVethName, podIdentifier)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachIngressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
+			observeProbeLatency("attach", "ingress", duration, err)
 			if err != nil {
 				log().Errorf("Failed to Attach Ingress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachIngressBPFProbe").Inc()
@@ -1032,6 +1053,7 @@ func (l *bpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier str
 			egressProgFD, _, err = l.attachEgressBPFProbe(hostVethName, podIdentifier)
 			duration := msSince(start)
 			sdkAPILatency.WithLabelValues("attachEgressBPFProbe", fmt.Sprint(err != nil)).Observe(duration)
+			observeProbeLatency("attach", "egress", duration, err)
 			if err != nil {
 				log().Errorf("Failed to Attach Egress TC probe for pod: %s in namespace %s at interface %d error: %v", pod.Name, pod.Namespace, index, err)
 				sdkAPIErr.WithLabelValues("attachEgressBPFProbe").Inc()
@@ -1476,6 +1498,7 @@ func (l *bpfClient) loadBPFProgram(fileName string, direction string,
 	progInfo, loadedMaps, err := l.bpfSDKClient.LoadBpfFile(fileName, podIdentifier)
 	duration := msSince(start)
 	sdkAPILatency.WithLabelValues("LoadBpfFile", fmt.Sprint(err != nil)).Observe(duration)
+	observeProbeLatency("load", direction, duration, err)
 	if err != nil {
 		sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
 		log().Errorf("Load BPF failed err: %v", err)

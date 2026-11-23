@@ -1,13 +1,15 @@
 #!/bin/bash
 
-# Runs the kernel-sensitive test suites against an existing cluster. The
-# suites run identically on IPv4 and IPv6 clusters, so every kernel line in
-# the nightly matrix gets the same coverage:
+# Runs the kernel-sensitive test suites against an existing cluster, on IPv4
+# and IPv6 clusters alike, so every kernel line in the nightly matrix gets the
+# same coverage (bpflatency.test's ceilings are the same on both, though its
+# numbers differ by family):
 #   policy.test - network policy enforcement through the agent's TC programs
 #   ebpf.test   - eBPF program behavior, including the conntrack shortening of
 #                 denied connections on kernels with the nf_conntrack kfuncs
 #   bpflatency.test - p50/p99 of the agent's eBPF program load and probe
-#                 attach for new pods, against ceilings, and logged per kernel
+#                 attach for new pods, per direction, against ceilings, and
+#                 logged per kernel, address family and instance type
 #   restart.test - agent restarts: conntrack state survives and a deny policy
 #                 holds while the agent re-attaches pods' programs
 #   agentflags.test - agent flags set on aws-node, such as TCP reset on deny
@@ -44,7 +46,7 @@ run_ginkgo_suite policy.test 15m
 
 run_suite_restoring_agent_args ebpf.test 15m
 
-run_ginkgo_suite bpflatency.test 15m
+run_ginkgo_suite bpflatency.test 10m
 
 run_ginkgo_suite restart.test 15m
 

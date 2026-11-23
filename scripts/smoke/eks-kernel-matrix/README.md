@@ -20,10 +20,13 @@ discovery and deduplication logic without AWS credentials.
 through manual dispatch. It builds the default-branch image, creates one cluster
 for every selected kernel and IP family, verifies the AMI and exact kernel on
 all nodes, and runs `scripts/run-kernel-smoke-tests.sh` — the kernel-sensitive
-suites that behave identically on IPv4 and IPv6 (`policy.test`, `ebpf.test`,
-`bpflatency.test`, `agentflags.test` and `strict.test`). `bpflatency.test` also
-prints one `BPFLATENCY_RESULT` JSON line per run, so its load and attach
-latencies can be collected from the logs and compared across kernels. Upstream Cyclonus conformance
+suites, on both IPv4 and IPv6 (`policy.test`, `ebpf.test`, `bpflatency.test`,
+`restart.test`, `agentflags.test` and `strict.test`). `bpflatency.test` holds
+the agent's program load and attach latency to ceilings, and prints one
+`BPFLATENCY_RESULT` JSON line per run, with the kernel, address family,
+instance type and agent image, so the numbers can be collected from the logs
+and compared across kernels and releases; load times differ by family, so
+compare runs of the same family. Upstream Cyclonus conformance
 already runs nightly in `e2e-conformance.yaml` and per change in the PR bot, so
 it is intentionally not repeated per kernel. Clusters are deleted in separate
 retrying cleanup jobs.

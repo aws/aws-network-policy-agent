@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,9 +18,11 @@ import (
 
 // TestProbeLoadTimeKernel times loading each TC object the agent loads for a
 // new pod, on the host kernel, so a probe C change (more verifier work) or an
-// SDK change shows its load-time cost in the test output. Each load uses a new
-// pin prefix, as a new podIdentifier does, so the loader creates fresh maps
-// instead of reusing pinned ones.
+// SDK change shows its load-time cost in the test output. Each load uses its
+// own pin prefix, as a new podIdentifier does, so no load first unpins an
+// earlier one's programs and maps and that is not timed with it. The agent
+// loads either the ingress or the ct-deny ingress object for a pod, not both;
+// both are timed here so either one's cost shows.
 //
 // It needs root and the built objects (see requireBPFKernelTests). The
 // ceiling only catches a gross regression on a shared CI runner; the logged
@@ -39,7 +42,7 @@ func TestProbeLoadTimeKernel(t *testing.T) {
 				t.Run(binary, func(t *testing.T) {
 					times := make([]time.Duration, iterations)
 					for i := range times {
-						times[i] = loader.timeLoad(t, binary, fmt.Sprintf("LOADTIME%s%d", fam.name, i))
+						times[i] = loader.timeLoad(t, binary, loadPinPrefix("LOADTIME", fam.name, binary, i))
 					}
 					slices.Sort(times)
 					p50, p99 := nearestRank(times, 0.50), nearestRank(times, 0.99)
@@ -67,10 +70,13 @@ func BenchmarkProbeLoad(b *testing.B) {
 					i := 0
 					for b.Loop() {
 						b.StopTimer()
-						prefix := fmt.Sprintf("LOADBENCH%s%d", fam.name, i)
+						prefix := loadPinPrefix("LOADBENCH", fam.name, binary, i)
 						i++
 						b.StartTimer()
-						loader.timeLoad(b, binary, prefix)
+						closeFDs := loader.load(b, binary, prefix)
+						b.StopTimer()
+						closeFDs()
+						b.StartTimer()
 					}
 				})
 			}
@@ -150,6 +156,14 @@ func (l *probeLoader) load(tb testing.TB, binary, pinPrefix string) func() {
 	}
 }
 
+// loadPinPrefix returns a pin prefix unique to the binary and iteration. The
+// ingress, egress and ct-deny objects of one iteration must not share one: a
+// load under a prefix first unpins what is pinned there, and that would be
+// timed with it.
+func loadPinPrefix(kind, family, binary string, i int) string {
+	return fmt.Sprintf("%s%s%s%d", kind, family, strings.NewReplacer(".", "", "-", "", "_", "").Replace(binary), i)
+}
+
 // nearestRank returns the p-th percentile of sorted by the nearest-rank
 // method: the smallest value with at least p of the values at or below it.
 func nearestRank(sorted []time.Duration, p float64) time.Duration {
@@ -203,5 +217,6 @@ func envDuration(t *testing.T, name string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	require.NoError(t, err, "%s", name)
+	require.Positive(t, d, "%s", name)
 	return d
 }
