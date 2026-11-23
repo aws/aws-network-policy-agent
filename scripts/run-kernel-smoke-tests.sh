@@ -48,6 +48,14 @@ run_ginkgo_suite policy.test 15m
 
 run_suite_restoring_agent_args ebpf.test 15m
 
+# bpflatency's default load ceilings fit kernel 6.1 on IPv6, whose loads take
+# 3-4x longer than on any other combination (see its suite file). Hold the
+# others to tighter ones, about 3x their slowest mean on t3.large, unless the
+# caller set them.
+if [[ "${KERNEL_LINE:-}" != "6.1" || "$IP_FAMILY" != "IPv6" ]]; then
+    export BPFLATENCY_MAX_LOAD_P50_MS="${BPFLATENCY_MAX_LOAD_P50_MS:-1000}"
+    export BPFLATENCY_MAX_LOAD_P99_MS="${BPFLATENCY_MAX_LOAD_P99_MS:-1500}"
+fi
 run_ginkgo_suite bpflatency.test 10m
 
 run_ginkgo_suite restart.test 15m

@@ -106,10 +106,15 @@ func TestMetricsURL(t *testing.T) {
 }
 
 func TestApplyEnvOverrides(t *testing.T) {
+	// Put back the values from before the test, not the defaults: the
+	// suite's own flags may have been given on the command line.
+	saved := map[string]string{}
+	for _, o := range envOverrides {
+		saved[o.flag] = flag.Lookup(o.flag).Value.String()
+	}
 	restore := func() {
 		for _, o := range envOverrides {
-			f := flag.Lookup(o.flag)
-			if err := f.Value.Set(f.DefValue); err != nil {
+			if err := flag.Lookup(o.flag).Value.Set(saved[o.flag]); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -121,8 +126,11 @@ func TestApplyEnvOverrides(t *testing.T) {
 	if err := applyEnvOverrides(); err != nil {
 		t.Fatal(err)
 	}
-	if *maxLoadP99Ms != 3000 || *podCount != 5 || *maxLoadP50Ms != 1000 {
-		t.Errorf("got load p99 %v pods %d load p50 %v, want 3000 5 1000", *maxLoadP99Ms, *podCount, *maxLoadP50Ms)
+	if *maxLoadP99Ms != 3000 || *podCount != 5 {
+		t.Errorf("got load p99 %v pods %d, want 3000 and 5", *maxLoadP99Ms, *podCount)
+	}
+	if got := flag.Lookup("bpflatency-max-load-p50-ms").Value.String(); got != saved["bpflatency-max-load-p50-ms"] {
+		t.Errorf("load p50 = %s with no env var, want it unchanged at %s", got, saved["bpflatency-max-load-p50-ms"])
 	}
 
 	for name, value := range map[string]string{

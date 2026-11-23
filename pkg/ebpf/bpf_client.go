@@ -162,9 +162,9 @@ var (
 	prometheusRegistered = false
 )
 
-// probeLatencyBucketsMs cover attaches (about 0.2-12 ms in baseline runs) and
-// loads (about 200-700 ms). The integration test's default ceilings (10 and
-// 50 ms per attach, 1000 and 2000 ms per load) are bucket bounds, so a
+// probeLatencyBucketsMs cover attaches (about 0.3-25 ms in baseline runs) and
+// loads (about 120-900 ms). The integration test's ceilings (10 and 50 ms per
+// attach; 1000, 1500, 2000 and 3000 ms per load) are bucket bounds, so a
 // quantile check against them is exact.
 var probeLatencyBucketsMs = []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000}
 

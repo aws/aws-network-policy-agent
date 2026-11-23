@@ -36,7 +36,7 @@ func TestProbeLatencyHistogram(t *testing.T) {
 	assert.Equal(t, 1500.0, ok.GetSampleSum())
 	assert.Equal(t, uint64(1), read("true").GetSampleCount(), "a failed load is its own series")
 
-	for _, ceiling := range []float64{10, 50, 1000, 2000} {
-		assert.True(t, slices.Contains(probeLatencyBucketsMs, ceiling), "default ceiling %v ms is a bucket bound", ceiling)
+	for _, ceiling := range []float64{10, 50, 1000, 1500, 2000, 3000} {
+		assert.True(t, slices.Contains(probeLatencyBucketsMs, ceiling), "ceiling %v ms is a bucket bound", ceiling)
 	}
 }

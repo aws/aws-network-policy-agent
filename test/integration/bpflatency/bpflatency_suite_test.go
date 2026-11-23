@@ -19,29 +19,30 @@ var (
 	namespace = "bpflatency-test"
 )
 
-// Ceilings in ms, from three runs of 10 pods per setup (before the agent
-// exported per-direction numbers, so load covers ingress and egress together):
+// Ceilings in ms. Baselines on t3.large (the nightly instance type), amd64,
+// 3 runs of 10 pods each, per direction (Nov 2026, agent at #820):
 //
-//	m5.large  amd64 kernel 6.12 IPv4: load p50 209-245 p99 317, attach p99 <= 1.5
-//	m5.large  amd64 kernel 6.1  IPv6: load p50 438-472 p99 537-721, attach p99 <= 11.9
-//	m6g.large arm64 kernel 6.1  IPv6: load p50 414-440 p99 514, attach p99 <= 1.4
+//	kernel 6.1  IPv4: load mean ingress 127-128, egress 259-275; attach p99 <= 23.5
+//	kernel 6.12 IPv4: load mean ingress 241-259, egress 305-335; attach p99 <= 4.9
+//	kernel 6.1  IPv6: load mean ingress 770-790, egress 858-885; attach p99 <= 9.9
+//	kernel 6.12 IPv6: load mean ingress 207-242, egress 315-360; attach p99 <= 23.5
 //
-// Loads take about twice as long on 6.1 as on 6.12 on amd64 (more verifier
-// work; 6.12 was not measured on arm64). The load p50 ceiling is about 2x the
-// 6.1 p50, and the p99 ceiling about 3-4x the 6.1 p99, so a load that gets
-// twice as slow fails the p50 on 6.1, and four times as slow on 6.12. A
-// kernel line that needs a tighter or looser ceiling can pass the flags. The
-// default ceilings are bucket bounds of the agent's histogram, which makes the
-// quantile check exact; other values are checked against an interpolated
-// estimate.
+// Kernel 6.1 on IPv6 is the outlier: its verifier takes 3-4x longer on the v6
+// programs than any other combination. The default load ceilings (p50 2000,
+// p99 3000) are sized for it, so a load there fails after getting about 2.3x
+// slower. They are loose for the other combinations, so the nightly script
+// sets tighter ones for those through the environment variables below. The
+// attach ceilings (p50 10, p99 50) fit all four. The defaults are bucket
+// bounds of the agent's histogram, which makes the quantile check exact;
+// other values are checked against an interpolated estimate.
 //
 // Each setting can also be set from an environment variable (envOverrides),
 // because the nightly script's run_ginkgo_suite passes no suite flags. A flag
 // given on the command line wins over the variable.
 var (
 	podCount       = flag.Int("bpflatency-pods", 10, "pods with unique pod identifiers to create on one node (each needs an IP on it, so raise this only on nodes with IPs to spare)")
-	maxLoadP50Ms   = flag.Float64("bpflatency-max-load-p50-ms", 1000, "ceiling for the p50 of each direction's program load, in ms")
-	maxLoadP99Ms   = flag.Float64("bpflatency-max-load-p99-ms", 2000, "ceiling for the p99 of each direction's program load, in ms")
+	maxLoadP50Ms   = flag.Float64("bpflatency-max-load-p50-ms", 2000, "ceiling for the p50 of each direction's program load, in ms")
+	maxLoadP99Ms   = flag.Float64("bpflatency-max-load-p99-ms", 3000, "ceiling for the p99 of each direction's program load, in ms")
 	maxAttachP50Ms = flag.Float64("bpflatency-max-attach-p50-ms", 10, "ceiling for the p50 of each direction's probe attach, in ms")
 	maxAttachP99Ms = flag.Float64("bpflatency-max-attach-p99-ms", 50, "ceiling for the p99 of each direction's probe attach, in ms")
 )
