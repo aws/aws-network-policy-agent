@@ -377,14 +377,44 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 	return nil
 }
 
+// clusterPolicyTargetGroups returns the groups this podIdentifier belongs to, each scoped to its
+// parent policy. An empty result means the pod only appears in ungrouped ClusterPolicyEndpoints,
+// which is every cluster whose controller does not group.
+func (r *ClusterPolicyEndpointsReconciler) clusterPolicyTargetGroups(ctx context.Context,
+	refs []utils.PolicyEndpointRef, podIdentifier string) map[string]struct{} {
+	groups := make(map[string]struct{})
+	cpe := &policyk8sawsv1.ClusterPolicyEndpoint{}
+	for _, ref := range refs {
+		// Cluster-scoped: no namespace
+		if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: ref.Name}, cpe, client.UnsafeDisableDeepCopy); err != nil {
+			continue
+		}
+		// Same guard as the rule loop: the name may have been reused under another parent.
+		if cpe.Spec.TargetGroup == "" || cpe.Spec.PolicyRef.Name != ref.Parent {
+			continue
+		}
+		for _, p := range cpe.Spec.PodSelectorEndpoints {
+			if utils.GetPodIdentifier(p.Name, p.Namespace) == podIdentifier {
+				groups[targetGroupKey(cpe.Spec.PolicyRef.Name, cpe.Spec.TargetGroup)] = struct{}{}
+				break
+			}
+		}
+	}
+	return groups
+}
+
 func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFirewallRules(ctx context.Context, podIdentifier string, parentCNPName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, error) {
 
 	var clusterPolicyIngressRules, clusterPolicyEgressRules []fwrp.EbpfFirewallRules
 	currentCPE := &policyk8sawsv1.ClusterPolicyEndpoint{}
 
 	if ClusterPolicyEndpointList, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
-		log().Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(ClusterPolicyEndpointList.([]utils.PolicyEndpointRef)))
-		for _, ref := range ClusterPolicyEndpointList.([]utils.PolicyEndpointRef) {
+		refs := ClusterPolicyEndpointList.([]utils.PolicyEndpointRef)
+		log().Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(refs))
+		// Derived fresh every time rather than tracked, so a stale map entry for a group this pod
+		// has since left cannot contribute rules.
+		targetGroups := r.clusterPolicyTargetGroups(ctx, refs, podIdentifier)
+		for _, ref := range refs {
 			// Cluster-scoped: no namespace
 			cpeNamespacedName := types.NamespacedName{Name: ref.Name}
 
@@ -403,6 +433,16 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFi
 			if isDeleteFlow && ref.Parent == parentCNPName {
 				log().Debugf("CPE belongs to same CNP. Ignore and move on since it's a delete flow parentCNP %s currentCPE %s", parentCNPName, ref.Name)
 				continue
+			}
+
+			// A grouped ClusterPolicyEndpoint applies only to its own group's pods, matched
+			// within its own policy. Ungrouped ones always apply, as before this field existed.
+			if currentCPE.Spec.TargetGroup != "" {
+				if _, ok := targetGroups[targetGroupKey(currentCPE.Spec.PolicyRef.Name, currentCPE.Spec.TargetGroup)]; !ok {
+					log().Debugf("Skipping CPE %s: target group %s of policy %s does not contain podIdentifier %s",
+						ref.Name, currentCPE.Spec.TargetGroup, currentCPE.Spec.PolicyRef.Name, podIdentifier)
+					continue
+				}
 			}
 
 			// currentCPE is shared with the informer cache (UnsafeDisableDeepCopy). slices.Clip
