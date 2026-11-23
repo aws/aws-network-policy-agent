@@ -22,6 +22,8 @@
 # REGION: defaults to us-west-2
 # IP_FAMILY: defaults to IPv4
 # TEST_IMAGE_REGISTRY: defaults to registry.k8s.io
+# BPFLATENCY_PODS, BPFLATENCY_MAX_{LOAD,ATTACH}_{P50,P99}_MS: optional
+#   bpflatency.test pod count and ceilings in ms (see its suite file)
 
 set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)

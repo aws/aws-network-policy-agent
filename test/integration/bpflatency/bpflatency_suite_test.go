@@ -3,6 +3,9 @@ package bpflatency
 import (
 	"context"
 	"flag"
+	"fmt"
+	"os"
+	"strconv"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/test/framework"
@@ -31,6 +34,10 @@ var (
 // default ceilings are bucket bounds of the agent's histogram, which makes the
 // quantile check exact; other values are checked against an interpolated
 // estimate.
+//
+// Each setting can also be set from an environment variable (envOverrides),
+// because the nightly script's run_ginkgo_suite passes no suite flags. A flag
+// given on the command line wins over the variable.
 var (
 	podCount       = flag.Int("bpflatency-pods", 10, "pods with unique pod identifiers to create on one node (each needs an IP on it, so raise this only on nodes with IPs to spare)")
 	maxLoadP50Ms   = flag.Float64("bpflatency-max-load-p50-ms", 1000, "ceiling for the p50 of each direction's program load, in ms")
@@ -39,13 +46,49 @@ var (
 	maxAttachP99Ms = flag.Float64("bpflatency-max-attach-p99-ms", 50, "ceiling for the p99 of each direction's probe attach, in ms")
 )
 
+// envOverrides maps each flag to the environment variable that can set it.
+var envOverrides = []struct{ flag, env string }{
+	{"bpflatency-pods", "BPFLATENCY_PODS"},
+	{"bpflatency-max-load-p50-ms", "BPFLATENCY_MAX_LOAD_P50_MS"},
+	{"bpflatency-max-load-p99-ms", "BPFLATENCY_MAX_LOAD_P99_MS"},
+	{"bpflatency-max-attach-p50-ms", "BPFLATENCY_MAX_ATTACH_P50_MS"},
+	{"bpflatency-max-attach-p99-ms", "BPFLATENCY_MAX_ATTACH_P99_MS"},
+}
+
+// applyEnvOverrides sets each flag not given on the command line from its
+// environment variable, when that is set, and checks every setting is
+// positive.
+func applyEnvOverrides() error {
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	for _, o := range envOverrides {
+		v := os.Getenv(o.env)
+		if v == "" || given[o.flag] {
+			continue
+		}
+		// Value.Set, not flag.Set, so the flag still counts as not given.
+		if err := flag.Lookup(o.flag).Value.Set(v); err != nil {
+			return fmt.Errorf("%s=%q: %w", o.env, v, err)
+		}
+	}
+	if *podCount <= 0 {
+		return fmt.Errorf("-bpflatency-pods (BPFLATENCY_PODS) must be positive, got %d", *podCount)
+	}
+	for _, o := range envOverrides[1:] {
+		if v, _ := strconv.ParseFloat(flag.Lookup(o.flag).Value.String(), 64); v <= 0 {
+			return fmt.Errorf("-%s (%s) must be positive, got %v", o.flag, o.env, v)
+		}
+	}
+	return nil
+}
+
 func TestBPFLoadLatency(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "eBPF Program Load Latency Test Suite")
 }
 
 var _ = BeforeSuite(func() {
-	Expect(*podCount).To(BeNumerically(">", 0), "-bpflatency-pods")
+	Expect(applyEnvOverrides()).To(Succeed())
 	fw = framework.New(framework.GlobalOptions)
 	ctx = context.Background()
 	err := fw.NamespaceManager.CreateNamespace(ctx, namespace)

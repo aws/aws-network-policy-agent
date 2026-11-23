@@ -1,10 +1,11 @@
 package bpflatency
 
 // A plain Go test for the result line. It needs no cluster: run it with
-// `go test ./test/integration/bpflatency -run 'TestResultLine|TestMetricsURL'`.
+// `go test ./test/integration/bpflatency -run 'TestResultLine|TestMetricsURL|TestApplyEnvOverrides'`.
 
 import (
 	"encoding/json"
+	"flag"
 	"strings"
 	"testing"
 
@@ -101,5 +102,40 @@ func TestMetricsURL(t *testing.T) {
 		if got := metricsURL(tc.host, 8162); got != tc.want {
 			t.Errorf("metricsURL(%q) = %q, want %q", tc.host, got, tc.want)
 		}
+	}
+}
+
+func TestApplyEnvOverrides(t *testing.T) {
+	restore := func() {
+		for _, o := range envOverrides {
+			f := flag.Lookup(o.flag)
+			if err := f.Value.Set(f.DefValue); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(restore)
+
+	t.Setenv("BPFLATENCY_MAX_LOAD_P99_MS", "3000")
+	t.Setenv("BPFLATENCY_PODS", "5")
+	if err := applyEnvOverrides(); err != nil {
+		t.Fatal(err)
+	}
+	if *maxLoadP99Ms != 3000 || *podCount != 5 || *maxLoadP50Ms != 1000 {
+		t.Errorf("got load p99 %v pods %d load p50 %v, want 3000 5 1000", *maxLoadP99Ms, *podCount, *maxLoadP50Ms)
+	}
+
+	for name, value := range map[string]string{
+		"BPFLATENCY_MAX_ATTACH_P50_MS": "fast",
+		"BPFLATENCY_MAX_ATTACH_P99_MS": "0",
+		"BPFLATENCY_PODS":              "-1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			restore()
+			t.Setenv(name, value)
+			if err := applyEnvOverrides(); err == nil {
+				t.Errorf("%s=%s: want an error", name, value)
+			}
+		})
 	}
 }
