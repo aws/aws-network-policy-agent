@@ -44,6 +44,19 @@ Set this flag to `true` to enable the collection & logging of policy decision lo
 
 > Notice: Enabling this feature requires one CPU core per node.
 
+#### `policy-event-logs-scope`
+
+Type: String
+
+Default: all
+
+Requires `enable-policy-event-logs=true`. Selects which policy verdicts produce policy events:
+
+- `all`: ACCEPT and DENY events are emitted by the datapath. ACCEPT events are only logged when `log-level` is `debug`.
+- `deny`: DENY events only. The datapath does not emit ACCEPT events, so there are no ACCEPT flow lines and no ACCEPT CloudWatch events at any log level.
+
+Invalid values fall back to `all`. If `deny` is set while `enable-policy-event-logs` is `false`, the agent logs a warning and the flag has no effect.
+
 #### `enable-cloudwatch-logs`
 
 Type: Boolean
@@ -100,7 +113,7 @@ Default: debug
 
 Sets the logging verbosity for the Network Policy Agent. Valid options are: debug, info, warn, error.
 DENY flow logs are always logged, regardless of the log level.
-ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true
+ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true. With `--policy-event-logs-scope=deny`, ACCEPT flow logs are not emitted at any log level.
 
 #### `conntrack-cache-cleanup-period` (from v1.0.7+)
 
