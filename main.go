@@ -50,6 +50,11 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -93,6 +98,15 @@ func main() {
 	}
 
 	runtimeOpts := config.BuildRuntimeOptions(ctrlConfig.RuntimeConfig, scheme)
+	// Cache only this node's Pods. PolicyEndpoint rule derivation reads Pod
+	// labels; without this restriction the first Pod read would start a
+	// cluster-wide Pod informer.
+	nodeName := os.Getenv("MY_NODE_NAME")
+	if nodeName != "" {
+		runtimeOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+			&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", nodeName)},
+		}
+	}
 	mgr, err := ctrl.NewManager(restCFG, runtimeOpts)
 	if err != nil {
 		log.Errorf("unable to create controller manager %v", err)
@@ -131,6 +145,18 @@ func main() {
 		ebpfClient.ReAttachEbpfProbes()
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
+		if nodeName != "" {
+			policyEndpointController.EnablePodSelectorMatching(mgr.GetAPIReader())
+			// Register the node-scoped Pod informer now so it starts and syncs with
+			// the manager's cache. Otherwise the first rule derivation would start it
+			// lazily and wait for it to sync inside a CNI request.
+			if _, err := mgr.GetCache().GetInformer(ctx, &corev1.Pod{}, cache.BlockUntilSynced(false)); err != nil {
+				log.Errorf("unable to register Pod informer %v", err)
+				os.Exit(1)
+			}
+		} else {
+			log.Warn("MY_NODE_NAME is not set; PolicyEndpoint pod selector matching is disabled")
+		}
 
 		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
