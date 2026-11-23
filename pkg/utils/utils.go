@@ -4,7 +4,6 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -494,14 +493,6 @@ func deriveProtocolValue(l4Info v1alpha1.Port, allowAll, denyAll bool) int {
 	}
 
 	return protocol
-}
-
-// IsFileExistsError reports whether err is EEXIST, as returned by netlink when a
-// tc filter or qdisc already exists. netlink appends the kernel's extended ack
-// message to the errno when error reporting is on, so compare the errno, not the
-// text.
-func IsFileExistsError(err error) bool {
-	return errors.Is(err, unix.EEXIST)
 }
 
 func IsInvalidFilterListError(error string) bool {
