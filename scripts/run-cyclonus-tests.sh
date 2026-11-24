@@ -9,7 +9,7 @@
 # ENABLE_STRICT_MODE: Optional, defaults to true. Runs the strict-mode suite (mutates aws-node to strict enforcement, so it runs last)
 # RUN_EBPF_TESTS: Optional, defaults to true. Runs the eBPF conntrack security suite (auto-skips on IPv6)
 # RUN_CLUSTER_NETWORK_POLICY_TESTS: Optional, defaults to true. Runs the ClusterNetworkPolicy suite (requires the CNP CRD + CNP-capable controller on the cluster)
-# RUN_RESTART_TESTS: Optional, defaults to false. Runs the agent restart suite (needs AL2023 or newer nodes since it runs aws-eks-na-cli on the host)
+# RUN_RESTART_TESTS: Optional, defaults to true. Runs the agent restart suite (needs AL2023 or newer nodes since it runs aws-eks-na-cli on the host)
 # RUN_AGENT_FLAGS_TESTS: Optional, defaults to true. Runs the agentflags suite (changes the agent's args on aws-node and restores them, so it runs after the suites above and before strict)
 # ADDON_VERSION: Optional, defaults to the latest version
 # ENDPOINT: Optional
@@ -43,7 +43,7 @@ source "${DIR}/lib/tests.sh"
 : "${ENABLE_STRICT_MODE:="true"}"
 : "${RUN_EBPF_TESTS:="true"}"
 : "${RUN_CLUSTER_NETWORK_POLICY_TESTS:="true"}"
-: "${RUN_RESTART_TESTS:="false"}"
+: "${RUN_RESTART_TESTS:="true"}"
 : "${RUN_AGENT_FLAGS_TESTS:="true"}"
 : "${K8S_VERSION:=""}"
 : "${TEST_IMAGE_REGISTRY:="registry.k8s.io"}"
