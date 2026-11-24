@@ -146,6 +146,10 @@ ARCH := $(shell uname -m | sed 's/x86_64/amd64/g; s/aarch64/arm64/g')
 BPF_VCPU = v2
 # Build BPF
 CLANG_INCLUDE := -I../../.
+# bpftool 7.5+ adds kfunc prototypes to vmlinux.h, and they conflict with the
+# kfunc declarations libbpf's bpf_helpers.h carries (bpf_stream_vprintk on
+# kernel 7.0+ with libbpf 1.6). Our programs declare the kfuncs they call.
+CLANG_BPF_FLAGS := -DBPF_NO_KFUNC_PROTOTYPES
 EBPF_SOURCE_INGRESS_TC := ./pkg/ebpf/c/tc.v4ingress.bpf.c
 EBPF_BINARY_INGRESS_TC := ./pkg/ebpf/c/tc.v4ingress.bpf.o
 EBPF_SOURCE_EGRESS_TC := ./pkg/ebpf/c/tc.v4egress.bpf.c
@@ -164,16 +168,21 @@ EBPF_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v4events.bpf.c
 EBPF_EVENTS_BINARY_TC := ./pkg/ebpf/c/v4events.bpf.o
 EBPF_V6_EVENTS_SOURCE_TC := ./pkg/ebpf/c/v6events.bpf.c
 EBPF_V6_EVENTS_BINARY_TC := ./pkg/ebpf/c/v6events.bpf.o
+# Node-wide maps the TC programs share (config and pending TCP resets); see
+# pkg/ebpf/c/tc_shared.h. One binary for both address families.
+EBPF_SHARED_SOURCE_TC := ./pkg/ebpf/c/tc.shared.bpf.c
+EBPF_SHARED_BINARY_TC := ./pkg/ebpf/c/tc.shared.bpf.o
 
 build-bpf: ## Build BPF.
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_EVENTS_SOURCE_TC) -o $(EBPF_EVENTS_BINARY_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_V6_EVENTS_SOURCE_TC) -o $(EBPF_V6_EVENTS_BINARY_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_EGRESS_TC) -o $(EBPF_BINARY_EGRESS_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_EGRESS_TC) -o $(EBPF_BINARY_V6_EGRESS_TC)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC_CT_DENY)
-	$(CMD_CLANG) $(CLANG_INCLUDE) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC_CT_DENY)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_EVENTS_SOURCE_TC) -o $(EBPF_EVENTS_BINARY_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_x86 -c $(EBPF_V6_EVENTS_SOURCE_TC) -o $(EBPF_V6_EVENTS_BINARY_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SHARED_SOURCE_TC) -o $(EBPF_SHARED_BINARY_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_EGRESS_TC) -o $(EBPF_BINARY_EGRESS_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_EGRESS_TC) -o $(EBPF_BINARY_V6_EGRESS_TC)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_INGRESS_TC) -o $(EBPF_BINARY_INGRESS_TC_CT_DENY)
+	$(CMD_CLANG) $(CLANG_INCLUDE) $(CLANG_BPF_FLAGS) -g -O2 -Wall -fpie -target bpf -DCORE -D__BPF_TRACING__ -DNPA_CT_SHORTEN_ON_DENY -march=bpf -D__TARGET_ARCH_$(ARCH) -c $(EBPF_SOURCE_V6_INGRESS_TC) -o $(EBPF_BINARY_V6_INGRESS_TC_CT_DENY)
 
 # If you wish built the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.

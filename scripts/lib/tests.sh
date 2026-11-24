@@ -143,3 +143,30 @@ function enable_strict_mode(){
     echo "Check aws-node daemonset status"
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 }
+
+# Runs a suite whose specs change the agent's args on the aws-node daemonset and
+# put them back when they finish: agentflags, and ebpf for its conntrack GC specs.
+# A run killed or timed out before then leaves them changed for every suite after
+# it, so this saves the args first and restores them after the suite, or on exit
+# if the script stops mid-suite.
+function run_suite_restoring_agent_args(){
+    local suite="$1"
+    local timeout="${2:-15m}"
+    AGENT_ARGS_BEFORE_SUITE=$(kubectl get daemonset aws-node -n kube-system \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="aws-eks-nodeagent")].args}')
+    trap restore_agent_args EXIT
+
+    run_ginkgo_suite "$suite" "$timeout"
+
+    restore_agent_args
+    trap - EXIT
+}
+
+function restore_agent_args(){
+    echo "Restore the agent args saved before the suite"
+    kubectl patch daemonset aws-node -n kube-system --type=strategic -p \
+        "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"aws-eks-nodeagent\",\"args\":${AGENT_ARGS_BEFORE_SUITE}}]}}}}"
+
+    echo "Check aws-node daemonset status"
+    kubectl rollout status ds/aws-node -n kube-system --timeout=300s
+}

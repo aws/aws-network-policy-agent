@@ -1,9 +1,13 @@
 package ebpf
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,9 +31,13 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	// "unsafe"
+	"unsafe"
 )
 
 func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
@@ -471,8 +479,8 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 		mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-		mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-		mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+		mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+		mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 
 		mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 		mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
@@ -503,8 +511,8 @@ func TestBpfClient_AttacheBPFProbes(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-			mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
-			mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
+			mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
+			mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.wantTCAttachCalls / 2)
 
 			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
@@ -863,10 +871,10 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
 
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
@@ -1107,8 +1115,8 @@ func TestAttacheBPFProbes_SkipsDeletedPod(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	testBpfClient := &bpfClient{
 		deletedPods: new(sync.Map),
@@ -1127,8 +1135,8 @@ func TestAttacheBPFProbes_ConfirmedLiveClearsDeletedMarker(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
 
 	mockBpfSDK := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockBpfSDK.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).AnyTimes()
@@ -1377,8 +1385,8 @@ func TestBpfClient_AttacheBPFProbes_WaitsForInProgressDelete(t *testing.T) {
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Times(0)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -1445,8 +1453,8 @@ func TestBpfClient_AttacheBPFProbes_ReportsFreshLoadAfterLastPodDeleted(t *testi
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded(egressPinPath, 9), nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 	origGetHostVethName := utils.GetHostVethName
@@ -1459,8 +1467,8 @@ func TestBpfClient_AttacheBPFProbes_ReportsFreshLoadAfterLastPodDeleted(t *testi
 
 	// A second pod of the identifier reuses the programs.
 	otherPod := types.NamespacedName{Name: "ds-other", Namespace: "ns"}
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil)
 	first, err = client.AttacheBPFProbes(otherPod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
 	assert.NoError(t, err)
 	assert.False(t, first)
@@ -1530,8 +1538,8 @@ func TestBpfClient_ReAttachEbpfProbes_ReleasesPodIdentifierLocks(t *testing.T) {
 	mockSDKClient.EXPECT().LoadBpfFile(client.ingressBinary, podIdentifier).Return(loaded(ingressPinPath, 7, utils.TC_INGRESS_POD_STATE_MAP), nil, nil)
 	mockSDKClient.EXPECT().LoadBpfFile(client.egressBinary, podIdentifier).Return(loaded(egressPinPath, 9, utils.TC_EGRESS_POD_STATE_MAP), nil, nil)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("eni1", 7, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("eni1", 9, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace("eni1", 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("eni1", 9, gomock.Any()).Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -1581,8 +1589,8 @@ func TestBpfClient_AttacheBPFProbes_ConfirmedLiveAttachSurvivesConcurrentDelete(
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 	origGetHostVethName := utils.GetHostVethName
@@ -1631,8 +1639,8 @@ func TestBpfClient_AttacheBPFProbes_OnlyTheLoadingAttachIsFirstPod(t *testing.T)
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 	origGetHostVethName := utils.GetHostVethName
@@ -1675,8 +1683,8 @@ func TestBpfClient_AttacheBPFProbes_FirstPodDecidedAfterConcurrentDelete(t *test
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 	origGetHostVethName := utils.GetHostVethName
@@ -1723,8 +1731,8 @@ func TestBpfClient_AttacheBPFProbes_ConcurrentSiblingsLoadProgramsOnce(t *testin
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", 9), nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
-	mockTCClient.EXPECT().TCIngressAttach(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil).Times(2)
+	mockTCClient.EXPECT().TCIngressReplace(gomock.Any(), 9, gomock.Any()).Return(nil).Times(2)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 	origGetHostVethName := utils.GetHostVethName
@@ -1794,7 +1802,17 @@ func recordClosedFDs(t *testing.T) *[]int {
 }
 
 func TestChooseIngressBinary(t *testing.T) {
+	// Distinct fake FDs, only so the test can tell which FDs the probe
+	// closed. Nothing is opened: the SDK is mocked and closeFD records.
 	globalMaps := map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:                {MapFD: 50},
+		POLICY_EVENTS_MAP_PIN_PATH:            {MapFD: 51},
+		TC_CONFIG_MAP_PIN_PATH:                {MapFD: 52},
+		TCP_RESET_PENDING_MAP_PIN_PATH:        {MapFD: 53},
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: {MapFD: 54},
+	}
+	// What an agent from before the shared TC maps leaves on the node.
+	eventsMapsOnly := map[string]goebpfmaps.BpfMap{
 		CONNTRACK_MAP_PIN_PATH:     {MapFD: 50},
 		POLICY_EVENTS_MAP_PIN_PATH: {MapFD: 51},
 	}
@@ -1850,6 +1868,14 @@ func TestChooseIngressBinary(t *testing.T) {
 		},
 		{
 			name:           "no global maps yet: probe later",
+			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
+			wantProbeLater: true,
+		},
+		{
+			// The probe would fail to relocate against the missing maps.
+			// The recovered ones are kept for recoverBPFState.
+			name:           "shared TC maps missing: probe later",
+			globalMaps:     eventsMapsOnly,
 			wantBinary:     TC_INGRESS_CT_DENY_BINARY,
 			wantProbeLater: true,
 		},
@@ -2090,8 +2116,8 @@ func TestBpfClient_AttacheBPFProbes_EgressAttachFailureUnloadsBoth(t *testing.T)
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2121,7 +2147,7 @@ func TestBpfClient_AttacheBPFProbes_IngressAttachFailureUnloadsBoth(t *testing.T
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(errors.New("Link not found"))
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(errors.New("Link not found"))
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2132,7 +2158,42 @@ func TestBpfClient_AttacheBPFProbes_IngressAttachFailureUnloadsBoth(t *testing.T
 	assertNotRegistered(t, client, pod)
 }
 
-func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T) {
+// Each hook gets one replace with the loaded program, and nothing is rolled
+// back. The strict mock fails the test on any attach, detach or cleanup.
+func TestBpfClient_AttacheBPFProbes_ReplacesEachHook(t *testing.T) {
+	client, _ := newRaceTestBpfClient(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	bpffs := recordBPFFS(t)
+	stubHostVeth(t)
+
+	pod := types.NamespacedName{Name: "job-c-x1", Namespace: "ns"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	ingressLoad, ingressProgFD := loadedProgram(t, podIdentifier, "ingress")
+	egressLoad, egressProgFD := loadedProgram(t, podIdentifier, "egress")
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(ingressLoad, nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
+	)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = mockTCClient
+
+	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
+	require.NoError(t, err)
+	podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
+	_, ingressRegistered := client.ingressPodToProgMap.Load(podKey)
+	_, egressRegistered := client.egressPodToProgMap.Load(podKey)
+	assert.True(t, ingressRegistered && egressRegistered)
+	assert.Empty(t, bpffs.unpinned, "a successful replace must not roll anything back")
+}
+
+// A failed replace fails the attach like any attach error: the programs this
+// call loaded are unloaded and the pod is not registered.
+func TestBpfClient_AttacheBPFProbes_ReplaceFailureUnloads(t *testing.T) {
 	for _, direction := range []string{"ingress", "egress"} {
 		t.Run(direction, func(t *testing.T) {
 			client, _ := newRaceTestBpfClient(t)
@@ -2151,22 +2212,53 @@ func TestBpfClient_AttacheBPFProbes_StaleFilterDetachFailureUnloads(t *testing.T
 				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(ingressLoad, nil, nil),
 				mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 			)
+			// The strict mock fails the test on any attach or detach.
 			if direction == "ingress" {
-				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(syscall.EEXIST)
-				mockTCClient.EXPECT().TCEgressDetach("mockedveth0").Return(errors.New("detach failed"))
+				mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(errors.New("replace failed"))
 			} else {
-				mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-				mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(syscall.EEXIST)
-				mockTCClient.EXPECT().TCIngressDetach("mockedveth0").Return(errors.New("detach failed"))
+				mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+				mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("replace failed"))
 			}
 			wantUnpinned := concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress"))
 			client.bpfSDKClient = mockSDKClient
 			client.bpfTCClient = mockTCClient
 
 			_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, true)
-			assert.ErrorContains(t, err, "detach failed")
+			assert.ErrorContains(t, err, "replace failed")
 			assert.False(t, client.HasBPFContext(podIdentifier))
 			assert.Equal(t, wantUnpinned, bpffs.unpinned)
+			assertNotRegistered(t, client, pod)
+		})
+	}
+}
+
+// ReAttachEbpfProbes replaces the filter of each veth whose program it reloads.
+func TestBpfClient_ReAttachEbpfProbes_ReplacesFilter(t *testing.T) {
+	for _, direction := range []string{"ingress", "egress"} {
+		t.Run(direction, func(t *testing.T) {
+			client, _ := newRaceTestBpfClient(t)
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			recordBPFFS(t)
+			podIdentifier := utils.GetPodIdentifier("web-a", "ns")
+			pinPaths := map[string]string{"eni1": utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)}
+
+			load, progFD := loadedProgram(t, podIdentifier, direction)
+			mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(load, nil, nil)
+			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+			if direction == "ingress" {
+				client.interfaceNametoIngressPinPath = pinPaths
+				mockTCClient.EXPECT().TCEgressReplace("eni1", progFD, gomock.Any()).Return(nil)
+			} else {
+				client.interfaceNametoEgressPinPath = pinPaths
+				mockTCClient.EXPECT().TCIngressReplace("eni1", progFD, gomock.Any()).Return(nil)
+			}
+			client.bpfSDKClient = mockSDKClient
+			client.bpfTCClient = mockTCClient
+
+			assert.NoError(t, client.ReAttachEbpfProbes())
+			assert.True(t, client.HasBPFContext(podIdentifier))
 		})
 	}
 }
@@ -2196,6 +2288,33 @@ func TestRecoverBPFState_ReusesProbeGlobalMaps(t *testing.T) {
 	conntrackMap, ok := globalMaps.Load(CONNTRACK_MAP_PIN_PATH)
 	assert.True(t, ok)
 	assert.Equal(t, uint32(50), conntrackMap.(goebpfmaps.BpfMap).MapFD)
+}
+
+// loadTCSharedMaps reuses only the shared maps recoverBPFState stored. If they
+// weren't stored, every restart would create new ones, and the programs pods
+// already run would keep the old config.
+func TestRecoverBPFState_StoresSharedTCMaps(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	// Distinct fake FDs, only so the test can tell which map was stored under
+	// which pin path. Nothing is opened: the SDK is mocked.
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
+		TC_CONFIG_MAP_PIN_PATH:         {MapFD: 60},
+		TCP_RESET_PENDING_MAP_PIN_PATH: {MapFD: 61},
+	}, nil)
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	c := NewMockBpfClient()
+	globalMaps := new(sync.Map)
+	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), globalMaps, false, false, false)
+	require.NoError(t, err)
+	for pinPath, fd := range map[string]uint32{TC_CONFIG_MAP_PIN_PATH: 60, TCP_RESET_PENDING_MAP_PIN_PATH: 61} {
+		stored, ok := globalMaps.Load(pinPath)
+		require.True(t, ok, pinPath)
+		assert.Equal(t, fd, stored.(goebpfmaps.BpfMap).MapFD, pinPath)
+	}
 }
 
 // The probe that runs after the events binary created the global maps.
@@ -2291,8 +2410,8 @@ func TestBpfClient_AttacheBPFProbes_FailureKeepsSharedPrograms(t *testing.T) {
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Times(0)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2327,8 +2446,8 @@ func TestBpfClient_AttacheBPFProbes_FailureKeepsRecoveredProgram(t *testing.T) {
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", 41, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", 41, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(errors.New("Link not found"))
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2388,8 +2507,8 @@ func TestBpfClient_AttacheBPFProbes_RetryAfterFailedAttachLoadsAgain(t *testing.
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2422,10 +2541,10 @@ func TestBpfClient_ReAttachEbpfProbes_FailedAttachUnloads(t *testing.T) {
 			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 			if direction == "ingress" {
 				client.interfaceNametoIngressPinPath = pinPaths
-				mockTCClient.EXPECT().TCEgressAttach("eni1", progFD, gomock.Any()).Return(errors.New("Link not found"))
+				mockTCClient.EXPECT().TCEgressReplace("eni1", progFD, gomock.Any()).Return(errors.New("Link not found"))
 			} else {
 				client.interfaceNametoEgressPinPath = pinPaths
-				mockTCClient.EXPECT().TCIngressAttach("eni1", progFD, gomock.Any()).Return(errors.New("Link not found"))
+				mockTCClient.EXPECT().TCIngressReplace("eni1", progFD, gomock.Any()).Return(errors.New("Link not found"))
 			}
 			client.bpfSDKClient = mockSDKClient
 			client.bpfTCClient = mockTCClient
@@ -2493,9 +2612,9 @@ func TestBpfClient_AttacheBPFProbes_SecondInterfaceAttachFailureUnloads(t *testi
 		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(egressLoad, nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCIngressAttach("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
-	mockTCClient.EXPECT().TCEgressAttach("mockedveth1", ingressProgFD, gomock.Any()).Return(errors.New("Link not found"))
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth0", ingressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCIngressReplace("mockedveth0", egressProgFD, gomock.Any()).Return(nil)
+	mockTCClient.EXPECT().TCEgressReplace("mockedveth1", ingressProgFD, gomock.Any()).Return(errors.New("Link not found"))
 	client.bpfSDKClient = mockSDKClient
 	client.bpfTCClient = mockTCClient
 
@@ -2570,10 +2689,10 @@ func TestBpfClient_ReAttachEbpfProbes_FailedAttachKeepsRecoveredProgram(t *testi
 			mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 			if direction == "ingress" {
 				client.interfaceNametoIngressPinPath = pinPaths
-				mockTCClient.EXPECT().TCEgressAttach("eni1", 41, gomock.Any()).Return(errors.New("Link not found"))
+				mockTCClient.EXPECT().TCEgressReplace("eni1", 41, gomock.Any()).Return(errors.New("Link not found"))
 			} else {
 				client.interfaceNametoEgressPinPath = pinPaths
-				mockTCClient.EXPECT().TCIngressAttach("eni1", 42, gomock.Any()).Return(errors.New("Link not found"))
+				mockTCClient.EXPECT().TCIngressReplace("eni1", 42, gomock.Any()).Return(errors.New("Link not found"))
 			}
 			client.bpfTCClient = mockTCClient
 
@@ -2653,4 +2772,467 @@ func TestBpfClient_deleteBPFProgramAndMaps_FailedSDKCloseIsNotRepeated(t *testin
 			assert.Empty(t, bpffs.closed)
 		})
 	}
+}
+
+func TestLoadTCSharedMaps(t *testing.T) {
+	// Distinct fake FDs, only so the test can tell a reused map from a loaded
+	// one, and which were closed. Nothing is opened: the SDK is mocked and
+	// closeFD records.
+	recoveredConfig := goebpfmaps.BpfMap{MapFD: 70}
+	recoveredPending := goebpfmaps.BpfMap{MapFD: 71}
+	recoveredDrop := goebpfmaps.BpfMap{MapFD: 72}
+	loadedConfig := goebpfmaps.BpfMap{MapFD: 80}
+	loadedDrop := goebpfmaps.BpfMap{MapFD: 81}
+	sharedBinary := goelf.BpfCustomData{FilePath: TC_SHARED_BINARY, CustomPinPath: globalMapsPinPrefix}
+	allRecovered := map[string]goebpfmaps.BpfMap{
+		TC_CONFIG_MAP_PIN_PATH:                recoveredConfig,
+		TCP_RESET_PENDING_MAP_PIN_PATH:        recoveredPending,
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: recoveredDrop,
+	}
+	loadedAll := map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig, AWS_EVENTS_DROP_COUNT_MAP: loadedDrop}
+
+	tests := []struct {
+		name       string
+		recovered  map[string]goebpfmaps.BpfMap // pin paths recoverBPFState stored
+		reloadMaps bool
+		loadMaps   map[string]goebpfmaps.BpfMap
+		loadErr    error
+		wantLoad   bool
+		want       goebpfmaps.BpfMap
+		wantDrop   goebpfmaps.BpfMap
+		wantClosed []int
+		wantErr    bool
+	}{
+		{
+			// Pods' programs reference the pinned maps, so they are kept.
+			name:      "recovered: reused",
+			recovered: allRecovered,
+			want:      recoveredConfig,
+			wantDrop:  recoveredDrop,
+		},
+		{
+			name:     "first start: loaded",
+			loadMaps: loadedAll,
+			wantLoad: true,
+			want:     loadedConfig,
+			wantDrop: loadedDrop,
+		},
+		{
+			name:       "only one map recovered: loaded",
+			recovered:  map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP_PIN_PATH: recoveredConfig},
+			loadMaps:   loadedAll,
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantDrop:   loadedDrop,
+			wantClosed: []int{int(recoveredConfig.MapFD)},
+		},
+		{
+			// The drop counter is part of the shared set: without its pin the
+			// maps are loaded again, and the recovered config is closed.
+			name:       "drop counter not recovered: loaded",
+			recovered:  map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP_PIN_PATH: recoveredConfig, TCP_RESET_PENDING_MAP_PIN_PATH: recoveredPending},
+			loadMaps:   loadedAll,
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantDrop:   loadedDrop,
+			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredPending.MapFD)},
+		},
+		{
+			// The caller reloads every pod's programs, so new maps are
+			// safe, and the recovered ones are closed.
+			name:       "reload: loaded, recovered closed",
+			recovered:  allRecovered,
+			reloadMaps: true,
+			loadMaps:   loadedAll,
+			wantLoad:   true,
+			want:       loadedConfig,
+			wantDrop:   loadedDrop,
+			wantClosed: []int{int(recoveredConfig.MapFD), int(recoveredPending.MapFD), int(recoveredDrop.MapFD)},
+		},
+		{
+			name:     "load fails",
+			loadErr:  errors.New("failed to create map"),
+			wantLoad: true,
+			wantErr:  true,
+		},
+		{
+			name:     "binary has no config map",
+			loadMaps: map[string]goebpfmaps.BpfMap{AWS_EVENTS_DROP_COUNT_MAP: loadedDrop},
+			wantLoad: true,
+			wantErr:  true,
+		},
+		{
+			name:     "binary has no drop counter map",
+			loadMaps: map[string]goebpfmaps.BpfMap{TC_CONFIG_MAP: loadedConfig},
+			wantLoad: true,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+			if tt.wantLoad {
+				mockBpfClient.EXPECT().LoadBpfFileWithCustomData(sharedBinary).Return(nil, tt.loadMaps, tt.loadErr).Times(1)
+			}
+			c := &bpfClient{bpfSDKClient: mockBpfClient, globalMaps: new(sync.Map)}
+			for pinPath, m := range tt.recovered {
+				c.globalMaps.Store(pinPath, m)
+			}
+			closed := recordClosedFDs(t)
+
+			got, gotDrop, err := c.loadTCSharedMaps(tt.reloadMaps)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantDrop, gotDrop)
+			assert.Equal(t, tt.wantClosed, *closed, "recovered maps closed")
+		})
+	}
+}
+
+func TestBinaryChanged(t *testing.T) {
+	// binaryChanged reads the binary relative to the working directory, as
+	// the agent does from the image's root.
+	t.Chdir(t.TempDir())
+	binary := TC_SHARED_BINARY
+	require.NoError(t, os.WriteFile(binary, []byte("new"), 0o644))
+	hostDir := "host/"
+	require.NoError(t, os.Mkdir(hostDir, 0o755))
+
+	// No copy on the host yet, as on the first start after an upgrade.
+	assert.True(t, binaryChanged(binary, hostDir), "missing host copy")
+
+	require.NoError(t, os.WriteFile(hostDir+TC_SHARED_BINARY, []byte("new"), 0o644))
+	assert.False(t, binaryChanged(binary, hostDir), "same contents")
+
+	require.NoError(t, os.WriteFile(hostDir+TC_SHARED_BINARY, []byte("old"), 0o644))
+	assert.True(t, binaryChanged(binary, hostDir), "different contents")
+
+	// Neither copy readable compares as unchanged, as the agent has always
+	// treated it, so the node keeps running on its recovered state rather
+	// than reloading every pod's programs from a binary it can't read.
+	require.NoError(t, os.Remove(binary))
+	require.NoError(t, os.Remove(hostDir+TC_SHARED_BINARY))
+	assert.False(t, binaryChanged(binary, hostDir), "both copies missing")
+}
+
+// On warm restart recoverBPFState stores the drop-counter map under its pin path,
+// so loadTCSharedMaps can reuse it. A fresh load still wins over nothing.
+func TestRecoverBPFStatePolicyEventMaps(t *testing.T) {
+	dropMap := goebpfmaps.BpfMap{MapFD: 42}
+	freshDrop := goebpfmaps.BpfMap{MapFD: 77}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{
+		CONNTRACK_MAP_PIN_PATH:                {MapFD: 2},
+		POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH: dropMap,
+	}, nil).AnyTimes()
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil).AnyTimes()
+
+	client := NewMockBpfClient()
+	_, _, _, _, _, err := client.recoverBPFState(mockTCClient, mockBpfClient, new(sync.Map), client.globalMaps, false, false, false)
+	assert.NoError(t, err)
+
+	got, ok := client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, dropMap, got)
+	got, ok = client.resolveGlobalMap(freshDrop, true, POLICY_EVENTS_DROP_COUNT_MAP_PIN_PATH)
+	assert.True(t, ok)
+	assert.Equal(t, freshDrop, got)
+	_, ok = client.resolveGlobalMap(goebpfmaps.BpfMap{}, false, "/sys/fs/bpf/globals/aws/maps/does_not_exist")
+	assert.False(t, ok)
+}
+
+// tcConfig must match struct tc_config in tc_shared.h field for field: both
+// fields are __u32, so the struct is 8 bytes and the agent writes the scope where
+// the datapath reads it.
+func TestTCConfigLayoutMatchesDatapath(t *testing.T) {
+	var c tcConfig
+	assert.Equal(t, uintptr(8), unsafe.Sizeof(c))
+	assert.Equal(t, uintptr(0), unsafe.Offsetof(c.tcpResetOnDeny))
+	assert.Equal(t, uintptr(4), unsafe.Offsetof(c.policyEventScope))
+}
+
+// The tests below attach the agent's compiled TC programs to a veth in a test
+// network namespace. Like the other kernel tests in this package, they need
+// root and the objects from `make build-bpf` (see requireBPFKernelTests).
+
+// enterTestNetns moves the test's thread into a new network namespace with a
+// veth pair whose host side is named hostVeth, until the test ends. netlink
+// works in the calling thread's namespace, so the test must not hand the work
+// to other goroutines.
+func enterTestNetns(t *testing.T, hostVeth string) netlink.Link {
+	t.Helper()
+	runtime.LockOSThread()
+	orig, err := netns.Get()
+	require.NoError(t, err)
+	ns, err := netns.New()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, netns.Set(orig))
+		ns.Close()
+		orig.Close()
+		runtime.UnlockOSThread()
+	})
+	require.NoError(t, netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: hostVeth}, PeerName: "testpeer0"}))
+	link, err := netlink.LinkByName(hostVeth)
+	require.NoError(t, err)
+	require.NoError(t, netlink.LinkSetUp(link))
+	return link
+}
+
+// cniHostVethName is the name the VPC CNI gives a pod's host-side veth, which
+// is the name the agent looks up (utils.GetHostVethName).
+func cniHostVethName(pod types.NamespacedName) string {
+	h := sha1.Sum([]byte(fmt.Sprintf("%s.%s", pod.Namespace, pod.Name)))
+	return POD_VETH_PREFIX + hex.EncodeToString(h[:])[:11]
+}
+
+// hookWatcher is the SDK's TC client, checking the veth's two hooks after
+// every attach or detach. The pod's traffic meets whatever the hooks hold
+// between two calls.
+type hookWatcher struct {
+	tc.BpfTc
+	t    *testing.T
+	link netlink.Link
+	// filters holds, after each call, how many filters each hook had.
+	filters  []hookFilterCounts
+	detaches int
+	replaces map[string]int
+	// fail holds an error for a replace method to return once, without
+	// calling the SDK.
+	fail map[string]error
+}
+
+// hookFilterCounts is the filter count on the hook that carries the pod's
+// ingress program (the veth's TC egress) and on the one that carries its
+// egress program (TC ingress).
+type hookFilterCounts struct {
+	call            string
+	ingress, egress int
+}
+
+func (w *hookWatcher) record(call string) {
+	count := func(hook uint32) int {
+		filters, err := netlink.FilterList(w.link, hook)
+		require.NoError(w.t, err)
+		return len(filters)
+	}
+	w.filters = append(w.filters, hookFilterCounts{call, count(netlink.HANDLE_MIN_EGRESS), count(netlink.HANDLE_MIN_INGRESS)})
+}
+
+func (w *hookWatcher) TCEgressAttach(name string, progFD int, funcName string) error {
+	defer w.record("TCEgressAttach")
+	return w.BpfTc.TCEgressAttach(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCIngressAttach(name string, progFD int, funcName string) error {
+	defer w.record("TCIngressAttach")
+	return w.BpfTc.TCIngressAttach(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCEgressReplace(name string, progFD int, funcName string) error {
+	defer w.record("TCEgressReplace")
+	w.replaces["TCEgressReplace"]++
+	if err := w.fail["TCEgressReplace"]; err != nil {
+		delete(w.fail, "TCEgressReplace")
+		return err
+	}
+	return w.BpfTc.TCEgressReplace(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCIngressReplace(name string, progFD int, funcName string) error {
+	defer w.record("TCIngressReplace")
+	w.replaces["TCIngressReplace"]++
+	if err := w.fail["TCIngressReplace"]; err != nil {
+		delete(w.fail, "TCIngressReplace")
+		return err
+	}
+	return w.BpfTc.TCIngressReplace(name, progFD, funcName)
+}
+
+func (w *hookWatcher) TCEgressDetach(name string) error {
+	defer w.record("TCEgressDetach")
+	w.detaches++
+	return w.BpfTc.TCEgressDetach(name)
+}
+
+func (w *hookWatcher) TCIngressDetach(name string) error {
+	defer w.record("TCIngressDetach")
+	w.detaches++
+	return w.BpfTc.TCIngressDetach(name)
+}
+
+// newAgentClient is a bpfClient as a freshly started agent has it: no record
+// of attached pods, and the pod's programs recovered from their pins.
+func newAgentClient(tcClient tc.BpfTc, podIdentifier string, progs loadedFamily) *bpfClient {
+	contexts := &sync.Map{}
+	contexts.Store(podIdentifier, BPFContext{
+		ingressPgmInfo: goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: progs.ingressFD}},
+		egressPgmInfo:  goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: progs.egressFD}},
+	})
+	return &bpfClient{
+		bpfTCClient:               tcClient,
+		policyEndpointeBPFContext: contexts,
+		ingressPodToProgMap:       &sync.Map{},
+		egressPodToProgMap:        &sync.Map{},
+		ingressProgToPodsMap:      &sync.Map{},
+		egressProgToPodsMap:       &sync.Map{},
+		deletedPods:               &sync.Map{},
+	}
+}
+
+// hookIDs returns the program IDs of the filters on link's two hooks.
+func hookIDs(t *testing.T, link netlink.Link) [2][]uint32 {
+	t.Helper()
+	var ids [2][]uint32
+	for i, hook := range []uint32{netlink.HANDLE_MIN_EGRESS, netlink.HANDLE_MIN_INGRESS} {
+		filters, err := netlink.FilterList(link, hook)
+		require.NoError(t, err)
+		for _, f := range filters {
+			ids[i] = append(ids[i], uint32(f.(*netlink.BpfFilter).Id))
+		}
+	}
+	return ids
+}
+
+// TestReattachAfterRestartKeepsPodFilteredKernel is #790: after an agent
+// restart, the PolicyEndpoint reconcile attaches a policy-selected pod's
+// programs again over the filters the previous agent left. The pod's traffic
+// must stay filtered throughout, so neither hook may be empty at any point.
+func TestReattachAfterRestartKeepsPodFilteredKernel(t *testing.T) {
+	dir, _ := requireBPFKernelTests(t)
+	v4 := family{"v4", netip.MustParseAddrPort("10.0.0.1:40000"), netip.MustParseAddrPort("10.0.1.2:80"),
+		EVENTS_BINARY, TC_EGRESS_BINARY, []string{TC_INGRESS_BINARY}}
+	progs := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	pod := types.NamespacedName{Namespace: "default", Name: "reattach-0"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	link := enterTestNetns(t, cniHostVethName(pod))
+	sdkTC := tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX})
+
+	// The agent before the restart attaches the pod's programs, as on CNI ADD.
+	_, err := newAgentClient(sdkTC, podIdentifier, progs).AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.NoError(t, err)
+	before := hookIDs(t, link)
+	require.Len(t, before[0], 1)
+	require.Len(t, before[1], 1)
+
+	// The restarted agent's reconcile attaches them again.
+	watcher := &hookWatcher{BpfTc: sdkTC, t: t, link: link, replaces: map[string]int{}}
+	_, err = newAgentClient(watcher, podIdentifier, progs).AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, false)
+	require.NoError(t, err)
+
+	// The checks below only see TC calls that go through the watcher. If the
+	// re-attach used a method the watcher doesn't wrap, they would check
+	// nothing and pass, so require a watched call on each hook. TCEgress*
+	// calls set the hook with the pod's ingress program, TCIngress* the other.
+	var ingressHookCalls, egressHookCalls int
+	for _, f := range watcher.filters {
+		if strings.HasPrefix(f.call, "TCEgress") {
+			ingressHookCalls++
+		} else {
+			egressHookCalls++
+		}
+	}
+	require.NotZero(t, ingressHookCalls, "no watched TC call set the pod's ingress program")
+	require.NotZero(t, egressHookCalls, "no watched TC call set the pod's egress program")
+
+	for _, f := range watcher.filters {
+		assert.Equal(t, 1, f.ingress, "filters carrying the pod's ingress program after %s", f.call)
+		assert.Equal(t, 1, f.egress, "filters carrying the pod's egress program after %s", f.call)
+	}
+	assert.Zero(t, watcher.detaches, "the pod's filters were detached")
+	assert.Equal(t, map[string]int{"TCEgressReplace": 1, "TCIngressReplace": 1}, watcher.replaces, "each hook replaced once")
+	assert.Equal(t, before, hookIDs(t, link), "the pod runs the same programs after the restart")
+}
+
+func TestPolicyEventDatapathScope(t *testing.T) {
+	tests := []struct {
+		name           string
+		denyOnly       bool
+		acceptConsumed bool
+		wantVal        uint32
+		wantMsg        string
+	}{
+		{"scope all at debug", false, true, POLICY_EVENT_SCOPE_ALL, "Policy event logs scope: all"},
+		{"scope all above debug", false, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: all (ACCEPT events are not emitted: log level is above debug)"},
+		{"scope deny at debug", true, true, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+		{"scope deny above debug", true, false, POLICY_EVENT_SCOPE_DENY, "Policy event logs scope: deny (ACCEPT events are not emitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVal, gotMsg := policyEventDatapathScope(tt.denyOnly, tt.acceptConsumed)
+			assert.Equal(t, tt.wantVal, gotVal)
+			assert.Equal(t, tt.wantMsg, gotMsg)
+		})
+	}
+}
+
+// progID returns the kernel ID of the program fd refers to.
+func progID(t *testing.T, fd int) uint32 {
+	t.Helper()
+	info, err := goebpfprogs.GetBPFprogInfo(fd)
+	require.NoError(t, err)
+	return info.ID
+}
+
+// TestRetryAfterRollbackReplacesFilterKernel: a failed attach unloads what it
+// loaded but keeps the filter it already replaced, which runs a program the
+// agent no longer has. The retry loads new programs and must leave each hook
+// running them.
+func TestRetryAfterRollbackReplacesFilterKernel(t *testing.T) {
+	dir, _ := requireBPFKernelTests(t)
+	v4 := family{"v4", netip.MustParseAddrPort("10.0.0.1:40000"), netip.MustParseAddrPort("10.0.1.2:80"),
+		EVENTS_BINARY, TC_EGRESS_BINARY, []string{TC_INGRESS_BINARY}}
+	first := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	retry := loadFamily(t, dir, v4, TC_INGRESS_BINARY)
+	// The hook checks below tell the two loads apart only by program ID.
+	require.NotEqual(t, progID(t, first.ingressFD), progID(t, retry.ingressFD))
+	require.NotEqual(t, progID(t, first.egressFD), progID(t, retry.egressFD))
+	pod := types.NamespacedName{Namespace: "default", Name: "rollback-0"}
+	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
+	link := enterTestNetns(t, cniHostVethName(pod))
+	recordBPFFS(t)
+
+	// The SDK client returns the loaded programs; only their FDs reach the kernel.
+	loaded := func(direction string, fd int) map[string]goelf.BpfData {
+		data, _ := loadedProgram(t, podIdentifier, direction)
+		pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)
+		d := data[pinPath]
+		d.Program.ProgFD = fd
+		data[pinPath] = d
+		return data
+	}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	gomock.InOrder(
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", first.ingressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", first.egressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("ingress", retry.ingressFD), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded("egress", retry.egressFD), nil, nil),
+	)
+	watcher := &hookWatcher{BpfTc: tc.New([]string{POD_VETH_PREFIX, BRANCH_ENI_VETH_PREFIX}), t: t, link: link,
+		replaces: map[string]int{}, fail: map[string]error{"TCIngressReplace": errors.New("replace failed")}}
+	client, _ := newRaceTestBpfClient(t)
+	client.bpfSDKClient = mockSDKClient
+	client.bpfTCClient = watcher
+
+	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.ErrorContains(t, err, "replace failed")
+	require.False(t, client.HasBPFContext(podIdentifier))
+	require.Equal(t, [2][]uint32{{progID(t, first.ingressFD)}, nil}, hookIDs(t, link), "the rollback keeps the filter it replaced")
+
+	_, err = client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_UNKNOWN, true)
+	require.NoError(t, err)
+	assert.Equal(t, [2][]uint32{{progID(t, retry.ingressFD)}, {progID(t, retry.egressFD)}}, hookIDs(t, link),
+		"each hook must run the retry's program")
+	assert.Zero(t, watcher.detaches)
 }
