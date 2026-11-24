@@ -314,24 +314,43 @@ func addDenyAllL4Entry(firewallRule *EbpfFirewallRules) {
 }
 
 // cidrContribution is one ipBlock rule's share of a canonical CIDR: the ports it
-// allows and its except ranges. The excepts are parsed once, when the rule is
-// recorded, so inheritance lookups do no CIDR parsing.
+// allows and its except ranges. The excepts are put in a prefix trie once, when
+// the rule is recorded, so checking a target against them is a single trie walk
+// rather than a scan of the rule's except list.
 type cidrContribution struct {
-	L4Info  []v1alpha1.Port
-	Excepts []*net.IPNet
+	L4Info []v1alpha1.Port
+	// Excepts holds the rule's except prefixes, or is nil when it has none.
+	Excepts *cidrTrie
 }
 
-// newCIDRContribution captures the rule's own ports and parses its except
+// newCIDRContribution captures the rule's own ports and indexes its except
 // list. An except that does not parse is left out, as it was when the lookup
 // skipped entries that failed to parse.
 func newCIDRContribution(rule EbpfFirewallRules) cidrContribution {
-	excepts := make([]*net.IPNet, 0, len(rule.Except))
-	for _, except := range rule.Except {
-		if _, ipNet, err := net.ParseCIDR(string(except)); err == nil && ipNet != nil {
-			excepts = append(excepts, ipNet)
+	contribution := cidrContribution{L4Info: rule.L4Info}
+	if len(rule.Except) > 0 {
+		contribution.Excepts = newCIDRTrie()
+		for _, except := range rule.Except {
+			contribution.Excepts.insert(string(except))
 		}
 	}
-	return cidrContribution{L4Info: rule.L4Info, Excepts: excepts}
+	return contribution
+}
+
+// exceptLookupHook, when set by a test, is called after every except lookup
+// with the number of trie nodes the lookup visited. It is nil in production.
+var exceptLookupHook func(visited int)
+
+// inExcept reports whether ip falls inside one of the contribution's excepts.
+func (c cidrContribution) inExcept(ip net.IP) bool {
+	if c.Excepts == nil {
+		return false
+	}
+	found, visited := c.Excepts.containsIP(ip)
+	if exceptLookupHook != nil {
+		exceptLookupHook(visited)
+	}
+	return found
 }
 
 // checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie returns the ports a narrower CIDR
@@ -372,14 +391,7 @@ func checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(firewallRule string,
 			}
 		}
 		for _, cidrFirewallInfo := range contributions {
-			foundInExcept := false
-			for _, exceptEntry := range cidrFirewallInfo.Excepts {
-				if exceptEntry.Contains(ipToCheck.IP) {
-					foundInExcept = true
-					break
-				}
-			}
-			if !foundInExcept {
+			if !cidrFirewallInfo.inExcept(ipToCheck.IP) {
 				matchingCIDRL4Info = append(matchingCIDRL4Info, cidrFirewallInfo.L4Info...)
 			}
 		}

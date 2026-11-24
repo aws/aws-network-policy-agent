@@ -1,4 +1,4 @@
-﻿package fwruleprocessor
+package fwruleprocessor
 
 import (
 	"encoding/binary"
@@ -1361,6 +1361,7 @@ func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
 		})
 	}
 }
+
 // TestFWRuleProcessor_ExceptCrossContamination743 reproduces GitHub issue #743.
 //
 // Two ipBlock rules canonicalize to the same /8 key:
@@ -1447,6 +1448,7 @@ func TestFWRuleProcessor_ExceptCrossContamination743(t *testing.T) {
 		})
 	}
 }
+
 // TestCanonicalizeExcepts_ReturnsNewSlice checks that the result never shares
 // the input's backing array, for empty and non-empty input, so appends to it
 // cannot write into a cached PolicyEndpoint's array.
@@ -1464,6 +1466,7 @@ func TestCanonicalizeExcepts_ReturnsNewSlice(t *testing.T) {
 		assert.Equal(t, before, backing, "canonicalizeExcepts result shares the input's backing array (len %d)", len(in))
 	}
 }
+
 // TestFWRuleProcessor_ExceptEntryKeepsOtherRulesPorts743 covers the except pass
 // from issue #743. An except CIDR denies only the ports of the rule that
 // declared it. Ports allowed by other rules that cover the whole except range

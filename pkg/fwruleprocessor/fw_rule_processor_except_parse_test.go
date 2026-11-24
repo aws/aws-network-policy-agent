@@ -2,6 +2,7 @@ package fwruleprocessor
 
 import (
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/aws/aws-network-policy-agent/api/v1alpha1"
@@ -39,7 +40,10 @@ func stringsOf(in []v1alpha1.NetworkAddress) []string {
 func TestCheckAndDeriveL4Info_DoesNotParseExceptsPerLookup(t *testing.T) {
 	trie, contributions, excepts := exceptContributionFixture(4096)
 
-	assert.Len(t, contributions["10.0.0.0/8"][0].Excepts, len(excepts))
+	for _, except := range excepts {
+		_, ipNet, _ := net.ParseCIDR(string(except))
+		assert.True(t, contributions["10.0.0.0/8"][0].inExcept(ipNet.IP), "except %s missing from the contribution's trie", except)
+	}
 	assert.Empty(t, checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie(string(excepts[len(excepts)-1]), trie, contributions),
 		"a target inside the rule's except must not inherit its ports")
 	assert.NotEmpty(t, checkAndDeriveL4InfoFromAnyMatchingCIDRsTrie("10.0.0.0/24", trie, contributions),
