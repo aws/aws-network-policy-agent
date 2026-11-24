@@ -55,7 +55,7 @@ Requires `enable-policy-event-logs=true`. Selects which policy verdicts produce 
 - `all`: ACCEPT and DENY events are emitted by the datapath. ACCEPT events are only logged when `log-level` is `debug`.
 - `deny`: DENY events only. The datapath does not emit ACCEPT events, so there are no ACCEPT flow lines and no ACCEPT CloudWatch events at any log level.
 
-Invalid values fall back to `all`. If `deny` is set while `enable-policy-event-logs` is `false`, the agent logs a warning and the flag has no effect.
+Any value other than `all` or `deny` makes the agent exit at startup with an error. If `deny` is set while `enable-policy-event-logs` is `false`, the agent logs a warning and the flag has no effect.
 
 #### `enable-cloudwatch-logs`
 
