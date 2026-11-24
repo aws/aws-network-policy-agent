@@ -427,10 +427,15 @@ func TestFWRuleProcessor_SortFirewallRulesByPrefixLength(t *testing.T) {
 			copy(inputCopy, tt.inputRules)
 
 			// Call the function being tested
-			sortFirewallRulesByPrefixLength(inputCopy, tt.hostMask)
+			parsed := NewFirewallRuleProcessor("", tt.hostMask, false).parseRules(inputCopy)
+			sortFirewallRulesByPrefixLength(parsed)
+			sorted := make([]EbpfFirewallRules, len(parsed))
+			for i, rule := range parsed {
+				sorted[i] = rule.EbpfFirewallRules
+			}
 
 			// Check if the result matches the expected output
-			assert.Equal(t, tt.expectedOutput, inputCopy, "Sorted rules do not match expected output")
+			assert.Equal(t, tt.expectedOutput, sorted, "Sorted rules do not match expected output")
 		})
 	}
 }
@@ -518,32 +523,15 @@ func TestFWRuleProcessor_SortFirewallRulesByPrefixLengthWithL4Info(t *testing.T)
 			copy(inputCopy, tt.inputRules)
 
 			// Call the function being tested
-			sortFirewallRulesByPrefixLength(inputCopy, tt.hostMask)
+			parsed := NewFirewallRuleProcessor("", tt.hostMask, false).parseRules(inputCopy)
+			sortFirewallRulesByPrefixLength(parsed)
+			sorted := make([]EbpfFirewallRules, len(parsed))
+			for i, rule := range parsed {
+				sorted[i] = rule.EbpfFirewallRules
+			}
 
 			// Check if the result matches the expected output
-			assert.Equal(t, tt.expectedOutput, inputCopy, "Sorted rules do not match expected output")
-		})
-	}
-}
-
-func TestIsIPv6(t *testing.T) {
-	tests := []struct {
-		name     string
-		cidr     string
-		expected bool
-	}{
-		{"IPv6 compressed", "2001:db8::1/128", true},
-		{"IPv6 fully qualified", "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128", true},
-		{"IPv6 catch-all", "::/0", true},
-		{"IPv6 no mask", "2001:db8::1", true},
-		{"IPv4 standard", "10.0.0.1/32", false},
-		{"IPv4 catch-all", "0.0.0.0/0", false},
-		{"IPv4 no mask", "192.168.1.1", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, isIPv6(tt.cidr))
+			assert.Equal(t, tt.expectedOutput, sorted, "Sorted rules do not match expected output")
 		})
 	}
 }
@@ -573,7 +561,7 @@ func TestFirewallRuleProcessor_ShouldSkipRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := NewFirewallRuleProcessor(tt.nodeIP, tt.hostMask, tt.enableIPv6)
-			assert.Equal(t, tt.expected, f.shouldSkipRule(tt.cidr))
+			assert.Equal(t, tt.expected, f.shouldSkipRule(canonicalPrefix(netip.MustParsePrefix(tt.cidr))))
 		})
 	}
 }
@@ -1359,23 +1347,5 @@ func TestComputeMapEntries_ExceptFamilyHandling(t *testing.T) {
 				assert.Equal(t, origExcepts[i], r.Except, "caller's except slice for rule %d was modified", i)
 			}
 		})
-	}
-}
-
-// TestCanonicalizeExcepts_ReturnsNewSlice checks that the result never shares
-// the input's backing array, for empty and non-empty input, so appends to it
-// cannot write into a cached PolicyEndpoint's array.
-func TestCanonicalizeExcepts_ReturnsNewSlice(t *testing.T) {
-	f := NewFirewallRuleProcessor("10.255.0.1", "/32", false)
-	for _, in := range [][]v1alpha1.NetworkAddress{
-		make([]v1alpha1.NetworkAddress, 0, 4),
-		append(make([]v1alpha1.NetworkAddress, 0, 4), "10.1.0.0/16"),
-	} {
-		backing := in[:cap(in)]
-		before := append([]v1alpha1.NetworkAddress(nil), backing...)
-		out, err := f.canonicalizeExcepts(in)
-		assert.NoError(t, err)
-		_ = append(out, "10.9.0.0/16", "10.8.0.0/16", "10.7.0.0/16", "10.6.0.0/16")
-		assert.Equal(t, before, backing, "canonicalizeExcepts result shares the input's backing array (len %d)", len(in))
 	}
 }

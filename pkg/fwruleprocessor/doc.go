@@ -8,29 +8,28 @@
 //
 // ## IP Storage Format
 //
-// IPs are stored as raw byte slices in their canonical form:
-//   - IPv4: 4 bytes (net.IP.To4)
-//   - IPv6: 16 bytes (net.IP.To16)
-//   - v4-mapped IPv6 (::ffff:x.x.x.x): normalized to 4-byte IPv4 form
+// Addresses use netip.Addr, and CIDR keys use canonical netip.Prefix values:
+//   - IPv4: walked using its 4 address bytes
+//   - IPv6: walked using its 16 address bytes
+//   - v4-mapped IPv6 (::ffff:x.x.x.x): unmapped to IPv4 if masking preserves the mapped address
 //
-// This normalization (see normalizeIP) ensures that a v4-mapped address matches
+// This normalization (see canonicalPrefix) ensures that a v4-mapped address matches
 // against v4 CIDRs in the v4 sub-trie, not the v6 sub-trie.
 //
 // ## Trie Layout
 //
 // The trie has two independent roots: v4Root and v6Root. Each node has:
 //   - children [2]*cidrTrieNode — left (bit=0) and right (bit=1)
-//   - cidrKey  string              — canonical CIDR string stored at this prefix depth
+//   - cidrKey  netip.Prefix        — canonical prefix stored at this depth; zero means no key
 //
 // Insertion walks the network prefix bits (MSB-first) from root, creating nodes
-// as needed, and appends the CIDR string key at the node corresponding to the
+// as needed, and stores the parsed prefix at the node corresponding to the
 // last prefix bit. For example, inserting "10.0.0.0/8" stores the key at depth 8
 // in the v4 sub-trie.
 //
-// The CIDR is stored in canonical form (ipNet.String() — host bits masked).
-// The caller canonicalizes CIDRs before insertion (fw_rule_processor.go line 112),
-// and insert() itself calls net.ParseCIDR which masks host bits, so the stored
-// key always matches what the nonHostCIDRs map uses as its key.
+// The compiler parses CIDRs once before processing rules. Both the compiler
+// and insert use canonicalPrefix to mask host bits and normalize mapped addresses,
+// so the stored key matches what the nonHostCIDRs map uses as its key.
 //
 // ## Query Semantics (findContainingKeys)
 //
@@ -43,8 +42,8 @@
 //
 // ## Lifecycle
 //
-// The trie is built once per reconcile (in ComputeMapEntriesFromEndpointRules) from
-// the non-host CIDR rules in the PolicyEndpoint spec, queried for every host-CIDR
-// rule to find overlapping port permissions, and discarded after reconcile completes.
+// The trie is built once per compilation (in ComputeMapEntriesFromEndpointRules)
+// from the non-host CIDR rules, queried for rules to find overlapping port
+// permissions, and discarded after compilation completes.
 // It is never shared across goroutines.
 package fwruleprocessor
