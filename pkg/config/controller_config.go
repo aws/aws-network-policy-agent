@@ -93,7 +93,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"This frees connection tracking state on the client and in EC2 at once, but tells the client that the port is blocked")
 	fs.StringVar(&cfg.PolicyEventLogsScope, flagPolicyEventLogsScope, defaultPolicyEventLogsScope, ""+
 		"Which policy verdicts produce policy events: \"all\" (ACCEPT and DENY) or \"deny\" (DENY only; ACCEPT events "+
-		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Invalid values fall back to \"all\". "+
+		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Any other value makes the agent exit at startup. "+
 		"Requires enable-policy-event-logs=true.")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
@@ -109,13 +109,17 @@ func (cfg *ControllerConfig) ValidControllerFlags() error {
 	if cfg.ConntrackCacheTableSize < (32*1024) || cfg.ConntrackCacheTableSize > (1024*1024) {
 		return errors.New("Invalid conntrack cache table size, should be between 32K and 1024K")
 	}
+	// Validate policy event logs scope
+	if _, valid := ParsePolicyEventLogsScope(cfg.PolicyEventLogsScope); !valid {
+		return errors.New("Invalid --policy-event-logs-scope, valid values are all or deny")
+	}
 	return nil
 }
 
 // ParsePolicyEventLogsScope returns whether --policy-event-logs-scope selects
 // DENY-only events. "all" and "" select both verdicts; "deny" selects DENY
 // only (case-insensitive, surrounding spaces ignored). Any other value returns
-// valid=false and falls back to both verdicts, so a typo never hides events.
+// valid=false; the caller is expected to fail startup rather than guess.
 func ParsePolicyEventLogsScope(raw string) (denyOnly bool, valid bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "all":
