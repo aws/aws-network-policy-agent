@@ -570,13 +570,13 @@ func (r *PolicyEndpointsReconciler) addCatchAllEntry(firewallRules *[]fwrp.EbpfF
 }
 
 // SetupWithManager sets up both stages with the Manager: the PolicyEndpoint controller on a
-// single worker, and the programming controller on programmingWorkers.
-func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, programmingWorkers int) error {
+// single worker, and the programming controller on programmingWorkerCount.
+func (r *PolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if err := setupEndpointController(mgr, "policyendpoint", &policyk8sawsv1.PolicyEndpoint{},
 		policyEndpointParent, r, controller.TypedOptions[EndpointRequest]{}); err != nil {
 		return err
 	}
-	return setupProgrammer(mgr, policyEndpointProgrammerName, r.programQueue, programmingWorkers, r.programIdentifier)
+	return setupProgrammer(mgr, policyEndpointProgrammerName, r.programQueue, r.programIdentifier)
 }
 
 func policyEndpointParent(pe *policyk8sawsv1.PolicyEndpoint) string { return pe.Spec.PolicyRef.Name }

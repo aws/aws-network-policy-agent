@@ -132,13 +132,13 @@ func main() {
 
 		policyEndpointController = controllers.NewPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient, ctrlConfig.EnableIPv6)
 
-		if err = policyEndpointController.SetupWithManager(ctx, mgr, ctrlConfig.MaxConcurrentReconciles); err != nil {
+		if err = policyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller PolicyEndpoints %v", err)
 			os.Exit(1)
 		}
 
 		clusterPolicyEndpointController = controllers.NewClusterPolicyEndpointsReconciler(mgr.GetClient(), nodeIP, ebpfClient)
-		if err = clusterPolicyEndpointController.SetupWithManager(ctx, mgr, ctrlConfig.MaxConcurrentReconciles); err != nil {
+		if err = clusterPolicyEndpointController.SetupWithManager(ctx, mgr); err != nil {
 			log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
 			os.Exit(1)
 		}

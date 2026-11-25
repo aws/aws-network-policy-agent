@@ -42,6 +42,13 @@ const (
 	// A stage-1 reconcile tracks up to two changes per identifier it queues: its E2E change and
 	// its setup or teardown.
 	maxPendingChangesPerIdentifier = 128
+
+	// programmingWorkerCount is the number of stage-2 workers of each controller, and isn't
+	// configurable. The queue makes more workers safe for any one identifier, but with a second
+	// worker and a backlog, a new pod can be left at the baseline state during a rollout: the
+	// policy controller can remove the last old replica from a policy before it lists the new
+	// one, and a second worker programs that gap where one worker coalesces it away.
+	programmingWorkerCount = 1
 )
 
 // newProgrammingQueue returns a stage-2 queue. It exists from construction, so adding to it never
@@ -54,13 +61,13 @@ func newProgrammingQueue(name string) priorityqueue.PriorityQueue[string] {
 }
 
 // setupProgrammer registers the stage-2 controller that runs program on the identifiers in queue.
-func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.PriorityQueue[string], workers int,
+func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.PriorityQueue[string],
 	program func(context.Context, string) error) error {
 	_, err := controller.NewTyped[string](name, mgr, controller.TypedOptions[string]{
 		Reconciler: reconcile.TypedFunc[string](func(ctx context.Context, podIdentifier string) (reconcile.Result, error) {
 			return reconcile.Result{}, program(ctx, podIdentifier)
 		}),
-		MaxConcurrentReconciles: workers,
+		MaxConcurrentReconciles: programmingWorkerCount,
 		NewQueue: func(string, workqueue.TypedRateLimiter[string]) workqueue.TypedRateLimitingInterface[string] {
 			return queue
 		},

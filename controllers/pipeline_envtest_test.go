@@ -13,6 +13,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -30,8 +31,8 @@ func TestPipeline_Envtest(t *testing.T) {
 	bpf := &ebpf.MockBpfClient{}
 	pe := NewPolicyEndpointsReconciler(mgr.GetClient(), fixtureNodeIP, bpf, false)
 	cpe := NewClusterPolicyEndpointsReconciler(mgr.GetClient(), fixtureNodeIP, bpf)
-	require.NoError(t, pe.SetupWithManager(context.Background(), mgr, 4))
-	require.NoError(t, cpe.SetupWithManager(context.Background(), mgr, 4))
+	require.NoError(t, pe.SetupWithManager(context.Background(), mgr))
+	require.NoError(t, cpe.SetupWithManager(context.Background(), mgr))
 
 	// Queued before the manager starts: the programming queue exists from construction, so
 	// adding to it must neither block nor lose the identifier.
@@ -50,6 +51,31 @@ func TestPipeline_Envtest(t *testing.T) {
 		cancel()
 		<-done
 	})
+
+	// Each programming controller runs one worker: more than one can leave a new pod at the
+	// baseline during a rollout.
+	workers := func(controller string) float64 {
+		families, err := crmetrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, f := range families {
+			if f.GetName() != "controller_runtime_max_concurrent_reconciles" {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "controller" && l.GetValue() == controller {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		return 0
+	}
+	require.Eventually(t, func() bool {
+		return workers(policyEndpointProgrammerName) != 0 && workers(clusterPolicyEndpointProgrammerName) != 0
+	}, 30*time.Second, 100*time.Millisecond, "the programming controllers start")
+	require.Equal(t, 1.0, workers(policyEndpointProgrammerName))
+	require.Equal(t, 1.0, workers(clusterPolicyEndpointProgrammerName))
 
 	web := utils.GetPodIdentifier("web-aaa", envtestNamespace)
 	ingressCIDRs := func(id string) []string {

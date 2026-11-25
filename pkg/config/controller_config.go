@@ -19,7 +19,7 @@ const (
 	defaultLogFile                     = "/var/log/aws-routed-eni/network-policy-agent.log"
 	defaultLogFileMaxSize              = logger.DEFAULT_LOG_FILE_MAX_SIZE
 	defaultLogFileMaxBackups           = logger.DEFAULT_LOG_FILE_MAX_BACKUPS
-	defaultMaxConcurrentReconciles     = 1
+	defaultMaxConcurrentReconciles     = 3
 	defaultConntrackCacheCleanupPeriod = 300
 	defaultConntrackCacheTableSize     = 512 * 1024
 	flagEnablePolicyEventLogs          = "enable-policy-event-logs"
@@ -44,9 +44,10 @@ type ControllerConfig struct {
 	LogFileMaxSize int
 	// Count of rotated Network Policy Agent local log files
 	LogFileMaxBackups int
-	// MaxConcurrentReconciles is the number of workers programming pod identifiers' eBPF maps,
-	// for each of the PolicyEndpoint and ClusterPolicyEndpoint controllers. The reconciles that
-	// queue that work always run on a single worker.
+	// MaxConcurrentReconciles is accepted so that configurations that set it keep starting, but
+	// nothing reads it. Each policy controller programs pod identifiers' eBPF maps on one worker:
+	// with a second worker, a new pod can be left at the baseline state during a rollout, when
+	// the policy controller removes the last old replica before it lists the new one.
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
 	EnablePolicyEventLogs bool
@@ -84,7 +85,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&cfg.LogFileMaxBackups, flagLogFileMaxBackups, defaultLogFileMaxBackups, ""+
 		"Set the controller maximum number of rotated log files to retain")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
-		"Number of concurrent workers programming pod identifiers' eBPF maps, per policy controller")
+		"Ignored: each policy controller programs eBPF maps on one worker")
 	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")
 	fs.BoolVar(&cfg.EnableCloudWatchLogs, flagEnableCloudWatchLogs, false, "If enabled, policy decision logs will be streamed to CloudWatch, requires \"enable-policy-event-logs=true\"")
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")
