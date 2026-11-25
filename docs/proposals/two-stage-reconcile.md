@@ -104,9 +104,26 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 ### Observability
 
-- **Latency metrics.** `awsnodeagent_policy_setup_latency_ms` and `_teardown_latency_ms` keep their meaning: time from a PolicyEndpoint's reconcile until stage 2 has programmed every identifier it queued, retries included. Each reconcile that queues work takes one sample, where today's setup latency took one per local identifier. The programming-latency histograms take one sample per change once all its identifiers are programmed.
-- **New controllers.** `policyendpoint-programmer` and `clusterpolicyendpoint-programmer` add controller-runtime queue and reconcile metrics, including `workqueue_depth` and `workqueue_retries_total`. Programming failures are counted in `controller_runtime_reconcile_errors_total` under these controllers, not under `policyendpoint` and `clusterpolicyendpoint`.
-- **Logs.** A failed stage-2 pass logs one agent error line that names the identifier, and controller-runtime logs the returned error, as it does for a failed reconcile today.
+**Latency metrics.** Names, types, labels and buckets are unchanged. What each sample stands for changes, so the values and counts are not comparable with today's:
+
+| Metric | Today, one sample per | This change, one sample per | Value |
+|---|---|---|---|
+| `awsnodeagent_policy_setup_latency_ms`: summary, labels `name` and `namespace` of the PolicyEndpoint | Local identifier of a live PolicyEndpoint's reconcile, whether its write succeeded, failed, was skipped or had nothing to do. Identifiers whose rules could not be derived are left out. | Reconcile of a live PolicyEndpoint that queued at least one identifier, once each identifier it queued is programmed and some pass wrote maps. | Today: ms from the reconcile's start to that identifier's turn in the same pass. Now: ms from the start of the stage-1 reconcile to the last of its identifiers, including the stage-2 queue wait and retries. |
+| `awsnodeagent_policy_teardown_latency_ms`: summary, same labels | Reconcile of a deleted, deleting or moved slice that had pods to rewrite and failed nowhere. | Reconcile of a deleted, deleting or moved slice that queued at least one identifier, once each is programmed and some pass wrote maps. | Today: ms of the attempt that succeeded, from that attempt's start. Now: as for setup. |
+| `awsnodeagent_policy_programming_latency_seconds` and `awsnodeagent_cluster_policy_programming_latency_seconds`: histograms, no labels | New `last-change-trigger-time` value on a live slice, once a reconcile of it failed nowhere and wrote some identifier's maps. | New `last-change-trigger-time` value on a live slice, once each identifier its reconcile queued is programmed and some pass wrote maps. | Seconds from the trigger time, as today. It now includes the stage-2 queue wait. |
+
+How the cases differ, now and today:
+- **Retries.** A failed pass keeps its identifier's samples pending, and the pass that succeeds takes them, so the value includes the retry delay and a retry adds no sample. Today the setup latency was also sampled on a failing pass, the teardown latency only on the attempt that succeeded, and the programming latency waited for the reconcile that succeeded, as now.
+- **No local work.** A reconcile that queues nothing, or whose identifiers have no programs on this node, takes no sample. A trigger value is consumed either way, as today.
+- **Skipped attaches.** A pass that writes nothing because every attach was skipped does not count as programming the identifier, so its samples wait for a later pass of it, and none is taken if no later pass comes. Today the programming latency was sampled once any identifier was written.
+- **Coalescing.** Each reconcile is its own change. Changes programmed by the same pass take one sample each, from their own start or trigger time. A resync that queues work takes a setup sample, as today. Each trigger value is sampled at most once. Today a value replaced before its reconcile succeeded was never sampled; now a value is sampled once a stage-1 reconcile has seen it.
+- **Bound.** An identifier holds at most 128 pending changes. Past that, the oldest is dropped without a sample.
+- **Clock skew.** A negative programming latency is dropped, as today.
+- **Cluster policies** have no setup or teardown metric, as today.
+
+**Controller metrics.** `policyendpoint` and `clusterpolicyendpoint` now cover stage 1 only. `controller_runtime_reconcile_total` and `_reconcile_time_seconds` count and time recording and queueing, with no eBPF work, and `_reconcile_errors_total` counts only informer-cache read failures. The new `policyendpoint-programmer` and `clusterpolicyendpoint-programmer` controllers count and time stage-2 passes, count a failed pass in `_reconcile_errors_total`, and report the identifier queue in `workqueue_depth`, `workqueue_retries_total` and the other queue metrics. `controller_runtime_max_concurrent_reconciles` is 1 for all four.
+
+**Logs.** A failed stage-2 pass logs one agent error line that names the identifier, and controller-runtime logs the returned error, as it does for a failed reconcile today.
 
 ### Risks
 
@@ -140,5 +157,5 @@ Delaying each `(slice, parent)` request would merge some events of one slice. It
 
 - **Flags.** None change. `--max-concurrent-reconciles` stays defined and unread, as today, so configurations that set it still start; its help text says it is ignored.
 - **Datapath.** No BPF program, map or pin changes. Builds of this change and of `main` from the same toolchain produce byte-identical objects, so upgrading or downgrading between them reloads nothing. On EKS, every identifier's maps stayed identical across restarts, and across upgrades and downgrades between v1.5.0, `main` and this change. The repo's integration suites and cyclonus pass on IPv6 (AL2023). They also pass on IPv4, apart from specs that run commands on Bottlerocket hosts. The code PR has the full results.
-- **Metrics.** Names are unchanged, and the setup and teardown latencies keep their meaning. The two new controllers add metric series.
+- **Metrics.** Names, types, labels and buckets are unchanged, but the setup and teardown latencies are sampled per reconcile rather than per identifier, and all four latencies include the stage-2 queue wait (see Observability). Programming failures are counted under the two new controllers, which add metric series.
 - **Restart.** In-memory state is rebuilt from the informer cache, as today. The slice-deletion record is in memory, so after a restart identifiers are written with all their policies, as today's restart does.
