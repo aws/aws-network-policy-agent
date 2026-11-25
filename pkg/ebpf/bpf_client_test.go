@@ -2263,6 +2263,121 @@ func TestBpfClient_ReAttachEbpfProbes_ReplacesFilter(t *testing.T) {
 	}
 }
 
+// When only one direction's binary changes, the recovered entries of that
+// direction are not kept. The FDs the SDK opened for them (program and per-pod
+// maps, including the pod state map) belong to the caller and must be closed,
+// while the kept ingress entry (per-pod maps and the node-wide conntrack map)
+// stays open.
+func TestRecoverBPFStateClosesFDsOfUpdatedDirection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	closed := recordClosedFDs(t)
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{}, nil)
+	// Distinct fake FDs; nothing is opened because the SDK is mocked.
+	ingressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "ingress")
+	egressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "egress")
+	recovered := map[string]goelf.BpfData{
+		ingressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 10},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_INGRESS_MAP:                {MapFD: 11},
+				utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 12},
+				utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 13},
+				AWS_CONNTRACK_MAP:                   {MapFD: 5},
+			},
+		},
+		egressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 20},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_EGRESS_MAP:                {MapFD: 21},
+				utils.TC_CLUSTER_POLICY_EGRESS_MAP: {MapFD: 22},
+				utils.TC_EGRESS_POD_STATE_MAP:      {MapFD: 23},
+				AWS_CONNTRACK_MAP:                  {MapFD: 5},
+			},
+		},
+	}
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(recovered, nil)
+	mockBpfClient.EXPECT().GetAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil)
+	mockTCClient.EXPECT().GetAllAttachedProgIds().Return(map[string]int{}, map[string]int{}, nil)
+	mockTCClient.EXPECT().CleanupQdiscs(false, true).Return(nil)
+
+	c := NewMockBpfClient()
+	// The kept ingress entry would load its maps from the kernel; mark them as
+	// already loaded so the test stays kernel-free.
+	c.ingressInMemoryMap = new(sync.Map)
+	c.ingressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
+	c.clusterPolicyIngressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
+	ctx := new(sync.Map)
+	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, ctx, new(sync.Map), false, true, false)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int{20, 21, 22, 23}, *closed)
+	stored, ok := ctx.Load("pod_ns")
+	require.True(t, ok)
+	assert.Equal(t, 10, stored.(BPFContext).ingressPgmInfo.Program.ProgFD)
+	assert.Zero(t, stored.(BPFContext).egressPgmInfo.Program.ProgFD)
+	assert.Empty(t, stored.(BPFContext).egressPgmInfo.Maps)
+}
+
+// Mirror of the egress case: when only the ingress binary changes, the ingress
+// entry's program and per-pod maps are closed, and the egress entry (kept, with
+// its per-pod maps and the node-wide conntrack map) is left untouched.
+func TestRecoverBPFStateClosesFDsOfUpdatedIngress(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	closed := recordClosedFDs(t)
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
+	mockBpfClient.EXPECT().RecoverGlobalMaps().Return(map[string]goebpfmaps.BpfMap{}, nil)
+	ingressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "ingress")
+	egressPin := utils.GetBPFPinPathFromPodIdentifier("pod_ns", "egress")
+	recovered := map[string]goelf.BpfData{
+		ingressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 10},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_INGRESS_MAP:                {MapFD: 11},
+				utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 12},
+				utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 13},
+				AWS_CONNTRACK_MAP:                   {MapFD: 5},
+			},
+		},
+		egressPin: {
+			Program: goebpfprogs.BpfProgram{ProgFD: 20},
+			Maps: map[string]goebpfmaps.BpfMap{
+				utils.TC_EGRESS_MAP:                {MapFD: 21},
+				utils.TC_CLUSTER_POLICY_EGRESS_MAP: {MapFD: 22},
+				utils.TC_EGRESS_POD_STATE_MAP:      {MapFD: 23},
+				AWS_CONNTRACK_MAP:                  {MapFD: 5},
+			},
+		},
+	}
+	mockBpfClient.EXPECT().RecoverAllBpfProgramsAndMaps().Return(recovered, nil)
+	mockBpfClient.EXPECT().GetAllBpfProgramsAndMaps().Return(map[string]goelf.BpfData{}, nil)
+	mockTCClient.EXPECT().GetAllAttachedProgIds().Return(map[string]int{}, map[string]int{}, nil)
+	mockTCClient.EXPECT().CleanupQdiscs(true, false).Return(nil)
+
+	c := NewMockBpfClient()
+	c.ingressInMemoryMap = new(sync.Map)
+	// The kept egress entry would load its maps from the kernel; mark them as
+	// already loaded so the test stays kernel-free.
+	c.egressInMemoryMap = new(sync.Map)
+	c.egressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
+	c.clusterPolicyEgressInMemoryMap.Store("pod_ns", &InMemoryBpfMap{})
+	ctx := new(sync.Map)
+	_, _, _, _, _, err := c.recoverBPFState(mockTCClient, mockBpfClient, ctx, new(sync.Map), true, false, false)
+	require.NoError(t, err)
+	// Only the updated (ingress) direction's program and per-pod maps are closed;
+	// the kept egress entry and the shared conntrack map are not.
+	assert.ElementsMatch(t, []int{10, 11, 12, 13}, *closed)
+	stored, ok := ctx.Load("pod_ns")
+	require.True(t, ok)
+	bctx := stored.(BPFContext)
+	assert.Equal(t, 20, bctx.egressPgmInfo.Program.ProgFD)
+	assert.Empty(t, bctx.ingressPgmInfo.Maps)
+	assert.Zero(t, bctx.ingressPgmInfo.Program.ProgFD)
+}
+
 // recoverBPFState reuses the global maps the ct-deny probe recovered instead
 // of recovering them again, so the FDs in the SDK's map cache stay the ones
 // the agent uses.
