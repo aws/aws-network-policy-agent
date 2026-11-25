@@ -105,10 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	policyEventsDenyOnly, validScope := config.ParsePolicyEventLogsScope(ctrlConfig.PolicyEventLogsScope)
-	if !validScope {
-		log.Warnf("Invalid --policy-event-logs-scope=%q; using \"all\" (valid values: all, deny)", ctrlConfig.PolicyEventLogsScope)
-	}
+	policyEventsDenyOnly, _ := config.ParsePolicyEventLogsScope(ctrlConfig.PolicyEventLogsScope)
 	ctx := ctrl.SetupSignalHandler()
 
 	var policyEndpointController *controllers.PolicyEndpointsReconciler
