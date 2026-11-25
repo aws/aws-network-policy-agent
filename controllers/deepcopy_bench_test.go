@@ -302,7 +302,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			// CNI RPC path.
-			ingressRules, egressRules, err = r.DeriveFireWallRulesPerPodIdentifier(podIdentifier, "ns")
+			ingressRules, egressRules, _, err = r.DeriveFireWallRulesPerPodIdentifier(podIdentifier, "ns")
 			assert.NoError(t, err)
 			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
 				_, err = processor.ComputeMapEntriesFromEndpointRules(rules)

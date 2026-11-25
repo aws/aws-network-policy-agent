@@ -600,31 +600,18 @@ func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 	return r.ebpfClient
 }
 
+// DeriveFireWallRulesPerPodIdentifier returns the rules and pod state a CNI ADD writes for
+// podIdentifier: what a programming pass writes, from the same lookup.
 func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]fwrp.EbpfFirewallRules,
-	[]fwrp.EbpfFirewallRules, error) {
+	[]fwrp.EbpfFirewallRules, int, error) {
 
 	policyEndpoints, err := r.policyEndpointsOf(context.Background(), podNamespace, podIdentifier, r.policyEndpointRefs(podIdentifier))
 	if err != nil {
 		log().Errorf("Error deriving firewall rules: %v", err)
-		return nil, nil, nil
+		return nil, nil, ebpf.POLICIES_APPLIED, nil
 	}
-	ingressRules, egressRules, isIngressIsolated, isEgressIsolated := r.deriveFirewallRules(policyEndpoints)
-
-	if len(ingressRules) == 0 && !isIngressIsolated {
-		// No active ingress rules for this pod, but we only should land here
-		// if there are active egress rules. So, we need to add an allow-all entry to ingress rule set
-		log().Info("No Ingress rules and no ingress isolation - Appending catch all entry")
-		r.addCatchAllEntry(&ingressRules)
-	}
-
-	if len(egressRules) == 0 && !isEgressIsolated {
-		// No active egress rules for this pod but we only should land here
-		// if there are active ingress rules. So, we need to add an allow-all entry to egress rule set
-		log().Info("No Egress rules and no egress isolation - Appending catch all entry")
-		r.addCatchAllEntry(&egressRules)
-	}
-
-	return ingressRules, egressRules, nil
+	ingressRules, egressRules, state := r.firewallRulesFor(policyEndpoints)
+	return ingressRules, egressRules, state, nil
 }
 
 func (r *PolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {

@@ -212,7 +212,7 @@ func TestDeriveFireWallRulesPerPodIdentifier_TargetGroups(t *testing.T) {
 	}
 	r := recordPolicies(t, pes, []string{"np"})
 
-	ingress, _, err := r.DeriveFireWallRulesPerPodIdentifier("pa@ns", "ns")
+	ingress, _, _, err := r.DeriveFireWallRulesPerPodIdentifier("pa@ns", "ns")
 	require.NoError(t, err)
 	assert.Equal(t, []int32{8080}, tgPortsOf(t, ingress))
 }

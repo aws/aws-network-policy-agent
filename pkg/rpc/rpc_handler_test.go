@@ -345,3 +345,50 @@ func TestEnforceNpToPod_CachedClusterPolicyOnly_ProgramsClusterPolicyMaps(t *tes
 		{PodIdentifier: "nginx@default", MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}: ebpf.POLICIES_APPLIED,
 	}, mockBpfClient.PodStateByIdentifier)
 }
+
+// A CNI ADD for an identifier whose only recorded PolicyEndpoint is being deleted writes what a
+// programming pass would: no live PolicyEndpoint applies, so the pod gets the baseline, which in
+// strict mode is deny, not an allow-all entry with policies applied.
+func TestEnforceNpToPod_StrictModeBaselineWhenTheOnlyPolicyEndpointIsBeingDeleted(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, policyk8sawsv1.AddToScheme(scheme))
+	pe := &policyk8sawsv1.PolicyEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "np-x-abcde", Namespace: "default", Finalizers: []string{"example.com/hold"}},
+		Spec: policyk8sawsv1.PolicyEndpointSpec{
+			PolicyRef:    policyk8sawsv1.PolicyReference{Name: "np-x", Namespace: "default"},
+			PodIsolation: []networking.PolicyType{networking.PolicyTypeEgress},
+			PodSelectorEndpoints: []policyk8sawsv1.PodEndpoint{
+				{Name: "nginx-old123", Namespace: "default", PodIP: "10.0.0.5", HostIP: "10.0.0.1"},
+			},
+			Egress: []policyk8sawsv1.EndpointInfo{{CIDR: "10.1.0.0/16"}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pe).Build()
+	mockBpfClient := &ebpf.MockBpfClient{NetworkPolicyMode: "strict"}
+	reconciler := controllers.NewPolicyEndpointsReconciler(k8sClient, "10.0.0.1", mockBpfClient, false)
+	_, err := reconciler.Reconcile(context.Background(), controllers.EndpointRequest{
+		Endpoint: types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}, Parent: pe.Spec.PolicyRef.Name})
+	require.NoError(t, err)
+	// The deletion starts; stage 1 has not reconciled it, so the PolicyEndpoint is still recorded.
+	require.NoError(t, k8sClient.Delete(context.Background(), pe))
+	require.True(t, reconciler.ArePoliciesAvailableInLocalCache("nginx@default"), "precondition: still recorded")
+
+	mockBpfClient.Reset()
+	mockBpfClient.AttachFirstPodInPodIdentifier = true
+	s := &server{
+		policyReconciler:        reconciler,
+		clusterPolicyReconciler: controllers.NewClusterPolicyEndpointsReconciler(nil, "10.0.0.1", mockBpfClient),
+	}
+	resp, err := s.EnforceNpToPod(context.Background(), &rpc.EnforceNpRequest{
+		K8S_POD_NAME:        "nginx-new456",
+		K8S_POD_NAMESPACE:   "default",
+		NETWORK_POLICY_MODE: "strict",
+		InterfaceCount:      1,
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Success)
+	assert.Empty(t, mockBpfClient.LastIngressRules, "no allow-all entry")
+	assert.Empty(t, mockBpfClient.LastEgressRules, "no allow-all entry")
+	assert.Equal(t, ebpf.DEFAULT_DENY,
+		mockBpfClient.PodStateByIdentifier[ebpf.PodStateKey{PodIdentifier: "nginx@default", MapKey: ebpf.POD_STATE_MAP_KEY}])
+}

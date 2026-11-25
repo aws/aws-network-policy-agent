@@ -170,11 +170,11 @@ func TestPolicyEndpointNameReuse_AnyOrder(t *testing.T) {
 		s := newPEReuse(t)
 		require.NoError(t, s.fx.reconcileUnder(s.x, reuseBeta))
 		// z-aaa still records (x, alpha), but x now belongs to beta, so the CNI path must skip it
-		ingress, _, err := s.fx.r.DeriveFireWallRulesPerPodIdentifier(identifierOf("z-aaa"), fixtureNamespace)
+		ingress, _, _, err := s.fx.r.DeriveFireWallRulesPerPodIdentifier(identifierOf("z-aaa"), fixtureNamespace)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"192.168.90.4/32"}, cidrsOf(ingress))
 		assert.True(t, s.fx.r.ArePoliciesAvailableInLocalCache(identifierOf("old-aaa")), "the old pod stays tracked until its cleanup")
-		ingress, _, err = s.fx.r.DeriveFireWallRulesPerPodIdentifier(identifierOf("old-aaa"), fixtureNamespace)
+		ingress, _, _, err = s.fx.r.DeriveFireWallRulesPerPodIdentifier(identifierOf("old-aaa"), fixtureNamespace)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"192.168.90.4/32"}, cidrsOf(ingress), "only alpha's live slice applies")
 	})

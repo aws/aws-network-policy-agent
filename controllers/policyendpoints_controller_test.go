@@ -1732,7 +1732,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			gotIngressRules, gotEgressRules, gotError := policyEndpointReconciler.DeriveFireWallRulesPerPodIdentifier(tt.podIdentifier, tt.resourceNamespace)
+			gotIngressRules, gotEgressRules, _, gotError := policyEndpointReconciler.DeriveFireWallRulesPerPodIdentifier(tt.podIdentifier, tt.resourceNamespace)
 			assert.Equal(t, tt.want.ingressRules, gotIngressRules)
 			assert.Equal(t, tt.want.egressRules, gotEgressRules)
 			assert.Equal(t, tt.wantErr, gotError)
