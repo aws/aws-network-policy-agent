@@ -91,40 +91,39 @@ func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.Priority
 	return err
 }
 
-// identifiersToProgram returns the identifiers a policy's reconcile must queue:
-//   - The ones it selects pods of on this node, and the ones whose pods here it selected before,
-//     so a pod it stopped selecting is reprogrammed. These are queued whether or not they have
-//     programs here: a pass that finds none writes nothing, and leaving one out because it has no
-//     programs yet would race a pass whose first attach is creating them.
-//   - The ones it selects only on other nodes that have programs here, since its rules reach this
-//     node's replicas through the maps they share. A pass that is creating an identifier's
-//     programs while this reconcile runs reads the identifier's policies after its attach.
-//   - Once the policy has no live slices left, every identifier it no longer selects (stale): the
-//     policy is gone.
+// identifiersToProgram returns the identifiers a policy's reconcile must queue, so that each one's
+// maps follow the policy's live slices:
+//   - The ones it selects pods of on this node, and the ones whose pods here it selected before.
+//     These are queued whether or not they have programs here: a pass that finds none writes
+//     nothing, and leaving one out because it has no programs yet would race a pass whose first
+//     attach is creating them.
+//   - The ones it selects, or stopped selecting (stale), only through replicas on other nodes,
+//     if they have programs here: its rules reach this node's replicas through the maps they
+//     share. A pass that is creating an identifier's programs while this reconcile runs reads
+//     the identifier's policies after its attach, so it writes this reconcile's change.
 //
-// While the policy has live slices, an identifier it stops selecting altogether is queued only
-// if it had pods here. Queueing it otherwise would reset a new pod here to the baseline in the
-// interval during a rollout when NPC has dropped the last old replica and not yet listed the new
-// one, a pod that CNI ADD programmed with the policy's rules. This node's rules for such an
-// identifier change only when something else reprograms it.
-func identifiersToProgram(ebpfClient ebpf.BpfClient, selected map[string]bool, localPods, priorLocalPods map[string][]npatypes.Pod,
-	stale []string, noLiveSlices bool) []string {
+// An identifier a policy stops selecting is rewritten without it also in the interval of a
+// rollout in which NPC has dropped the last old replica and not yet listed the new pod: the new
+// pod has the policy's rules again once NPC lists it.
+func identifiersToProgram(ebpfClient ebpf.BpfClient, selected map[string]bool, stale []string,
+	localPods, priorLocalPods map[string][]npatypes.Pod) []string {
 	podIdentifiers := make([]string, 0, len(localPods)+len(priorLocalPods))
 	for podIdentifier := range localPods {
 		podIdentifiers = append(podIdentifiers, podIdentifier)
 	}
 	for podIdentifier := range priorLocalPods {
-		if _, ok := localPods[podIdentifier]; !ok {
-			podIdentifiers = append(podIdentifiers, podIdentifier)
-		}
+		podIdentifiers = append(podIdentifiers, podIdentifier)
 	}
-	for podIdentifier := range selected {
+	withPrograms := func(podIdentifier string) {
 		if _, ok := localPods[podIdentifier]; !ok && ebpfClient.HasBPFContext(podIdentifier) {
 			podIdentifiers = append(podIdentifiers, podIdentifier)
 		}
 	}
-	if noLiveSlices {
-		podIdentifiers = append(podIdentifiers, stale...)
+	for podIdentifier := range selected {
+		withPrograms(podIdentifier)
+	}
+	for _, podIdentifier := range stale {
+		withPrograms(podIdentifier)
 	}
 	slices.Sort(podIdentifiers)
 	return slices.Compact(podIdentifiers)

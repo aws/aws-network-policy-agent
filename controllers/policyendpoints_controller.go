@@ -258,7 +258,7 @@ func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, 
 
 	log().Debugf("NetworkPolicy %s/%s: %d PolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		namespace, parentNP, len(policyEndpoints), len(selected), len(localPods), len(stale))
-	return identifiersToProgram(r.ebpfClient, selected, localPods, priorLocalPods, stale, len(policyEndpoints) == 0), nil
+	return identifiersToProgram(r.ebpfClient, selected, stale, localPods, priorLocalPods), nil
 }
 
 // selectedPods returns every pod identifier the PolicyEndpoints select on any node, and their

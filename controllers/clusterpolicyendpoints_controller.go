@@ -198,7 +198,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 
 	log().Infof("ClusterNetworkPolicy %s: %d ClusterPolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		parentCNPName, len(clusterPolicyEndpoints), len(selected), len(localPods), len(stale))
-	return identifiersToProgram(r.ebpfClient, selected, localPods, priorLocalPods, stale, len(clusterPolicyEndpoints) == 0), nil
+	return identifiersToProgram(r.ebpfClient, selected, stale, localPods, priorLocalPods), nil
 }
 
 // selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, and

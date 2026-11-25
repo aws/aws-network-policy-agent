@@ -344,11 +344,10 @@ func TestReconcileClusterPolicyEndpoint_CleanupOnlyPassRecordsLatency(t *testing
 
 // A policy that selects a workload only through its replica on another node still applies to
 // the replica here, which shares the identifier's maps, so the replica here gets its rules. When
-// the policy stops selecting the workload, the identifier is not reprogrammed: during a rollout
-// NPC can drop the last old replica before it lists the new pod, and reprogramming would reset a
-// new pod that CNI ADD programmed with the policy's rules to the baseline until NPC lists it. The
-// refs are pruned, so the next pass for the identifier drops the policy's rules.
-func TestReconcilePolicyEndpoint_RemoteOnlySelectionReachesTheLocalReplicaButItsDropDoesNot(t *testing.T) {
+// the policy stops selecting the workload, the identifier is rewritten without it, as the live
+// slices say, also when this is the interval of a rollout in which NPC has dropped the last old
+// replica and not yet listed the new pod.
+func TestReconcilePolicyEndpoint_RemoteOnlySelectionAndItsDropReachTheLocalReplica(t *testing.T) {
 	web := identifierOf("web-aaa")
 	fx := newPEFixture(t)
 	// The local replica was attached by its CNI ADD; NPC lists only the remote one.
@@ -362,13 +361,12 @@ func TestReconcilePolicyEndpoint_RemoteOnlySelectionReachesTheLocalReplicaButIts
 	fx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
 		pods:    []podRef{},
 		ingress: []ruleRef{allow("192.168.90.1/32")}})
-	fx.reset()
 	require.NoError(t, fx.reconcile("np-1-aaaaa"))
-	assert.Empty(t, fx.bpf.CallLog, "nothing is written for an identifier the policy stops selecting altogether")
+	fx.assertRulesCleared(web)
 	assert.Empty(t, fx.identifierRefs(web), "the policy's refs for the identifier are gone")
 }
 
-func TestReconcileClusterPolicyEndpoint_RemoteOnlySelectionReachesTheLocalReplicaButItsDropDoesNot(t *testing.T) {
+func TestReconcileClusterPolicyEndpoint_RemoteOnlySelectionAndItsDropReachTheLocalReplica(t *testing.T) {
 	web := identifierOf("web-aaa")
 	fx := newCPEFixture(t)
 	fx.bpf.AttachIdentifier(web)
@@ -381,9 +379,8 @@ func TestReconcileClusterPolicyEndpoint_RemoteOnlySelectionReachesTheLocalReplic
 	fx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1",
 		pods:    []podRef{},
 		ingress: []ruleRef{deny("192.168.90.1/32")}})
-	fx.reset()
 	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
-	assert.Empty(t, fx.bpf.CallLog, "nothing is written for an identifier the policy stops selecting altogether")
+	fx.assertClusterPolicyRulesCleared(web)
 	assert.Empty(t, fx.identifierRefs(web), "the policy's refs for the identifier are gone")
 }
 
@@ -678,6 +675,27 @@ func TestReconcilePolicyEndpoint_RemoteOnlySelectionChangesReachTheLocalReplica(
 		require.True(t, done)
 		assert.ElementsMatch(t, []string{"192.168.90.1/32", "192.168.90.2/32"}, fx.ingressCIDRs(db))
 	})
+
+	t.Run("the policy stops selecting it while a pass creates its programs", func(t *testing.T) {
+		fx := newPEFixture(t)
+		fx.setSlices(np2, np1("192.168.90.1/32"))
+		require.NoError(t, fx.r.reconcile(context.TODO(), fx.request("np-1-aaaaa", "np-1")))
+		require.NoError(t, fx.r.reconcile(context.TODO(), fx.request("np-2-aaaaa", "np-2")))
+		done := false
+		fx.bpf.BeforeAttach = func(pod types.NamespacedName, _ string) {
+			if pod.Name != "db-1" || done {
+				return
+			}
+			done = true
+			dropped := np1("192.168.90.1/32")
+			dropped.pods = nil
+			fx.setSlices(np2, dropped)
+			require.NoError(t, fx.r.reconcile(context.TODO(), fx.request("np-1-aaaaa", "np-1")))
+		}
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		require.True(t, done)
+		assert.Equal(t, []string{"192.168.90.2/32"}, fx.ingressCIDRs(db))
+	})
 }
 
 func TestReconcileClusterPolicyEndpoint_RemoteOnlySelectionChangesReachTheLocalReplica(t *testing.T) {
@@ -723,5 +741,26 @@ func TestReconcileClusterPolicyEndpoint_RemoteOnlySelectionChangesReachTheLocalR
 		require.NoError(t, fx.r.drainProgramming(context.TODO()))
 		require.True(t, done)
 		assert.ElementsMatch(t, []string{"Deny 192.168.90.1/32", "Deny 192.168.90.2/32"}, fx.clusterPolicyRules(db))
+	})
+
+	t.Run("the policy stops selecting it while a pass creates its programs", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		fx.setSlices(cnp2, cnp1("192.168.90.1/32"))
+		require.NoError(t, fx.r.reconcile(context.TODO(), cpeRequest("cnp-1-aaaaa", "cnp-1")))
+		require.NoError(t, fx.r.reconcile(context.TODO(), cpeRequest("cnp-2-aaaaa", "cnp-2")))
+		done := false
+		fx.bpf.BeforeAttach = func(pod types.NamespacedName, _ string) {
+			if pod.Name != "db-1" || done {
+				return
+			}
+			done = true
+			dropped := cnp1("192.168.90.1/32")
+			dropped.pods = nil
+			fx.setSlices(cnp2, dropped)
+			require.NoError(t, fx.r.reconcile(context.TODO(), cpeRequest("cnp-1-aaaaa", "cnp-1")))
+		}
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		require.True(t, done)
+		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, fx.clusterPolicyRules(db))
 	})
 }
