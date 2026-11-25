@@ -267,7 +267,7 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		cfg, direct, scheme := startAPIServer(t)
 		var r *PolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewPolicyEndpointsReconciler(c, fixtureNodeIP, bpf, false)
+			r = newTestPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf, false)
 			return synchronousPipeline{r.reconcileAndProgram}
 		}, before)
 		return run, direct, r
@@ -410,7 +410,7 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
 		var r *ClusterPolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupCPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewClusterPolicyEndpointsReconciler(c, fixtureNodeIP, bpf)
+			r = newTestClusterPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf)
 			return synchronousPipeline{r.reconcileAndProgram}
 		}, nil)
 		require.NoError(t, direct.Create(context.Background(), envtestCPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
@@ -440,7 +440,7 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
 		var r *ClusterPolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupCPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewClusterPolicyEndpointsReconciler(c, fixtureNodeIP, bpf)
+			r = newTestClusterPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf)
 			return synchronousPipeline{r.reconcileAndProgram}
 		}, nil)
 		require.NoError(t, direct.Create(context.Background(), envtestCPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))

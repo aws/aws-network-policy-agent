@@ -47,7 +47,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile call for Create PolicyEndpoint with PodEndpoint local to Node", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+		policyEndpointReconciler := newTestPolicyEndpointsReconciler(t, mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -86,7 +86,7 @@ func TestPolicyEndpointReconcile(t *testing.T) {
 
 	t.Run("Reconcile for Create and Delete PE", func(t *testing.T) {
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+		policyEndpointReconciler := newTestPolicyEndpointsReconciler(t, mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
 
 		policyEndpoint := getPolicyEndpoint("allow-all-egress", "my-namespace", []policyendpoint.PodEndpoint{p1N1, p2N1})
 
@@ -214,7 +214,7 @@ func TestPolicyEndpointNonLocalPodIdentifierChurn(t *testing.T) {
 	stableRemoteIdentifier := utils.GetPodIdentifier(stableRemotePod.Name, stableRemotePod.Namespace)
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIp, &ebpf.MockBpfClient{}, false)
 
 	// currentPE holds the PE the mock returns; each churn round rewrites its
 	// PodSelectorEndpoints to swap in a freshly-named non-local Job pod.
@@ -287,7 +287,7 @@ func TestPolicyEndpointReconcile_StaleDeletedPodDoesNotBlockLiveProgramming(t *t
 	defer ctrl.Finish()
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{PodIdentifiersWithoutBPFContext: map[string]bool{deletedIdentifier: true}}
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, mockBpf, false)
 
 	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{deletedEndpoint})
 	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
@@ -335,7 +335,7 @@ func TestPolicyEndpointReconcile_LiveDeselectionPurgesMapsAndRestoresBaseline(t 
 	defer ctrl.Finish()
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, mockBpf, false)
 
 	currentPE := getPolicyEndpoint(policyName, namespace, []policyendpoint.PodEndpoint{previousEndpoint})
 	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
@@ -384,7 +384,7 @@ func TestPolicyEndpointReconcile_DeletingOneNPKeepsOtherNPMappings(t *testing.T)
 	defer ctrl.Finish()
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, mockBpf, false)
 
 	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, pe *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
@@ -470,7 +470,7 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 
 			mockClient := mock_client.NewMockClient(ctrl)
 			mockBpf := &ebpf.MockBpfClient{}
-			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+			r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, mockBpf, false)
 			survivingPE := getPolicyEndpoint(policyName, namespace, tt.survivingPodEndpoints)
 			survivingPE.Name = survivingPEName
 
@@ -538,7 +538,7 @@ func TestReconcileNetworkPolicy_StaleIdentifierIsPurgedAndQueued(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
 
 	// The first reconcile records the local pod and its identifier. The current PE then
 	// stops selecting that pod.
@@ -605,7 +605,7 @@ func TestSameNamedNetworkPoliciesInDifferentNamespacesRemainIndependent(t *testi
 	defer ctrl.Finish()
 
 	mockClient := mock_client.NewMockClient(ctrl)
-	r := NewPolicyEndpointsReconciler(mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, &ebpf.MockBpfClient{}, false)
 
 	mockClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, key types.NamespacedName, currentPE *policyendpoint.PolicyEndpoint, opts ...client.GetOption) error {
@@ -976,7 +976,7 @@ func TestDeriveFirewallRules(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := newTestPolicyEndpointsReconciler(t, mockClient, "", nil, false)
 		parent := ""
 		for _, call := range tt.policyendpointGetCall {
 			if call.pe != nil {
@@ -1467,7 +1467,7 @@ func TestArePoliciesAvailableInLocalCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := newTestPolicyEndpointsReconciler(t, mockClient, "", nil, false)
 		policyEndpointReconciler.podIdentifierToPolicyEndpointMap.Store(tt.podIdentifier, refsOf("np", tt.policyEndpointName...))
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -1710,7 +1710,7 @@ func TestDeriveFireWallRulesPerPodIdentifier(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockClient := mock_client.NewMockClient(ctrl)
-		policyEndpointReconciler := NewPolicyEndpointsReconciler(mockClient, "", nil, false)
+		policyEndpointReconciler := newTestPolicyEndpointsReconciler(t, mockClient, "", nil, false)
 		parent := ""
 		for _, call := range tt.policyendpointGetCall {
 			if call.pe != nil {
@@ -1884,7 +1884,7 @@ func TestProgramIdentifier_PreservesCatchAllOnRemainingPolicy(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
@@ -1940,7 +1940,7 @@ func TestProgramIdentifier_EgressOnlyAddsIngressCatchAll(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
@@ -2001,7 +2001,7 @@ func TestProgramIdentifier_BothDirectionsActiveNoCatchAll(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 	r.podIdentifierToPolicyEndpointMap.Store(podIdentifier, refsOf(remainingPolicy.Spec.PolicyRef.Name, remainingPE))
 
@@ -2045,7 +2045,7 @@ func TestProgramIdentifier_PodAlreadyTornDownSkipsWrites(t *testing.T) {
 	mockBpf := &ebpf.MockBpfClient{
 		PodIdentifiersWithoutBPFContext: map[string]bool{podIdentifier: true},
 	}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 
 	// Note: podIdentifierToPolicyEndpointMap intentionally has NO entry for this pod
@@ -2074,7 +2074,7 @@ func TestProgramIdentifier_DeselectedLivePodRestoresBaseline(t *testing.T) {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 
 	// No entry in podIdentifierToPolicyEndpointMap -> no policy tracks this pod anymore,
@@ -2104,7 +2104,7 @@ func TestProgramIdentifier_DeselectedLivePodRestoresStrictModeBaseline(t *testin
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	mockBpf := &ebpf.MockBpfClient{NetworkPolicyMode: string(utils.Strict)}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 
 	// No entry in podIdentifierToPolicyEndpointMap, context still registered -> restore runs.
@@ -2134,7 +2134,7 @@ func TestProgramIdentifier_BaselineRestoreFailureRequeues(t *testing.T) {
 	mockBpf := &ebpf.MockBpfClient{
 		UpdateEbpfMapsErr: errors.New("map update failed"),
 	}
-	r := NewPolicyEndpointsReconciler(mockClient, "1.1.1.1", mockBpf, false)
+	r := newTestPolicyEndpointsReconciler(t, mockClient, "1.1.1.1", mockBpf, false)
 	mockBpf.AllIdentifiersHaveBPFContext = true
 
 	targetPod := npatypes.Pod{
@@ -2195,7 +2195,7 @@ func TestPolicyEndpointReconcile_IgnoresPodsOutsideItsNamespace(t *testing.T) {
 			defer ctrl.Finish()
 			mockClient := mock_client.NewMockClient(ctrl)
 			mockBpf := &ebpf.MockBpfClient{}
-			r := NewPolicyEndpointsReconciler(mockClient, nodeIP, mockBpf, false)
+			r := newTestPolicyEndpointsReconciler(t, mockClient, nodeIP, mockBpf, false)
 
 			otherExists := true
 			byKey := func(key types.NamespacedName) (policyendpoint.PolicyEndpoint, bool) {

@@ -15,6 +15,7 @@ import (
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 )
 
@@ -23,6 +24,25 @@ func TestMain(m *testing.M) {
 	// its lazy initialization is not safe for concurrent first use.
 	logger.Get()
 	os.Exit(m.Run())
+}
+
+// newTestPolicyEndpointsReconciler is NewPolicyEndpointsReconciler for a test that owns the
+// reconciler: its programming queue, whose goroutines start at construction, is shut down when
+// the test ends. A reconciler whose queue a manager or the test's own workers shut down must use
+// NewPolicyEndpointsReconciler, as a second ShutDown panics.
+func newTestPolicyEndpointsReconciler(tb testing.TB, k8sClient client.Client, nodeIP string,
+	ebpfClient ebpf.BpfClient, enableIPv6 bool) *PolicyEndpointsReconciler {
+	r := NewPolicyEndpointsReconciler(k8sClient, nodeIP, ebpfClient, enableIPv6)
+	tb.Cleanup(r.programQueue.ShutDown)
+	return r
+}
+
+// newTestClusterPolicyEndpointsReconciler is newTestPolicyEndpointsReconciler for cluster policies.
+func newTestClusterPolicyEndpointsReconciler(tb testing.TB, k8sClient client.Client, nodeIP string,
+	ebpfClient ebpf.BpfClient) *ClusterPolicyEndpointsReconciler {
+	r := NewClusterPolicyEndpointsReconciler(k8sClient, nodeIP, ebpfClient)
+	tb.Cleanup(r.programQueue.ShutDown)
+	return r
 }
 
 // drainProgramming runs one programming pass for every identifier ready in queue, as the

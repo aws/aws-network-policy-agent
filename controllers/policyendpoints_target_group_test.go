@@ -143,7 +143,7 @@ func deriveRulesAcrossNPs(t *testing.T, pes map[types.NamespacedName]*policyk8sa
 func recordPolicies(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint,
 	parents []string) *PolicyEndpointsReconciler {
 	t.Helper()
-	r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
+	r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
 	for _, parent := range parents {
 		_, err := r.reconcileNetworkPolicy(context.Background(), "ns", parent, nil, false)
 		require.NoError(t, err)

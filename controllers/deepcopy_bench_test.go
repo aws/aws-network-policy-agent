@@ -161,7 +161,7 @@ func BenchmarkPEReconcileReads(b *testing.B) {
 			name := fmt.Sprintf("pes=%d/endpoints=%d/pods=%d/%s", size.pes, size.endpoints, size.pods, mode.name)
 			b.Run(name, func(b *testing.B) {
 				reader := &cacheReader{pes: buildPEs("ns", size.pes, size.endpoints, size.pods), forceDeepCopy: mode.forceDeepCopy}
-				r := NewPolicyEndpointsReconciler(reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
+				r := newTestPolicyEndpointsReconciler(b, reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
 				ctx := context.Background()
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -212,7 +212,7 @@ func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
 			pe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{{HostIP: benchNodeIP, PodIP: "172.16.0.1", Name: "pod", Namespace: "ns"}}
 
 			reader := &cacheReader{pes: map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{{Namespace: "ns", Name: pe.Name}: pe}}
-			r := NewPolicyEndpointsReconciler(reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
+			r := newTestPolicyEndpointsReconciler(t, reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
 			ctx := context.Background()
 
 			_, err := r.reconcileNetworkPolicy(ctx, "ns", "np", nil, false)
@@ -285,7 +285,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 			snapshots[k] = pe.DeepCopy()
 		}
 
-		r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
+		r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
 		ctx := context.Background()
 		_, err := r.reconcileNetworkPolicy(ctx, "ns", "np", nil, false)
 		assert.NoError(t, err)
@@ -343,7 +343,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 			snapshots[k] = cpe.DeepCopy()
 		}
 
-		r := NewClusterPolicyEndpointsReconciler(&cacheReader{cpes: cpes}, benchNodeIP, &ebpf.MockBpfClient{})
+		r := newTestClusterPolicyEndpointsReconciler(t, &cacheReader{cpes: cpes}, benchNodeIP, &ebpf.MockBpfClient{})
 		ctx := context.Background()
 		_, err := r.reconcileClusterNetworkPolicy(ctx, "cnp", nil, false)
 		assert.NoError(t, err)

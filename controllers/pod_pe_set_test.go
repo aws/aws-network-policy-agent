@@ -41,7 +41,7 @@ func TestPodIdentifierPEList_MatchesSetModel(t *testing.T) {
 	}
 	for seed := int64(0); seed < 50; seed++ {
 		rng := rand.New(rand.NewSource(seed))
-		r := NewPolicyEndpointsReconciler(nil, benchNodeIP, nil, false)
+		r := newTestPolicyEndpointsReconciler(t, nil, benchNodeIP, nil, false)
 		model := map[string]map[utils.PolicyEndpointRef]bool{}
 		identifiers := []string{"a@ns", "b@ns", "c@ns"}
 		names := make([]string, 30)
@@ -91,7 +91,7 @@ func TestPodIdentifierPEList_MatchesSetModel(t *testing.T) {
 // TestPodIdentifierPEList_ConcurrentReaders exercises the unlocked readers (the CNI RPC path)
 // against writers; run with -race.
 func TestPodIdentifierPEList_ConcurrentReaders(t *testing.T) {
-	r := NewPolicyEndpointsReconciler(nil, benchNodeIP, nil, false)
+	r := newTestPolicyEndpointsReconciler(t, nil, benchNodeIP, nil, false)
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	var unsorted atomic.Bool
@@ -208,7 +208,7 @@ func BenchmarkSetParentPolicyEndpoints(b *testing.B) {
 		}
 		return names
 	}
-	r := NewPolicyEndpointsReconciler(nil, benchNodeIP, nil, false)
+	r := newTestPolicyEndpointsReconciler(b, nil, benchNodeIP, nil, false)
 	for np := 0; np < 5; np++ {
 		setPEs(r, "bulk-6b8f9c7d4@npa-kwok", fmt.Sprintf("wide-peer-%d", np), slicesOf(np))
 	}

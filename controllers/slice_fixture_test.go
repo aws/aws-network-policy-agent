@@ -187,7 +187,7 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 		sliceParents: map[string]string{},
 	}
 	fx.client = mockClient
-	fx.r = NewClusterPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf)
+	fx.r = newTestClusterPolicyEndpointsReconciler(t, mockClient, fixtureNodeIP, fx.bpf)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpointList{}), gomock.Any()).
@@ -423,7 +423,7 @@ func newPEFixture(t *testing.T) *peFixture {
 		sliceParents:    map[string]string{},
 	}
 	fx.client = mockClient
-	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
+	fx.r = newTestPolicyEndpointsReconciler(t, mockClient, fixtureNodeIP, fx.bpf, false)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).

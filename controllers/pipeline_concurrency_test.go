@@ -291,7 +291,7 @@ func runPipelineStress(t *testing.T, seed int64) {
 			oracleBPF.AttachIdentifier(podIdentifier)
 		}
 	}
-	oracle := NewPolicyEndpointsReconciler(k8sClient, fixtureNodeIP, oracleBPF, false)
+	oracle := newTestPolicyEndpointsReconciler(t, k8sClient, fixtureNodeIP, oracleBPF, false)
 	list := &policyk8sawsv1.PolicyEndpointList{}
 	require.NoError(t, k8sClient.List(ctx, list, client.InNamespace(stressNamespace)))
 	for i := range list.Items {
