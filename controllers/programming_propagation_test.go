@@ -517,3 +517,91 @@ func TestProgramIdentifier_EmptyLivePolicyEndpointAllowsEverythingInStrictMode(t
 	state, _ = fx.podState(web)
 	assert.Equal(t, ebpf.DEFAULT_DENY, state, "with no live PolicyEndpoint the pod returns to the strict-mode baseline")
 }
+
+// linkedFixtures returns a PolicyEndpoint and a ClusterPolicyEndpoint fixture that share one BPF
+// client, with their programmers linked as main links them. The client reports an attach that
+// creates an identifier's programs, as the real one does.
+func linkedFixtures(t *testing.T) (*peFixture, *cpeFixture) {
+	pfx, cfx := newPEFixture(t), newCPEFixture(t)
+	cfx.bpf = pfx.bpf
+	cfx.r.ebpfClient = pfx.bpf
+	pfx.bpf.ReportFirstAttach = true
+	LinkProgrammers(pfx.r, cfx.r)
+	return pfx, cfx
+}
+
+// drainBoth runs both programmers until neither has work, as their workers would.
+func drainBoth(t *testing.T, pfx *peFixture, cfx *cpeFixture) {
+	t.Helper()
+	for i := 0; pfx.r.programQueue.Len() > 0 || cfx.r.programQueue.Len() > 0; i++ {
+		require.Less(t, i, 10, "the programmers keep queueing each other")
+		require.NoError(t, pfx.r.drainProgramming(context.TODO()))
+		require.NoError(t, cfx.r.drainProgramming(context.TODO()))
+	}
+}
+
+// A policy that selects an identifier only through a replica on another node does not queue it,
+// yet its rules apply to the identifier's replicas here. When the other controller's pass creates
+// the identifier's programs, both policy types' maps are new, so that pass queues the
+// identifier on the other programmer, which writes its policy.
+func TestProgramIdentifier_CreatingProgramsQueuesThePeerProgrammer(t *testing.T) {
+	db := identifierOf("db-0")
+
+	t.Run("network policy pass creates them", func(t *testing.T) {
+		pfx, cfx := linkedFixtures(t)
+		cfx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1,
+			pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{deny("192.168.90.9/32")}})
+		require.NoError(t, cfx.reconcile("cnp-1-aaaaa"))
+		require.False(t, pfx.bpf.HasBPFContext(db))
+
+		pfx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+			pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{allow("192.168.90.1/32")}})
+		require.NoError(t, pfx.r.reconcile(context.TODO(), pfx.request("np-1-aaaaa", "np-1")))
+		drainBoth(t, pfx, cfx)
+
+		assert.Equal(t, []string{"192.168.90.1/32"}, pfx.ingressCIDRs(db))
+		assert.Equal(t, []string{"Deny 192.168.90.9/32"}, cfx.clusterPolicyRules(db),
+			"the cluster policy's Deny reaches the identifier whose programs the network policy pass created")
+	})
+
+	t.Run("cluster network policy pass creates them", func(t *testing.T) {
+		pfx, cfx := linkedFixtures(t)
+		pfx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+			pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{allow("192.168.90.1/32")}})
+		require.NoError(t, pfx.reconcile("np-1-aaaaa"))
+		require.False(t, pfx.bpf.HasBPFContext(db))
+
+		cfx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1,
+			pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny("192.168.90.9/32")}})
+		require.NoError(t, cfx.r.reconcile(context.TODO(), cpeRequest("cnp-1-aaaaa", "cnp-1")))
+		drainBoth(t, pfx, cfx)
+
+		assert.Equal(t, []string{"Deny 192.168.90.9/32"}, cfx.clusterPolicyRules(db))
+		assert.Equal(t, []string{"192.168.90.1/32"}, pfx.ingressCIDRs(db),
+			"the network policy reaches the identifier whose programs the cluster policy pass created")
+		state, ok := pfx.podState(db)
+		require.True(t, ok)
+		assert.Equal(t, POLICIES_APPLIED, state)
+	})
+
+	t.Run("the peer is queued even when the creating pass's write fails", func(t *testing.T) {
+		pfx, cfx := linkedFixtures(t)
+		cfx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1,
+			pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{deny("192.168.90.9/32")}})
+		require.NoError(t, cfx.reconcile("cnp-1-aaaaa"))
+
+		writeFailed := errors.New("map write failed")
+		pfx.bpf.UpdateEbpfMapsErrFor = map[string]error{db: writeFailed}
+		pfx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+			pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{allow("192.168.90.1/32")}})
+		require.NoError(t, pfx.r.reconcile(context.TODO(), pfx.request("np-1-aaaaa", "np-1")))
+		require.ErrorIs(t, pfx.r.drainProgramming(context.TODO()), writeFailed)
+
+		require.NoError(t, cfx.r.drainProgramming(context.TODO()))
+		assert.Equal(t, []string{"Deny 192.168.90.9/32"}, cfx.clusterPolicyRules(db), "the peer programs its plane")
+
+		pfx.bpf.UpdateEbpfMapsErrFor = nil
+		drainBoth(t, pfx, cfx)
+		assert.Equal(t, []string{"192.168.90.1/32"}, pfx.ingressCIDRs(db), "the creating programmer's retry lands")
+	})
+}

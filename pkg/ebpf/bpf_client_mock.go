@@ -31,6 +31,9 @@ type MockBpfClient struct {
 
 	// AttacheBPFProbes returns this as "first pod of the identifier on this node"
 	AttachFirstPodInPodIdentifier bool
+	// ReportFirstAttach makes AttacheBPFProbes also return true for the attach that registers an
+	// identifier's context, as the real client does when it loads the identifier's programs.
+	ReportFirstAttach bool
 	// podConfirmedLive passed to the most recent AttacheBPFProbes call
 	LastAttachPodConfirmedLive bool
 
@@ -172,6 +175,7 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 		return false, err
 	}
 	// A pod attaching to an identifier whose probes were torn down gets fresh maps.
+	created := !m.attachedIdentifiers[podIdentifier] || m.PodIdentifiersWithoutBPFContext[podIdentifier]
 	if m.PodIdentifiersWithoutBPFContext[podIdentifier] {
 		m.forgetIdentifierLocked(podIdentifier)
 	}
@@ -183,7 +187,7 @@ func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier
 		m.attachedIdentifiers = map[string]bool{}
 	}
 	m.attachedIdentifiers[podIdentifier] = true
-	return m.AttachFirstPodInPodIdentifier, nil
+	return m.AttachFirstPodInPodIdentifier || (m.ReportFirstAttach && created), nil
 }
 
 func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier string) error {

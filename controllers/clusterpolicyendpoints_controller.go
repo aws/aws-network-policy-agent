@@ -117,6 +117,9 @@ type ClusterPolicyEndpointsReconciler struct {
 
 	// Pod identifiers whose cluster-policy eBPF maps need programming
 	programQueue priorityqueue.PriorityQueue[string]
+	// queuePeer queues an identifier on the PolicyEndpoint programmer (LinkProgrammers). Nil when
+	// this reconciler runs alone.
+	queuePeer func(podIdentifier string)
 
 	ebpfClient ebpf.BpfClient
 }
@@ -264,6 +267,11 @@ func (r *ClusterPolicyEndpointsReconciler) programIdentifierMaps(ctx context.Con
 	parents := lo.Map(refs, func(ref utils.PolicyEndpointRef, _ int) string { return ref.Parent })
 	attached, attachErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier,
 		localPodsOf(&r.clusterNetworkPolicyToLocalPodsMap, podIdentifier, parents))
+	// Programs this attach created have empty maps for both policy types. Queue the other
+	// programmer before writing, so that it writes its policies even if this pass then fails.
+	if attached.createdContext && r.queuePeer != nil {
+		r.queuePeer(podIdentifier)
+	}
 
 	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
 	// A slice-deletion record is kept for the retry when an attach failed, so that the retry's

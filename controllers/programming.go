@@ -58,6 +58,15 @@ const (
 	stageOneWorkerCount = 1
 )
 
+// LinkProgrammers lets each controller's programming pass queue an identifier on the other's
+// programmer when its attach creates the identifier's programs. The rule maps of both policy
+// types are new then, and the other controller may have nothing queued for the identifier: one
+// whose policies select it only on other nodes does not queue it.
+func LinkProgrammers(pe *PolicyEndpointsReconciler, cpe *ClusterPolicyEndpointsReconciler) {
+	pe.queuePeer = cpe.programQueue.Add
+	cpe.queuePeer = pe.programQueue.Add
+}
+
 // newProgrammingQueue returns a stage-2 queue. It exists from construction, so adding to it never
 // blocks, even before the manager starts the programming workers.
 func newProgrammingQueue(name string) priorityqueue.PriorityQueue[string] {

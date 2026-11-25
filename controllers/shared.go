@@ -18,10 +18,13 @@ import (
 // here once rather than being kept in step by hand in both files.
 
 // attachOutcome counts what attachProbesForIdentifier skipped, so a caller can tell a pass that
-// only skipped from one that failed.
+// only skipped from one that failed, and reports whether it created the identifier's programs.
 type attachOutcome struct {
 	// skipped is the number of pods whose attach cannot be retried into success.
 	skipped int
+	// createdContext is true when an attach found the identifier without a complete program set,
+	// so the rule maps of both policy types are new and empty.
+	createdContext bool
 }
 
 // attachProbesForIdentifier attaches eBPF probes for every pod in targetPods that belongs to
@@ -54,8 +57,10 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 		}
 
 		// podConfirmedLive=false: endpoints can still list pods already deleted from this node.
-		if _, err := ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier,
-			ebpf.INTERFACE_COUNT_UNKNOWN, false); err != nil {
+		created, err := ebpfClient.AttacheBPFProbes(pod.NamespacedName, podIdentifier,
+			ebpf.INTERFACE_COUNT_UNKNOWN, false)
+		outcome.createdContext = outcome.createdContext || created
+		if err != nil {
 			if errors.Is(err, ebpf.ErrProbeAttachSkipped) {
 				outcome.skipped++
 				log().Warnf("Skipped eBPF probe attach for pod %s namespace %s: %v",
