@@ -4,7 +4,7 @@ Split each policy controller's reconcile in two:
 - **Stage 1** records what each policy selects and queues the pod identifiers it affects.
 - **Stage 2**, keyed by pod identifier, programs each identifier's eBPF maps from the newest state.
 
-Repeated changes to one identifier coalesce into one write. Stage 2 runs one worker per controller. Its queue would keep more workers safe for any one identifier, but a second worker can leave a new pod at the baseline during a rollout (see Risks), so `--max-concurrent-reconciles` stays unread.
+Repeated changes to one identifier coalesce into one write. Stage 2 runs one worker per controller, and `--max-concurrent-reconciles` stays unread. Its queue would keep more workers safe for any one identifier. One worker narrows a window during rollouts in which a new pod can be left at the baseline, but does not close it (see Risks).
 
 ## Motivation
 
@@ -87,7 +87,7 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 **Kept from today:**
 - **Target groups (#800).** A grouped PolicyEndpoint applies only to the pods its group lists, within its own policy. The filter is in the slice lookup that stage 2 and the CNI ADD path share.
-- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. Cluster policies do the same.
+- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. Each stage-1 reconcile records the identifiers every live slice of the policy selects here, as today's per-slice selector entries do, so a slice's deletion finds them whichever slice was reconciled first, even if its own reconcile never ran. Cluster policies do the same.
 - **Namespaces and host network.** A PolicyEndpoint applies only to pods in its own namespace, and skips host-network pods.
 
 ### Interaction with Existing Features
@@ -104,7 +104,8 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 ### Risks
 
-- **More than one worker.** NPC can drop a workload's last old replica from a policy before it lists the new pod. With two stage-2 workers and a backlog of 20 identifiers, the new pod was left at the baseline (unenforced in standard mode, dropped in strict mode) in 9 of 9 harness replays with a 1 s gap, for a median of 308 ms. Today, and with one worker, it happened in 0 of 9. A second worker is 1.7× faster for network policies at 10–17% more CPU, but only 1.1× for cluster policies at 33% more. Hence one worker, not configurable.
+- **The rollout interval.** NPC can drop a workload's last old replica from a policy before it lists the new pod. A stage-2 pass that runs in between writes the identifier at the baseline (unenforced in standard mode, dropped in strict mode) until the next pass, with any number of workers. Today's reconcile does the same when it runs in between. Whether a pass lands there depends on timing, and with a backlog, more workers reach the identifier sooner. With two stage-2 workers and a backlog of 20 identifiers, the new pod was left at the baseline in 9 of 9 harness replays with a 1 s gap, for a median of 308 ms. Today, and with one worker, it happened in 0 of 9. One worker narrows the window but does not close it.
+- **More than one worker.** A second worker is 1.7× faster for network policies at 10–17% more CPU, but only 1.1× for cluster policies at 33% more, and widens the rollout interval above. Hence one worker, not configurable.
 
 ### Open Items
 
