@@ -52,8 +52,9 @@ func TestPipeline_Envtest(t *testing.T) {
 		<-done
 	})
 
-	// Each programming controller runs one worker. This checks only the count; what one worker
-	// does during a rollout is TestProgramIdentifier_RolloutIntervalIsWrittenOnlyByAPassInsideIt.
+	// Each controller runs one worker in each stage. This checks only the counts; what one
+	// programming worker does during a rollout is
+	// TestProgramIdentifier_RolloutIntervalIsWrittenOnlyByAPassInsideIt.
 	workers := func(controller string) float64 {
 		families, err := crmetrics.Registry.Gather()
 		require.NoError(t, err)
@@ -76,6 +77,8 @@ func TestPipeline_Envtest(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond, "the programming controllers start")
 	require.Equal(t, 1.0, workers(policyEndpointProgrammerName))
 	require.Equal(t, 1.0, workers(clusterPolicyEndpointProgrammerName))
+	require.Equal(t, 1.0, workers("policyendpoint"))
+	require.Equal(t, 1.0, workers("clusterpolicyendpoint"))
 
 	web := utils.GetPodIdentifier("web-aaa", envtestNamespace)
 	ingressCIDRs := func(id string) []string {

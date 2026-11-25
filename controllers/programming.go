@@ -52,10 +52,15 @@ const (
 	// two would, so its pass more often reads both updates. That narrows the window but does
 	// not close it.
 	programmingWorkerCount = 1
+
+	// stageOneWorkerCount is the number of (slice, parent) workers of each controller. Stage 1
+	// must run on one: a reconcile reads and rewrites a policy's recorded state in steps that are
+	// not atomic, so two reconciles of one policy at once would each work from the other's half.
+	stageOneWorkerCount = 1
 )
 
 // newProgrammingQueue returns a stage-2 queue. It exists from construction, so adding to it never
-// blocks, including from the CNI RPC path before the manager starts.
+// blocks, even before the manager starts the programming workers.
 func newProgrammingQueue(name string) priorityqueue.PriorityQueue[string] {
 	return priorityqueue.New[string](name, func(o *priorityqueue.Opts[string]) {
 		o.RateLimiter = workqueue.NewTypedItemExponentialFailureRateLimiter[string](

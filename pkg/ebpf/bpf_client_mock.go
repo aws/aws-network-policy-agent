@@ -186,9 +186,11 @@ func (m *MockBpfClient) DeleteBPFProbes(pod types.NamespacedName, podIdentifier 
 	return nil
 }
 
-// ForgetIdentifier models an identifier coming back to the node with fresh maps: it
-// registers the context again and drops seeded and recorded pod state, while recorded rule
-// writes are kept. AttacheBPFProbes calls it when a pod attaches to a torn-down identifier.
+// ForgetIdentifier models an identifier coming back to the node with fresh maps: it clears
+// the identifier's detached mark and drops seeded and recorded pod state, while recorded rule
+// writes are kept. HasBPFContext still reports true only once a pod attaches, or with
+// AllIdentifiersHaveBPFContext. AttacheBPFProbes does the same when a pod attaches to a
+// torn-down identifier, then registers the context.
 // DeleteBPFProbes does not tear anything down, because the mock has no notion of a shared
 // program FD, so tests decide when an identifier really went away.
 func (m *MockBpfClient) ForgetIdentifier(podIdentifier string) {

@@ -445,10 +445,10 @@ func (r *ClusterPolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 }
 
 // SetupWithManager sets up both stages with the Manager: the ClusterPolicyEndpoint controller on
-// a single worker, and the programming controller on programmingWorkerCount.
+// stageOneWorkerCount workers, and the programming controller on programmingWorkerCount.
 func (r *ClusterPolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if err := setupEndpointController(mgr, "clusterpolicyendpoint", &policyk8sawsv1.ClusterPolicyEndpoint{},
-		clusterPolicyEndpointParent, r, controller.TypedOptions[EndpointRequest]{}); err != nil {
+		clusterPolicyEndpointParent, r, controller.TypedOptions[EndpointRequest]{MaxConcurrentReconciles: stageOneWorkerCount}); err != nil {
 		return err
 	}
 	return setupProgrammer(mgr, clusterPolicyEndpointProgrammerName, r.programQueue, r.programIdentifier)
