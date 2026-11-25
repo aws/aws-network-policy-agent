@@ -52,8 +52,8 @@ func TestPipeline_Envtest(t *testing.T) {
 		<-done
 	})
 
-	// Each programming controller runs one worker: more than one can leave a new pod at the
-	// baseline during a rollout.
+	// Each programming controller runs one worker. This checks only the count; what one worker
+	// does during a rollout is TestProgramIdentifier_RolloutIntervalIsWrittenOnlyByAPassInsideIt.
 	workers := func(controller string) float64 {
 		families, err := crmetrics.Registry.Gather()
 		require.NoError(t, err)

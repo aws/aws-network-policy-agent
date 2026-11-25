@@ -44,10 +44,13 @@ const (
 	maxPendingChangesPerIdentifier = 128
 
 	// programmingWorkerCount is the number of stage-2 workers of each controller, and isn't
-	// configurable. The queue makes more workers safe for any one identifier, but with a second
-	// worker and a backlog, a new pod can be left at the baseline state during a rollout: the
-	// policy controller can remove the last old replica from a policy before it lists the new
-	// one, and a second worker programs that gap where one worker coalesces it away.
+	// configurable. The queue makes more workers safe for any one identifier. During a rollout
+	// the policy controller can remove the last old replica of an identifier from a policy
+	// before it lists the new pod, and a pass that runs in between writes the identifier
+	// without the policy until the next pass. Whether a pass runs in between depends on timing,
+	// with any number of workers. With a backlog, one worker reaches an identifier later than
+	// two would, so its pass more often reads both updates. That narrows the window but does
+	// not close it.
 	programmingWorkerCount = 1
 )
 

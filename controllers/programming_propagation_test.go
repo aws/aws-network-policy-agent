@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -383,6 +385,59 @@ func TestReconcileClusterPolicyEndpoint_DroppingARemoteOnlySelectionDoesNotRepro
 	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
 	assert.Empty(t, fx.bpf.CallLog, "nothing is written for an identifier the policy never selected a pod of here")
 	assert.Empty(t, fx.identifierRefs(web), "the policy's refs for the identifier are gone")
+}
+
+// During a rollout NPC can remove the last old replica of db from a policy before it lists the
+// new pod. A pass reads the state as it is when it runs, so only a pass that runs between the
+// two updates writes db without the policy, with any number of workers. The second subtest is
+// what a backlog buys: db's pass runs after both updates and writes the policy once.
+func TestProgramIdentifier_RolloutIntervalIsWrittenOnlyByAPassInsideIt(t *testing.T) {
+	db := identifierOf("db-0")
+	withPods := func(pods ...podRef) sliceSpec {
+		return sliceSpec{name: "np-1-aaaaa", parent: "np-1", pods: pods, ingress: []ruleRef{allow("192.168.90.1/32")}}
+	}
+	setUp := func(t *testing.T) (*peFixture, func() error) {
+		fx := newPEFixture(t)
+		fx.setSlices(withPods(localPod("db-0", "10.1.1.10")))
+		require.NoError(t, fx.reconcile("np-1-aaaaa"))
+		require.Equal(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(db))
+		stage1 := func() error { return fx.r.reconcile(context.TODO(), fx.request("np-1-aaaaa", "np-1")) }
+		return fx, stage1
+	}
+	assertState := func(t *testing.T, fx *peFixture, want int) {
+		t.Helper()
+		state, ok := fx.podState(db)
+		require.True(t, ok)
+		assert.Equal(t, want, state)
+	}
+
+	t.Run("a pass between the updates writes the baseline", func(t *testing.T) {
+		fx, stage1 := setUp(t)
+		fx.setSlices(withPods())
+		require.NoError(t, stage1())
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		fx.assertRulesCleared(db)
+		assertState(t, fx, DEFAULT_ALLOW)
+
+		fx.setSlices(withPods(localPod("db-0", "10.1.1.20")))
+		require.NoError(t, fx.reconcile("np-1-aaaaa"))
+		assert.Equal(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(db))
+		assertState(t, fx, POLICIES_APPLIED)
+	})
+
+	t.Run("a pass after both updates writes only the policy", func(t *testing.T) {
+		fx, stage1 := setUp(t)
+		fx.setSlices(withPods())
+		require.NoError(t, stage1())
+		fx.setSlices(withPods(localPod("db-0", "10.1.1.20")))
+		require.NoError(t, stage1())
+
+		fx.reset()
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		assert.Equal(t, 1, lo.Count(fx.bpf.CallLog, "UpdatePodStateEbpfMaps"), "one pass, one pod-state write")
+		assert.Equal(t, []string{"192.168.90.1/32"}, fx.ingressCIDRs(db))
+		assertState(t, fx, POLICIES_APPLIED)
+	})
 }
 
 // A live PolicyEndpoint that selects a pod but carries no rules and no isolation still puts the

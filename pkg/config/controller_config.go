@@ -45,9 +45,8 @@ type ControllerConfig struct {
 	// Count of rotated Network Policy Agent local log files
 	LogFileMaxBackups int
 	// MaxConcurrentReconciles is accepted so that configurations that set it keep starting, but
-	// nothing reads it. Each policy controller programs pod identifiers' eBPF maps on one worker:
-	// with a second worker, a new pod can be left at the baseline state during a rollout, when
-	// the policy controller removes the last old replica before it lists the new one.
+	// nothing reads it. Each policy controller programs pod identifiers' eBPF maps on one worker
+	// (programmingWorkerCount in controllers/programming.go).
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
 	EnablePolicyEventLogs bool
