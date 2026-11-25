@@ -180,7 +180,7 @@ type PolicyEndpointsReconciler struct {
 func (r *PolicyEndpointsReconciler) Reconcile(ctx context.Context, req EndpointRequest) (ctrl.Result, error) {
 	log().Debugf("Received a new reconcile request %v", req)
 	if err := r.reconcile(ctx, req); err != nil {
-		log().Errorf("Reconcile error: %v", err)
+		log().Errorf("Reconcile error for %v: %v", req, err)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
