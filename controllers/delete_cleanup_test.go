@@ -287,6 +287,131 @@ func TestClusterPolicySlices_SliceDeletionCleanupCoversASliceNeverReconciled(t *
 	}
 }
 
+// A slice's deletion cleans up every identifier its policy selected here when the slice was last
+// seen, not only the ones the slice itself listed, as today's per-slice selector entries hold
+// the policy's whole local pod set. np-1-aaaaa lists db-0 and np-1-bbbbb lists web-0; the
+// informer shows np-1-aaaaa gone and np-1-bbbbb no longer listing web-0 at once. Whichever is
+// reconciled first, the deletion leaves np-1 out of both identifiers.
+func TestPolicySlices_SliceDeletionCleansUpThePolicysLocalPodsAsLastSeen(t *testing.T) {
+	webCIDR := "192.168.90.6/32"
+	a := sliceSpec{name: "np-1-aaaaa", parent: "np-1", pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{allow(np1aCIDR)}}
+	b := sliceSpec{name: "np-1-bbbbb", parent: "np-1", ingress: []ruleRef{allow(webCIDR)},
+		pods: []podRef{localPod("web-0", "10.1.1.30"), remotePod("db-2", "10.1.2.12"), remotePod("web-1", "10.1.2.31")}}
+	bUpdated := b
+	bUpdated.pods = []podRef{remotePod("db-2", "10.1.2.12"), remotePod("web-1", "10.1.2.31")}
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			fx := newPEFixture(t)
+			db, web := identifierOf("db-0"), identifierOf("web-0")
+			fx.setSlices(a, b)
+			fx.reconcileAll()
+			require.ElementsMatch(t, []string{np1aCIDR, webCIDR}, fx.ingressCIDRs(web))
+
+			fx.setSlices(bUpdated)
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+			}
+			fx.assertRulesCleared(db)
+			fx.assertRulesCleared(web)
+		})
+	}
+}
+
+func TestClusterPolicySlices_SliceDeletionCleansUpThePolicysLocalPodsAsLastSeen(t *testing.T) {
+	webCIDR := "192.168.90.6/32"
+	a := sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny(np1aCIDR)}}
+	b := sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 1, ingress: []ruleRef{deny(webCIDR)},
+		pods: []podRef{localPod("web-0", "10.1.1.30"), remotePod("db-2", "10.1.2.12"), remotePod("web-1", "10.1.2.31")}}
+	bUpdated := b
+	bUpdated.pods = []podRef{remotePod("db-2", "10.1.2.12"), remotePod("web-1", "10.1.2.31")}
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			fx := newCPEFixture(t)
+			db, web := identifierOf("db-0"), identifierOf("web-0")
+			fx.setSlices(a, b)
+			fx.reconcileAll()
+			require.ElementsMatch(t, []string{np1aCIDR, webCIDR}, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[web]))
+
+			fx.setSlices(bUpdated)
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+			}
+			fx.assertClusterPolicyRulesCleared(db)
+			fx.assertClusterPolicyRulesCleared(web)
+		})
+	}
+}
+
+// A slice deleted and recreated under the same name before its own reconcile is reconciled once,
+// as live. Its earlier incarnation selected api-0 here, and a sibling's reconcile in between
+// kept the policy on api, which the policy then still selected on another node. When the policy
+// stops selecting api anywhere, the recreated slice's reconcile must still rewrite api from what
+// the slice recorded, or api keeps rules no policy applies.
+func TestPolicySlices_RecreatedSliceRewritesWhatItsEarlierIncarnationSelected(t *testing.T) {
+	api := identifierOf("api-0")
+	a := sliceSpec{name: "np-1-aaaaa", parent: "np-1", pods: []podRef{localPod("api-0", "10.1.1.30")}, ingress: []ruleRef{allow(np1aCIDR)}}
+	b := sliceSpec{name: "np-1-bbbbb", parent: "np-1", pods: []podRef{remotePod("api-2", "10.1.2.32")}, ingress: []ruleRef{allow(np1bCIDR)}}
+	fx := newPEFixture(t)
+	fx.setSlices(a, b)
+	fx.reconcileAll()
+	require.ElementsMatch(t, []string{np1aCIDR, np1bCIDR}, fx.ingressCIDRs(api))
+
+	fx.setSlices(b)
+	require.NoError(t, fx.reconcile("np-1-bbbbb"))
+	require.Equal(t, []string{np1bCIDR}, fx.ingressCIDRs(api), "the policy still selects api on another node")
+
+	recreated := a
+	recreated.pods = nil
+	bUpdated := b
+	bUpdated.pods = nil
+	fx.setSlices(recreated, bUpdated)
+	require.NoError(t, fx.reconcile("np-1-aaaaa"))
+	require.NoError(t, fx.reconcile("np-1-bbbbb"))
+	fx.assertRulesCleared(api)
+	state, ok := fx.podState(api)
+	require.True(t, ok)
+	assert.Equal(t, DEFAULT_ALLOW, state)
+}
+
+func TestClusterPolicySlices_RecreatedSliceRewritesWhatItsEarlierIncarnationSelected(t *testing.T) {
+	api := identifierOf("api-0")
+	a := sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: []podRef{localPod("api-0", "10.1.1.30")}, ingress: []ruleRef{deny(np1aCIDR)}}
+	b := sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 1, pods: []podRef{remotePod("api-2", "10.1.2.32")}, ingress: []ruleRef{deny(np1bCIDR)}}
+	fx := newCPEFixture(t)
+	fx.setSlices(a, b)
+	fx.reconcileAll()
+	require.ElementsMatch(t, []string{np1aCIDR, np1bCIDR}, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[api]))
+
+	fx.setSlices(b)
+	require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+	require.Equal(t, []string{np1bCIDR}, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[api]), "the policy still selects api on another node")
+
+	recreated := a
+	recreated.pods = nil
+	bUpdated := b
+	bUpdated.pods = nil
+	fx.setSlices(recreated, bUpdated)
+	require.NoError(t, fx.reconcile("cnp-1-aaaaa"))
+	require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+	fx.assertClusterPolicyRulesCleared(api)
+}
+
 // Deleting a policy's last slices leaves nothing to leave out: the policy selects the
 // identifier nowhere, so no record is kept for it.
 func TestPolicySlices_LastSliceDeletionKeepsNoRecord(t *testing.T) {

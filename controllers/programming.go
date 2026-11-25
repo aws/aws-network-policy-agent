@@ -331,10 +331,13 @@ func (t *programmingLatencyTracker) withPendingMeasurements(queued []string, can
 	return queued
 }
 
-// withIdentifiers returns priorLocalPods with an entry for each of podIdentifiers it lacks. It
-// copies the map, which is shared with the recorded state.
+// withIdentifiers returns priorLocalPods with an entry for each of podIdentifiers it lacks: the map
+// itself if it lacks none, and otherwise a copy, since the map is shared with the recorded state.
 func withIdentifiers(priorLocalPods map[string][]npatypes.Pod, podIdentifiers []string) map[string][]npatypes.Pod {
-	if len(podIdentifiers) == 0 {
+	if !slices.ContainsFunc(podIdentifiers, func(podIdentifier string) bool {
+		_, ok := priorLocalPods[podIdentifier]
+		return !ok
+	}) {
 		return priorLocalPods
 	}
 	merged := make(map[string][]npatypes.Pod, len(priorLocalPods)+len(podIdentifiers))

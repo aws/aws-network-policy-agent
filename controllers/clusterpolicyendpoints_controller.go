@@ -180,7 +180,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 		return nil, err
 	}
 	names := lo.Map(clusterPolicyEndpoints, func(cpe policyk8sawsv1.ClusterPolicyEndpoint, _ int) string { return cpe.Name })
-	selected, localPods, localBySlice := r.selectedPods(clusterPolicyEndpoints)
+	selected, localPods, liveSlices := r.selectedPods(clusterPolicyEndpoints)
 
 	for podIdentifier := range selected {
 		utils.SetParentPolicyEndpoints(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex,
@@ -202,47 +202,39 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 
 	log().Infof("ClusterNetworkPolicy %s: %d ClusterPolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		parentCNPName, len(clusterPolicyEndpoints), len(selected), len(localPods), len(stale))
-	if slice != nil && sliceDeleted {
-		if v, ok := r.sliceLocalIdentifiers.Load(*slice); ok {
-			priorLocalPods = withIdentifiers(priorLocalPods, v.([]string))
-		}
-	}
+	priorLocalPods = withIdentifiers(priorLocalPods, recordedLocalIdentifiers(&r.sliceLocalIdentifiers, slice, liveSlices))
 	queued := identifiersToProgram(r.ebpfClient, localPods, priorLocalPods)
 	queued = r.programmingLatency.withPendingMeasurements(queued, priorLocalPods)
 	r.deleteCleanups.record(parentCNPName, queued, sliceDeleted, localPods, selected)
-	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, localBySlice)
+	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, liveSlices, localPods)
 	return queued, nil
 }
 
 // selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, their
-// selected pods on this node by identifier, and the identifiers each slice selects pods of on
-// this node, with an entry for every slice.
+// selected pods on this node by identifier, and the requests of the ClusterPolicyEndpoints
+// themselves.
 func (r *ClusterPolicyEndpointsReconciler) selectedPods(clusterPolicyEndpoints []policyk8sawsv1.ClusterPolicyEndpoint) (map[string]bool,
-	map[string][]npatypes.Pod, map[EndpointRequest][]string) {
+	map[string][]npatypes.Pod, []EndpointRequest) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
-	localBySlice := make(map[EndpointRequest][]string, len(clusterPolicyEndpoints))
+	liveSlices := make([]EndpointRequest, 0, len(clusterPolicyEndpoints))
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range clusterPolicyEndpoints {
 		cpe := &clusterPolicyEndpoints[i]
-		slice := requestFor(cpe, clusterPolicyEndpointParent)
-		localBySlice[slice] = nil
+		liveSlices = append(liveSlices, requestFor(cpe, clusterPolicyEndpointParent))
 		for _, pod := range cpe.Spec.PodSelectorEndpoints {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 			selected[podIdentifier] = true
 			if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 				localPods[podIdentifier] = append(localPods[podIdentifier], npatypes.Pod{
 					NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
-				if !slices.Contains(localBySlice[slice], podIdentifier) {
-					localBySlice[slice] = append(localBySlice[slice], podIdentifier)
-				}
 			}
 		}
 	}
 	for podIdentifier, pods := range localPods {
 		localPods[podIdentifier] = uniquePods(pods)
 	}
-	return selected, localPods, localBySlice
+	return selected, localPods, liveSlices
 }
 
 // programIdentifier is stage 2 for one pod identifier. It brings the identifier's cluster-policy
