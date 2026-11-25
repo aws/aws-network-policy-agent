@@ -28,11 +28,13 @@ func TestPipeline_Envtest(t *testing.T) {
 		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	require.NoError(t, err)
-	bpf := &ebpf.MockBpfClient{}
+	// The client reports an attach that creates an identifier's programs, as the real one does.
+	bpf := &ebpf.MockBpfClient{ReportFirstAttach: true}
 	pe := NewPolicyEndpointsReconciler(mgr.GetClient(), fixtureNodeIP, bpf, false)
 	cpe := NewClusterPolicyEndpointsReconciler(mgr.GetClient(), fixtureNodeIP, bpf)
 	require.NoError(t, pe.SetupWithManager(context.Background(), mgr))
 	require.NoError(t, cpe.SetupWithManager(context.Background(), mgr))
+	LinkProgrammers(pe, cpe)
 
 	// Queued before the manager starts: the programming queue exists from construction, so
 	// adding to it must neither block nor lose the identifier.
@@ -131,4 +133,20 @@ func TestPipeline_Envtest(t *testing.T) {
 		state, ok := podState(web, ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY)
 		return len(clusterRules(web)) == 0 && ok && state == ebpf.DEFAULT_ALLOW
 	}, envtestWait, 50*time.Millisecond, "deleting the cluster policy clears its rules")
+
+	// A cluster policy that selects db only through a replica on another node queues nothing
+	// here. When the network policy pass creates db's programs, it queues the cluster policy
+	// programmer, which writes the Deny.
+	db := utils.GetPodIdentifier("db-aaa", envtestNamespace)
+	remoteOnly := envtestCPE("cnp-2-aaaaa", "cnp-2", "db-bbb", "192.168.91.2/32", "10.1.2.2")
+	remoteOnly.Spec.PodSelectorEndpoints[0].HostIP = fixtureRemoteIP
+	require.NoError(t, direct.Create(context.Background(), remoteOnly))
+	require.Eventually(t, func() bool { return cpe.ArePoliciesAvailableInLocalCache(db) },
+		envtestWait, 50*time.Millisecond, "the cluster policy is recorded for db")
+	require.False(t, bpf.HasBPFContext(db))
+	require.NoError(t, direct.Create(context.Background(), envtestPE("np-3-aaaaa", "np-3", "db-aaa", "192.168.90.3/32", "10.1.1.3")))
+	require.Eventually(t, func() bool {
+		return slices.Equal(ingressCIDRs(db), []string{"192.168.90.3/32"}) &&
+			slices.Equal(clusterRules(db), []string{"Deny 192.168.91.2/32"})
+	}, envtestWait, 50*time.Millisecond, "the linked cluster policy programmer writes the Deny to the new programs")
 }

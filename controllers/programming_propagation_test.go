@@ -604,6 +604,27 @@ func TestProgramIdentifier_CreatingProgramsQueuesThePeerProgrammer(t *testing.T)
 		drainBoth(t, pfx, cfx)
 		assert.Equal(t, []string{"192.168.90.1/32"}, pfx.ingressCIDRs(db), "the creating programmer's retry lands")
 	})
+
+	t.Run("the peer is queued even when the creating cluster policy pass's write fails", func(t *testing.T) {
+		pfx, cfx := linkedFixtures(t)
+		pfx.setSlices(sliceSpec{name: "np-1-aaaaa", parent: "np-1",
+			pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{allow("192.168.90.1/32")}})
+		require.NoError(t, pfx.reconcile("np-1-aaaaa"))
+
+		writeFailed := errors.New("map write failed")
+		cfx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{db: writeFailed}
+		cfx.setSlices(sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1,
+			pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny("192.168.90.9/32")}})
+		require.NoError(t, cfx.r.reconcile(context.TODO(), cpeRequest("cnp-1-aaaaa", "cnp-1")))
+		require.ErrorIs(t, cfx.r.drainProgramming(context.TODO()), writeFailed)
+
+		require.NoError(t, pfx.r.drainProgramming(context.TODO()))
+		assert.Equal(t, []string{"192.168.90.1/32"}, pfx.ingressCIDRs(db), "the peer programs its plane")
+
+		cfx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
+		drainBoth(t, pfx, cfx)
+		assert.Equal(t, []string{"Deny 192.168.90.9/32"}, cfx.clusterPolicyRules(db), "the creating programmer's retry lands")
+	})
 }
 
 // A slice-deletion record outlives the programs it was written for: the identifier's last pod
