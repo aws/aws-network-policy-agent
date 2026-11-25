@@ -76,7 +76,7 @@ There is no new flag, and no flag changes. `--max-concurrent-reconciles` is defi
 **Stage 1** is the existing queue of `(slice, parent)` requests, with one worker. It never writes eBPF state. For each request it:
 1. Lists the parent's live slices from the informer cache. It recomputes which pod identifiers they select on any node, and which of each identifier's pods are on this node.
 2. Records the parent's live slices for each identifier it selects, replacing the previous set, and drops the parent from identifiers it no longer selects anywhere.
-3. Queues the identifiers it selects pods of on this node, now or before. An identifier whose pods here it stopped selecting is queued so it is rewritten. An identifier it selects only on other nodes is not queued, as today.
+3. Queues the identifiers it selects pods of on this node, now or before. An identifier whose pods here it stopped selecting is queued so it is rewritten, whether or not it has programs here yet: a pass that finds none writes nothing, and one whose first attach is creating them runs again after it. An identifier it selects only on other nodes is not queued, as today.
 
 **Stage 2** is a new priority queue keyed by pod identifier, with one worker. A pass for one identifier:
 1. Attaches probes for its pods on this node that the recorded policies select.
