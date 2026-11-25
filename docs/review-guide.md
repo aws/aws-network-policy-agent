@@ -748,8 +748,11 @@ Blocking when: a failure that leaves rules, pod state or an attach wrong is logg
 **Precedent (NPA 4bf96cf).** Main follows this rule since [#726](https://github.com/aws/aws-network-policy-agent/pull/726) (commit `c93b854`). Follow main's pattern:
 
 - Both `Reconcile` methods return the error from `reconcile`: `controllers/policyendpoints_controller.go:154-160`, `controllers/clusterpolicyendpoints_controller.go:108-115`.
-- `programIdentifierMaps` joins an identifier's attach and map-write failures and returns them so the identifier is retried: `controllers/policyendpoints_controller.go`, `controllers/clusterpolicyendpoints_controller.go`.
+- `reconcilePolicyEndpoint` records derive and configure failures per identifier, then returns the join: `policyendpoints_controller.go:333-337`, `354-360`, `372`.
+- `cleanUpPolicyEndpoint` does the same: `:252`, `:261`. The CPE reconciler: `clusterpolicyendpoints_controller.go:222-237`.
 - `attachProbesForIdentifier` records each pod's attach failure and continues: `controllers/shared.go:54-77`.
+
+With the two-stage reconcile ([#838](https://github.com/aws/aws-network-policy-agent/pull/838), at `8c0be4f`), stage 2 returns them: `programIdentifierMaps` joins an identifier's attach and map-write failures and returns them, so the programming queue retries the identifier (`controllers/policyendpoints_controller.go:362-402`, `controllers/clusterpolicyendpoints_controller.go:264-295`).
 
 **Cites.** NPA 4bf96cf: `pkg/config/runtime_config.go:35` (`SyncPeriod`, no reader in `main.go`, `pkg/` or `controllers/`), `runtime_config.go:66-72` (`BuildRuntimeOptions`). controller-runtime v0.25.2: `pkg/internal/controller/controller.go:485-497` (rate-limited requeue on error; `TerminalError` is only counted), `:554-556` (`AddRateLimited`), `pkg/cache/cache.go:45` (`defaultSyncPeriod = 10 * time.Hour`), `:457`.
 
