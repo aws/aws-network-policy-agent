@@ -566,7 +566,7 @@ func TestReconcileNetworkPolicy_StaleIdentifierIsPurgedAndQueued(t *testing.T) {
 	assert.True(t, tracked, "the initial reconcile must record the identifier in MAP3")
 
 	currentPE = getPolicyEndpoint(policyName, namespace, nil)
-	queued, err := r.reconcileNetworkPolicy(context.Background(), namespace, policyName, false)
+	queued, err := r.reconcileNetworkPolicy(context.Background(), namespace, policyName, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{previousIdentifier}, queued, "the deselected local pod's identifier must be queued")
 	assert.Empty(t, r.localIdentifiers(namespace, policyName))
@@ -1254,7 +1254,7 @@ func TestSelectedPods(t *testing.T) {
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
-			_, localPods := policyEndpointReconciler.selectedPods([]policyendpoint.PolicyEndpoint{tt.policyendpoint})
+			_, localPods, _ := policyEndpointReconciler.selectedPods([]policyendpoint.PolicyEndpoint{tt.policyendpoint})
 			var gotActivePods []npatypes.Pod
 			for _, pods := range localPods {
 				gotActivePods = append(gotActivePods, pods...)

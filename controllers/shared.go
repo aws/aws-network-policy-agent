@@ -3,6 +3,7 @@ package controllers
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
@@ -67,4 +68,17 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 		log().Debugf("eBPF probes in place for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 	return outcome, attachErr
+}
+
+// recordSliceLocalIdentifiers keeps, for a live slice, the identifiers it selects pods of on this
+// node, and forgets a deleted slice's entry once its deletion has been reconciled.
+func recordSliceLocalIdentifiers(records *sync.Map, slice *EndpointRequest, sliceDeleted bool, localBySlice map[string][]string) {
+	if slice == nil {
+		return
+	}
+	if ids := localBySlice[slice.Endpoint.Name]; !sliceDeleted && len(ids) > 0 {
+		records.Store(*slice, ids)
+		return
+	}
+	records.Delete(*slice)
 }

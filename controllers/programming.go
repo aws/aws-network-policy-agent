@@ -268,11 +268,13 @@ type deleteCleanups struct {
 }
 
 // record updates the identifiers a reconcile of parent queued. If the reconcile was for a deleted
-// slice, the ones parent no longer selects any pods of on this node leave parent out; every other
-// queued identifier is written with all its policies.
-func (d *deleteCleanups) record(parent string, queued []string, sliceDeleted bool, localPods map[string][]npatypes.Pod) {
+// slice, the ones parent still selects somewhere but no longer selects any pods of on this node
+// leave parent out; every other queued identifier is written with all its policies. One parent
+// selects nowhere has no slices left to leave out.
+func (d *deleteCleanups) record(parent string, queued []string, sliceDeleted bool,
+	localPods map[string][]npatypes.Pod, selected map[string]bool) {
 	for _, podIdentifier := range queued {
-		if sliceDeleted && len(localPods[podIdentifier]) == 0 {
+		if sliceDeleted && len(localPods[podIdentifier]) == 0 && selected[podIdentifier] {
 			d.byIdentifier.Store(podIdentifier, parent)
 		} else {
 			d.byIdentifier.Delete(podIdentifier)
@@ -298,4 +300,41 @@ func (d *deleteCleanups) without(podIdentifier string, refs []utils.PolicyEndpoi
 		return refs
 	}
 	return lo.Filter(refs, func(ref utils.PolicyEndpointRef, _ int) bool { return ref.Parent != parent.(string) })
+}
+
+// withPendingMeasurements adds to queued the identifiers among candidates that still hold pending
+// measurements. A pass for one with nothing left to program retires them; without that pass, an
+// identifier whose attach was skipped would hold them for good once its policies stop selecting it.
+func (t *programmingLatencyTracker) withPendingMeasurements(queued []string, candidates map[string][]npatypes.Pod) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	in := make(map[string]bool, len(queued))
+	for _, podIdentifier := range queued {
+		in[podIdentifier] = true
+	}
+	for podIdentifier := range candidates {
+		if !in[podIdentifier] && len(t.pending[podIdentifier]) > 0 {
+			queued = append(queued, podIdentifier)
+		}
+	}
+	slices.Sort(queued)
+	return queued
+}
+
+// withIdentifiers returns priorLocalPods with an entry for each of podIdentifiers it lacks. It
+// copies the map, which is shared with the recorded state.
+func withIdentifiers(priorLocalPods map[string][]npatypes.Pod, podIdentifiers []string) map[string][]npatypes.Pod {
+	if len(podIdentifiers) == 0 {
+		return priorLocalPods
+	}
+	merged := make(map[string][]npatypes.Pod, len(priorLocalPods)+len(podIdentifiers))
+	for podIdentifier, pods := range priorLocalPods {
+		merged[podIdentifier] = pods
+	}
+	for _, podIdentifier := range podIdentifiers {
+		if _, ok := merged[podIdentifier]; !ok {
+			merged[podIdentifier] = nil
+		}
+	}
+	return merged
 }

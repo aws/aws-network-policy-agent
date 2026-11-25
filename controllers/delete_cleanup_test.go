@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // These tests pin down the cleanup a slice deletion does. Once a policy no longer selects any
@@ -168,4 +169,95 @@ func TestPolicySlices_SliceDeletionRecordIsBounded(t *testing.T) {
 		require.NoError(t, fx.r.drainProgramming(context.TODO()))
 		assert.False(t, recorded(fx, db))
 	})
+}
+
+// The informer can show slice A gone by the time slice B's update is reconciled. B's reconcile
+// must not use up what A's deletion needs: whichever is reconciled first, A's deletion leaves
+// the policy out of db, as it does today, where each slice keeps its own record of the pods it
+// selected until its own deletion is reconciled.
+func TestPolicySlices_SliceDeletionCleanupSurvivesASiblingReconciledFirst(t *testing.T) {
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			fx, db := dbFixture(t)
+			updated := np1b
+			updated.ingress = []ruleRef{allow(np1bCIDR), allow("192.168.90.5/32")}
+			fx.setSlices(updated)
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+			}
+			fx.assertRulesCleared(db)
+		})
+	}
+}
+
+func TestClusterPolicySlices_SliceDeletionCleanupSurvivesASiblingReconciledFirst(t *testing.T) {
+	cnp1a := sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny(np1aCIDR)}}
+	cnp1b := sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 1, pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{deny(np1bCIDR)}}
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			db := identifierOf("db-0")
+			fx := newCPEFixture(t)
+			fx.setSlices(cnp1a, cnp1b)
+			fx.reconcileAll()
+			require.ElementsMatch(t, []string{np1aCIDR, np1bCIDR}, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[db]))
+
+			updated := cnp1b
+			updated.ingress = []ruleRef{deny(np1bCIDR), deny("192.168.90.5/32")}
+			fx.setSlices(updated)
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+			}
+			assert.Empty(t, fx.bpf.ClusterPolicyIngressByIdentifier[db])
+		})
+	}
+}
+
+// Deleting a policy's last slices leaves nothing to leave out: the policy selects the
+// identifier nowhere, so no record is kept for it.
+func TestPolicySlices_LastSliceDeletionKeepsNoRecord(t *testing.T) {
+	fx, db := dbFixture(t)
+	fx.deleteSlice("np-1-aaaaa")
+	fx.deleteSlice("np-1-bbbbb")
+	require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+	require.NoError(t, fx.reconcileDeleted("np-1-bbbbb"))
+	fx.assertRulesCleared(db)
+	_, recorded := fx.r.deleteCleanups.byIdentifier.Load(db)
+	assert.False(t, recorded)
+	remaining := 0
+	fx.r.sliceLocalIdentifiers.Range(func(any, any) bool { remaining++; return true })
+	assert.Zero(t, remaining, "a slice's own record goes once its deletion is reconciled")
+}
+
+// A pod whose attach is skipped holds latency measurements that no pass finishes. Once the
+// policy stops selecting it, a last pass retires them, so they don't outlive the identifier.
+func TestPolicySlices_DeselectedIdentifierWithSkippedAttachRetiresItsMeasurements(t *testing.T) {
+	fx := newPEFixture(t)
+	skipped := identifierOf("skip-aaa")
+	fx.bpf.AttacheBPFProbesErrFor = map[types.NamespacedName]error{
+		{Name: "skip-aaa", Namespace: fixtureNamespace}: ebpf.ErrProbeAttachSkipped,
+	}
+	fx.setSlices(sliceSpec{name: "np-9-aaaaa", parent: "np-9", pods: []podRef{localPod("skip-aaa", "10.1.1.20")}, ingress: []ruleRef{allow(np1aCIDR)}})
+	require.NoError(t, fx.reconcile("np-9-aaaaa"))
+	require.False(t, fx.bpf.HasBPFContext(skipped))
+	require.NotEmpty(t, fx.r.programmingLatency.pending[skipped], "the skipped pass leaves its measurement pending")
+
+	fx.setSlices(sliceSpec{name: "np-9-aaaaa", parent: "np-9", pods: []podRef{remotePod("skip-bbb", "10.1.2.20")}, ingress: []ruleRef{allow(np1aCIDR)}})
+	require.NoError(t, fx.reconcile("np-9-aaaaa"))
+	assert.Empty(t, fx.r.programmingLatency.pending[skipped])
 }

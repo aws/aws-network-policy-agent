@@ -143,6 +143,10 @@ type PolicyEndpointsReconciler struct {
 	lastObservedTriggerTimes sync.Map
 	programmingLatency       *programmingLatencyTracker
 	deleteCleanups           deleteCleanups
+	// sliceLocalIdentifiers holds, per live slice (EndpointRequest), the identifiers it selected
+	// pods of on this node at its last reconcile. A slice's deletion reads its own entry, so a
+	// sibling reconciled first, which rewrites the policy's local pods, can't hide what it selected.
+	sliceLocalIdentifiers sync.Map
 
 	// What each NetworkPolicy selects, as of its last reconcile. Only the PolicyEndpoint
 	// reconcile writes these, on a single worker; the programming workers and the CNI RPC path
@@ -199,7 +203,7 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req EndpointR
 		r.lastObservedTriggerTimes.Delete(req)
 	}
 
-	queued, err := r.reconcileNetworkPolicy(ctx, req.Endpoint.Namespace, req.Parent, !live)
+	queued, err := r.reconcileNetworkPolicy(ctx, req.Endpoint.Namespace, req.Parent, &req, !live)
 	if err != nil {
 		return err
 	}
@@ -227,15 +231,16 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req EndpointR
 
 // reconcileNetworkPolicy recomputes what parentNP selects from its live PolicyEndpoints and
 // records it. It returns the pod identifiers whose maps on this node may have changed.
-// sliceDeleted reports that the reconcile is for a slice of parentNP that is gone.
-func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, namespace, parentNP string, sliceDeleted bool) ([]string, error) {
+// slice is the request being reconciled, if any, and sliceDeleted reports that it is gone.
+func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, namespace, parentNP string,
+	slice *EndpointRequest, sliceDeleted bool) ([]string, error) {
 	policyEndpoints, err := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, namespace)
 	if err != nil {
 		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
 		return nil, err
 	}
 	names := lo.Map(policyEndpoints, func(pe policyk8sawsv1.PolicyEndpoint, _ int) string { return pe.Name })
-	selected, localPods := r.selectedPods(policyEndpoints)
+	selected, localPods, localBySlice := r.selectedPods(policyEndpoints)
 
 	for podIdentifier := range selected {
 		utils.SetParentPolicyEndpoints(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex,
@@ -258,17 +263,27 @@ func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, 
 
 	log().Debugf("NetworkPolicy %s/%s: %d PolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		namespace, parentNP, len(policyEndpoints), len(selected), len(localPods), len(stale))
+	if slice != nil && sliceDeleted {
+		if v, ok := r.sliceLocalIdentifiers.Load(*slice); ok {
+			priorLocalPods = withIdentifiers(priorLocalPods, v.([]string))
+		}
+	}
 	queued := identifiersToProgram(r.ebpfClient, localPods, priorLocalPods)
-	r.deleteCleanups.record(parentNP, queued, sliceDeleted, localPods)
+	queued = r.programmingLatency.withPendingMeasurements(queued, priorLocalPods)
+	r.deleteCleanups.record(parentNP, queued, sliceDeleted, localPods, selected)
+	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, localBySlice)
 	return queued, nil
 }
 
-// selectedPods returns every pod identifier the PolicyEndpoints select on any node, and their
-// selected pods on this node by identifier. Host-network pods are skipped: they have no veth to
+// selectedPods returns every pod identifier the PolicyEndpoints select on any node, their
+// selected pods on this node by identifier, and the identifiers each slice selects pods of on
+// this node, by slice name. Host-network pods are skipped: they have no veth to
 // attach to.
-func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv1.PolicyEndpoint) (map[string]bool, map[string][]npatypes.Pod) {
+func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv1.PolicyEndpoint) (map[string]bool,
+	map[string][]npatypes.Pod, map[string][]string) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
+	localBySlice := make(map[string][]string)
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range policyEndpoints {
 		pe := &policyEndpoints[i]
@@ -293,6 +308,9 @@ func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv
 			if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 				localPods[podIdentifier] = append(localPods[podIdentifier], npatypes.Pod{
 					NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
+				if !slices.Contains(localBySlice[pe.Name], podIdentifier) {
+					localBySlice[pe.Name] = append(localBySlice[pe.Name], podIdentifier)
+				}
 			}
 		}
 		if ignored > 0 {
@@ -303,7 +321,7 @@ func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv
 	for podIdentifier, pods := range localPods {
 		localPods[podIdentifier] = uniquePods(pods)
 	}
-	return selected, localPods
+	return selected, localPods, localBySlice
 }
 
 // commitPolicySelection records what a policy selects, or forgets the policy once it selects nothing.
