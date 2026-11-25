@@ -81,7 +81,7 @@ There is no new flag, and no flag changes. `--max-concurrent-reconciles` is defi
 **Stage 2** is a new priority queue keyed by pod identifier, with one worker. A pass for one identifier:
 1. Attaches probes for its pods on this node that the recorded policies select.
 2. Reads the recorded slices from the informer cache. It writes the union of their rules, or the baseline if none: allow-all in standard mode, deny in strict mode. Attach and write happen in the same pass, as today.
-3. Returns any attach or write failure, so the identifier is retried with backoff: 5 ms, doubling up to 30 s.
+3. Returns any attach or write failure, so the identifier is retried with backoff: 5 ms, doubling up to 30 s. A skipped attach (`ErrProbeAttachSkipped`, for a multi-NIC pod whose interface count is unknown) is not a failure and is not retried: the pod waits for a later policy event or CNI ADD.
 
 The queue never hands an identifier to two workers at once. It processes an identifier again if it was queued during a pass, so the last pass always reads the newest state. That would keep more than one worker safe for any one identifier. It is also what coalesces: changes that arrive while an identifier waits are applied in one pass.
 
@@ -94,7 +94,7 @@ The queue never hands an identifier to two workers at once. It processes an iden
 - **A live policy with no rules.** An identifier that a live PolicyEndpoint selects, but with no rules and no isolation, gets allow-all in both directions with policies applied, as today's programming path writes it. Today's cleanup path, run when a sibling slice changes, writes the baseline instead, which in strict mode is deny.
 - **Identifiers selected only on other nodes.** An identifier a policy selects only on other nodes is not queued, as today, so it gets that policy's rule changes only when something else rewrites it. Today, an identifier a policy selects only on other nodes keeps the names of the policy's deleted slices until the policy stops selecting it, so a slice recreated under such a name can reach the identifier through another policy's write. Stage 1 lists only the slices the policy's last reconcile saw. In 6,000 replays, the maps after the last reconcile differed in 7, all of this kind.
 - **Order.** Stage 1 recomputes the whole policy from the informer cache on every reconcile, so an identifier can reach its new state a reconcile earlier or later than today. With every pod on this node, the maps after the last reconcile matched in every replay.
-- **Retries.** A failing identifier is retried on its own with backoff up to 30 s. Today the whole reconcile is retried, with controller-runtime's default backoff up to about 16 minutes. An identifier that can never attach is retried every 30 s.
+- **Retries.** A failing attach or map write is retried for its identifier alone, with backoff up to 30 s, so one that fails every time is retried every 30 s. Today the whole reconcile is retried, with controller-runtime's default backoff up to about 16 minutes. A skipped attach is not retried, now or today: the pod waits for a later policy event or CNI ADD.
 
 ### Interaction with Existing Features
 
@@ -112,11 +112,13 @@ The queue never hands an identifier to two workers at once. It processes an iden
 | `awsnodeagent_policy_teardown_latency_ms`: summary, same labels | Reconcile of a deleted, deleting or moved slice that had pods to rewrite and failed nowhere. | Reconcile of a deleted, deleting or moved slice that queued at least one identifier, once each is programmed and some pass wrote maps. | Today: ms of the attempt that succeeded, from that attempt's start. Now: as for setup. |
 | `awsnodeagent_policy_programming_latency_seconds` and `awsnodeagent_cluster_policy_programming_latency_seconds`: histograms, no labels | New `last-change-trigger-time` value on a live slice, once a reconcile of it failed nowhere and wrote some identifier's maps. | New `last-change-trigger-time` value on a live slice, once each identifier its reconcile queued is programmed and some pass wrote maps. | Seconds from the trigger time, as today. It now includes the stage-2 queue wait. |
 
+In this change, a change's sample is taken only when every identifier it queued has finished a pass and at least one of those passes wrote maps. An identifier finishes a pass when the pass succeeds, whether it wrote maps or found no programs to write to. A pass that writes nothing because every attach was skipped does not finish it.
+
 How the cases differ, now and today:
 - **Retries.** A failed pass keeps its identifier's samples pending, and the pass that succeeds takes them, so the value includes the retry delay and a retry adds no sample. Today the setup latency was also sampled on a failing pass, the teardown latency only on the attempt that succeeded, and the programming latency waited for the reconcile that succeeded, as now.
 - **No local work.** A reconcile that queues nothing, or whose identifiers have no programs on this node, takes no sample. A trigger value is consumed either way, as today.
 - **Skipped attaches.** A pass that writes nothing because every attach was skipped does not count as programming the identifier, so its samples wait for a later pass of it, and none is taken if no later pass comes. Today the programming latency was sampled once any identifier was written.
-- **Coalescing.** Each reconcile is its own change. Changes programmed by the same pass take one sample each, from their own start or trigger time. A resync that queues work takes a setup sample, as today. Each trigger value is sampled at most once. Today a value replaced before its reconcile succeeded was never sampled; now a value is sampled once a stage-1 reconcile has seen it.
+- **Coalescing.** Each reconcile is its own change. Changes programmed by the same pass take one sample each, from their own start or trigger time. A resync is sampled on the same terms as any other reconcile. Each trigger value is sampled at most once. Today a value replaced before its reconcile succeeded was never sampled; now a value is sampled once a stage-1 reconcile has seen it.
 - **Bound.** An identifier holds at most 128 pending changes. Past that, the oldest is dropped without a sample.
 - **Clock skew.** A negative programming latency is dropped, as today.
 - **Cluster policies** have no setup or teardown metric, as today.
