@@ -78,8 +78,8 @@ There is no new flag, and no flag changes. `--max-concurrent-reconciles` is defi
 2. Records the parent's live slices for each identifier it selects, replacing the previous set, and drops the parent from identifiers it no longer selects anywhere.
 3. Queues the identifiers it selects pods of on this node, now or before. An identifier whose pods here it stopped selecting is queued so it is rewritten, whether or not it has programs here yet: a pass that finds none writes nothing, and one whose first attach is creating them runs again after it. An identifier it selects only on other nodes is not queued, as today.
 
-**Stage 2** is a new priority queue keyed by pod identifier, with one worker. A pass for one identifier:
-1. Attaches probes for its pods on this node that the recorded policies select.
+**Stage 2** is a new priority queue keyed by pod identifier, with one worker, in each controller. Each writes its own controller's maps: the network-policy maps or the cluster-policy maps of the identifier's programs, which the two share. A pass for one identifier:
+1. Attaches probes for its pods on this node that the recorded policies select. If an attach created the identifier's programs, the other controller's maps are new and empty too, and that controller may have nothing queued for the identifier, so the pass queues it on the other controller's stage 2 before writing. That attach finds the programs in place, so it queues nothing back.
 2. Reads the recorded slices from the informer cache. It writes the union of their rules, or the baseline if none: allow-all in standard mode, deny in strict mode. Attach and write happen in the same pass, as today.
 3. Returns any attach or write failure, so the identifier is retried with backoff: 5 ms, doubling up to 30 s. A skipped attach (`ErrProbeAttachSkipped`, for a multi-NIC pod whose interface count is unknown) is not a failure and is not retried: the pod waits for a later policy event or CNI ADD.
 
@@ -87,7 +87,7 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 **Kept from today:**
 - **Target groups (#800).** A grouped PolicyEndpoint applies only to the pods its group lists, within its own policy. The filter is in the slice lookup that stage 2 and the CNI ADD path share.
-- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. As with today's per-slice selector entries, each stage-1 reconcile records under every live slice the identifiers the policy selects here, and reads the records of its slice and of the policy's live slices. So a slice's deletion finds what the policy selected when the slice was last seen, whichever slice is reconciled first, and also when the slice's own reconcile never ran, or when the slice was deleted and recreated under the same name in between. Cluster policies do the same.
+- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. A pass whose attach fails keeps the record for its retry. As with today's per-slice selector entries, each stage-1 reconcile records under every live slice the identifiers the policy selects here, and reads the records of its slice and of the policy's live slices. So a slice's deletion finds what the policy selected when the slice was last seen, whichever slice is reconciled first, and also when the slice's own reconcile never ran, or when the slice was deleted and recreated under the same name in between. Cluster policies do the same.
 - **Namespaces and host network.** A PolicyEndpoint applies only to pods in its own namespace, and skips host-network pods.
 
 **Differences from Today.** Found by replaying 6,000 random sequences of slice events, in random reconcile order, through today's code and this change, and comparing every identifier's maps after each reconcile:
@@ -98,9 +98,9 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 ### Interaction with Existing Features
 
-- **CNI ADD.** Unchanged. It writes a new pod's rules from the recorded slices. Its write can race a stage-2 pass for the same identifier, as it raced a reconcile before.
+- **CNI ADD.** Unchanged. For a pod whose attach creates the identifier's programs, it writes both policy types' rules from the recorded slices, and queues neither stage 2. Its write can race a stage-2 pass for the same identifier, as it raced a reconcile before.
 - **Strict mode.** The baseline for an identifier with no policies is deny, as today.
-- **Agent restart.** Stage 2 starts as soon as stage 1 queues identifiers (see Open Items).
+- **Agent restart.** As today, programming starts while stage 1 is still reconciling the initial list. This change does not close the startup gaps that follow from that (see Open Items).
 
 ### Observability
 
@@ -130,12 +130,13 @@ How the cases differ, now and today:
 ### Risks
 
 - **The rollout interval.** NPC can drop a workload's last old replica from a policy before it lists the new pod. A stage-2 pass that runs in between writes the identifier at the baseline (unenforced in standard mode, dropped in strict mode) until the next pass, with any number of workers. Today's reconcile does the same when it runs in between. Whether a pass lands there depends on timing, and with a backlog, more workers reach the identifier sooner. With two stage-2 workers and a backlog of 20 identifiers, the new pod was left at the baseline in 9 of 9 harness replays with a 1 s gap, for a median of 308 ms. Today, and with one worker, it happened in 0 of 9. One worker narrows the window but does not close it.
+- **Fresh programs.** Until the other controller's pass runs, its policy type on the new programs has the state the creating pass seeded: allow for cluster policies, the baseline for network policies. That lasts a few milliseconds. Today it lasts until the other controller's reconcile reaches the identifier, and for good if its policies select the identifier only on other nodes.
+- **Identifiers selected only on other nodes.** A policy that starts selecting an identifier, or changes its rules, only through replicas on other nodes reaches the identifier's replicas here only when something else rewrites it, as today (see Differences from Today). This change accepts that limitation.
 - **More than one worker.** A second worker is 1.7× faster for network policies at 10–17% more CPU, but only 1.1× for cluster policies at 33% more, and widens the rollout interval above. Hence one worker, not configurable.
 
 ### Open Items
 
-- **Startup.** Hold stage 2 until stage 1 has reconciled the initial list. Otherwise, after a restart, a pass writes only the policies seen so far, and the rules of policies deleted while the agent was down stay applied.
-- **Fresh load.** A program loaded by one controller's pass should also queue the other controller, or a cluster-policy Deny can stay missing.
+- **Startup reconstruction (follow-up, inherited from today).** While stage 1 reconciles the initial list after a restart, a pass writes the policies recorded so far. A policy recorded later that selects the identifier only on other nodes does not queue it, so its rules can stay missing. The rules of policies deleted while the agent was down stay on identifiers no current policy selects. A CNI ADD during that time writes from the policies recorded so far too. Today has the same gaps. The follow-up builds both controllers' state from the synced caches before either stage 2 starts, then queues every identifier with programs on the node, which needs a way to list them, and has a CNI ADD that creates an identifier's programs queue both stage 2s.
 - **Attach rollback.** Detach filters on attach rollback.
 - **Debounce.** A stage-2 debounce.
 - **Unit tests.** Default-deny, cluster-policy stress and strict-mode unit tests.
