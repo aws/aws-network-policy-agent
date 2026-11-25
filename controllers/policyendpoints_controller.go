@@ -142,14 +142,6 @@ type PolicyEndpointsReconciler struct {
 	// time is observed at most once
 	lastObservedTriggerTimes sync.Map
 	programmingLatency       *programmingLatencyTracker
-	deleteCleanups           deleteCleanups
-	// sliceLocalIdentifiers holds, per live slice (EndpointRequest), the identifiers its policy
-	// selected pods of on this node as of the last reconcile that saw the slice live. A reconcile
-	// queues the identifiers recorded for its slice and the policy's live slices, as well as the
-	// policy's last local set, so that a sibling reconciled first, which rewrites that set, does not
-	// hide them from a slice's deletion, and neither does a deletion before the slice's own first
-	// reconcile, or a deletion and re-creation under the same name.
-	sliceLocalIdentifiers sync.Map
 
 	// What each NetworkPolicy selects, as of its last reconcile. Only the PolicyEndpoint
 	// reconcile writes these, on a single worker; the programming workers and the CNI RPC path
@@ -168,9 +160,9 @@ type PolicyEndpointsReconciler struct {
 
 	// Pod identifiers whose eBPF maps need programming
 	programQueue priorityqueue.PriorityQueue[string]
-	// peer is the ClusterPolicyEndpoint programmer (LinkProgrammers). Nil when this reconciler
-	// runs alone.
-	peer *programmerPeer
+	// queuePeer queues an identifier on the ClusterPolicyEndpoint programmer (LinkProgrammers).
+	// Nil when this reconciler runs alone.
+	queuePeer func(podIdentifier string)
 
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
@@ -209,7 +201,7 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req EndpointR
 		r.lastObservedTriggerTimes.Delete(req)
 	}
 
-	queued, err := r.reconcileNetworkPolicy(ctx, req.Endpoint.Namespace, req.Parent, &req, !live)
+	queued, err := r.reconcileNetworkPolicy(ctx, req.Endpoint.Namespace, req.Parent)
 	if err != nil {
 		return err
 	}
@@ -237,16 +229,14 @@ func (r *PolicyEndpointsReconciler) reconcile(ctx context.Context, req EndpointR
 
 // reconcileNetworkPolicy recomputes what parentNP selects from its live PolicyEndpoints and
 // records it. It returns the pod identifiers whose maps on this node may have changed.
-// slice is the request being reconciled, if any, and sliceDeleted reports that it is gone.
-func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, namespace, parentNP string,
-	slice *EndpointRequest, sliceDeleted bool) ([]string, error) {
+func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, namespace, parentNP string) ([]string, error) {
 	policyEndpoints, err := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, namespace)
 	if err != nil {
 		// This is expected only if the error is due to inability to list the PE from the cache, in which case we should requeue the reconcile request
 		return nil, err
 	}
 	names := lo.Map(policyEndpoints, func(pe policyk8sawsv1.PolicyEndpoint, _ int) string { return pe.Name })
-	selected, localPods, liveSlices := r.selectedPods(policyEndpoints)
+	selected, localPods := r.selectedPods(policyEndpoints)
 
 	for podIdentifier := range selected {
 		utils.SetParentPolicyEndpoints(&r.podIdentifierToPolicyEndpointMap, &r.podIdentifierToPolicyEndpointMapMutex,
@@ -257,7 +247,6 @@ func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, 
 	for _, podIdentifier := range stale {
 		utils.DeleteParentFromPodIdentifierMap(&r.podIdentifierToPolicyEndpointMap,
 			&r.podIdentifierToPolicyEndpointMapMutex, podIdentifier, parentNP)
-		r.deleteCleanups.forgetParent(podIdentifier, parentNP)
 	}
 
 	var priorLocalPods map[string][]npatypes.Pod
@@ -269,25 +258,19 @@ func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, 
 
 	log().Debugf("NetworkPolicy %s/%s: %d PolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		namespace, parentNP, len(policyEndpoints), len(selected), len(localPods), len(stale))
-	priorLocalPods = withIdentifiers(priorLocalPods, recordedLocalIdentifiers(&r.sliceLocalIdentifiers, slice, liveSlices))
-	queued := identifiersToProgram(localPods, priorLocalPods)
-	r.deleteCleanups.record(parentNP, queued, sliceDeleted, localPods, selected)
-	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, liveSlices, localPods)
-	return queued, nil
+	return identifiersToProgram(localPods, priorLocalPods, stale, len(policyEndpoints) == 0), nil
 }
 
-// selectedPods returns every pod identifier the PolicyEndpoints select on any node, their
-// selected pods on this node by identifier, and the requests of the PolicyEndpoints themselves.
-// Host-network pods are skipped: they have no veth to attach to.
+// selectedPods returns every pod identifier the PolicyEndpoints select on any node, and their
+// selected pods on this node by identifier. Host-network pods are skipped: they have no veth to
+// attach to.
 func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv1.PolicyEndpoint) (map[string]bool,
-	map[string][]npatypes.Pod, []EndpointRequest) {
+	map[string][]npatypes.Pod) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
-	liveSlices := make([]EndpointRequest, 0, len(policyEndpoints))
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range policyEndpoints {
 		pe := &policyEndpoints[i]
-		liveSlices = append(liveSlices, requestFor(pe, policyEndpointParent))
 		ignored := 0
 		var firstIgnored types.NamespacedName
 		for _, pod := range pe.Spec.PodSelectorEndpoints {
@@ -319,7 +302,7 @@ func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv
 	for podIdentifier, pods := range localPods {
 		localPods[podIdentifier] = uniquePods(pods)
 	}
-	return selected, localPods, liveSlices
+	return selected, localPods
 }
 
 // commitPolicySelection records what a policy selects, or forgets the policy once it selects nothing.
@@ -360,7 +343,7 @@ func (r *PolicyEndpointsReconciler) programIdentifier(ctx context.Context, podId
 // programIdentifierMaps reports whether it wrote the identifier's maps and how many of its pods
 // could not attach.
 func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, podIdentifier string) (programmingPass, error) {
-	allRefs := r.policyEndpointRefs(podIdentifier)
+	refs := r.policyEndpointRefs(podIdentifier)
 	namespace, ok := utils.GetPodNamespaceFromPodIdentifier(podIdentifier)
 	if !ok {
 		// Identifiers come from GetPodIdentifier, so this cannot happen; retrying cannot help.
@@ -368,28 +351,23 @@ func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, p
 		return programmingPass{}, nil
 	}
 
-	before := readDeletionRecords(&r.deleteCleanups, r.peer, podIdentifier)
-	parents := lo.Map(allRefs, func(ref utils.PolicyEndpointRef, _ int) string {
+	parents := lo.Map(refs, func(ref utils.PolicyEndpointRef, _ int) string {
 		return utils.GetNetworkPolicyIdentifier(ref.Parent, namespace)
 	})
 	attached, attachErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier,
 		localPodsOf(&r.networkPolicyToLocalPodsMap, podIdentifier, parents))
-	if attached.createdContext {
-		programsCreated(&r.deleteCleanups, r.peer, podIdentifier, before)
+	// Programs this attach created have empty maps for both policy types. Queue the other
+	// programmer before writing, so that it writes its policies even if this pass then fails.
+	if attached.createdContext && r.queuePeer != nil {
+		r.queuePeer(podIdentifier)
 	}
 
 	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
-	// A slice-deletion record is kept for the retry when an attach failed, so that the retry's
-	// write still leaves its policy out.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		if attachErr == nil {
-			r.deleteCleanups.forget(podIdentifier)
-		}
 		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
-	refs := r.deleteCleanups.without(podIdentifier, allRefs)
 	policyEndpoints, err := r.policyEndpointsOf(ctx, namespace, podIdentifier, refs)
 	if err != nil {
 		return programmingPass{}, errors.Join(attachErr, fmt.Errorf("get policy endpoints for podIdentifier %s: %w", podIdentifier, err))
@@ -622,8 +600,6 @@ func (r *PolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 func (r *PolicyEndpointsReconciler) DeriveFireWallRulesPerPodIdentifier(podIdentifier string, podNamespace string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
 
-	// The CNI ADD writes these rules, with every policy that selects the identifier.
-	r.deleteCleanups.forget(podIdentifier)
 	policyEndpoints, err := r.policyEndpointsOf(context.Background(), podNamespace, podIdentifier, r.policyEndpointRefs(podIdentifier))
 	if err != nil {
 		log().Errorf("Error deriving firewall rules: %v", err)

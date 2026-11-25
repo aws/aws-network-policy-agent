@@ -166,7 +166,7 @@ func BenchmarkPEReconcileReads(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					if _, err := r.reconcileNetworkPolicy(ctx, "ns", "np", nil, false); err != nil {
+					if _, err := r.reconcileNetworkPolicy(ctx, "ns", "np"); err != nil {
 						b.Fatal(err)
 					}
 					for _, podIdentifier := range r.localIdentifiers("ns", "np") {
@@ -215,7 +215,7 @@ func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
 			r := newTestPolicyEndpointsReconciler(t, reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
 			ctx := context.Background()
 
-			_, err := r.reconcileNetworkPolicy(ctx, "ns", "np", nil, false)
+			_, err := r.reconcileNetworkPolicy(ctx, "ns", "np")
 			assert.NoError(t, err)
 			podIdentifiers := r.localIdentifiers("ns", "np")
 			assert.Len(t, podIdentifiers, 1)
@@ -287,7 +287,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 
 		r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
 		ctx := context.Background()
-		_, err := r.reconcileNetworkPolicy(ctx, "ns", "np", nil, false)
+		_, err := r.reconcileNetworkPolicy(ctx, "ns", "np")
 		assert.NoError(t, err)
 		podIdentifiers := r.localIdentifiers("ns", "np")
 		assert.Len(t, podIdentifiers, 1)
@@ -345,7 +345,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 
 		r := newTestClusterPolicyEndpointsReconciler(t, &cacheReader{cpes: cpes}, benchNodeIP, &ebpf.MockBpfClient{})
 		ctx := context.Background()
-		_, err := r.reconcileClusterNetworkPolicy(ctx, "cnp", nil, false)
+		_, err := r.reconcileClusterNetworkPolicy(ctx, "cnp")
 		assert.NoError(t, err)
 		podIdentifiers := r.localIdentifiers("cnp")
 		assert.Len(t, podIdentifiers, 1)

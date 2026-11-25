@@ -145,7 +145,7 @@ func recordPolicies(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.P
 	t.Helper()
 	r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
 	for _, parent := range parents {
-		_, err := r.reconcileNetworkPolicy(context.Background(), "ns", parent, nil, false)
+		_, err := r.reconcileNetworkPolicy(context.Background(), "ns", parent)
 		require.NoError(t, err)
 	}
 	return r

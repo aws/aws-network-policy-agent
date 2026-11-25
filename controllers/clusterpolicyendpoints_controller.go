@@ -95,10 +95,6 @@ type ClusterPolicyEndpointsReconciler struct {
 	// time is observed at most once
 	lastObservedTriggerTimes sync.Map
 	programmingLatency       *programmingLatencyTracker
-	deleteCleanups           deleteCleanups
-	// sliceLocalIdentifiers is PolicyEndpointsReconciler.sliceLocalIdentifiers for cluster
-	// policy slices.
-	sliceLocalIdentifiers sync.Map
 
 	// What each ClusterNetworkPolicy selects, as of its last reconcile. Only the
 	// ClusterPolicyEndpoint reconcile writes these, on a single worker; the programming workers
@@ -117,8 +113,9 @@ type ClusterPolicyEndpointsReconciler struct {
 
 	// Pod identifiers whose cluster-policy eBPF maps need programming
 	programQueue priorityqueue.PriorityQueue[string]
-	// peer is the PolicyEndpoint programmer (LinkProgrammers). Nil when this reconciler runs alone.
-	peer *programmerPeer
+	// queuePeer queues an identifier on the PolicyEndpoint programmer (LinkProgrammers). Nil when
+	// this reconciler runs alone.
+	queuePeer func(podIdentifier string)
 
 	ebpfClient ebpf.BpfClient
 }
@@ -156,7 +153,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req En
 		r.lastObservedTriggerTimes.Delete(req)
 	}
 
-	queued, err := r.reconcileClusterNetworkPolicy(ctx, req.Parent, &req, !live)
+	queued, err := r.reconcileClusterNetworkPolicy(ctx, req.Parent)
 	if err != nil {
 		return err
 	}
@@ -173,16 +170,14 @@ func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req En
 
 // reconcileClusterNetworkPolicy recomputes what parentCNPName selects from its live
 // ClusterPolicyEndpoints and records it. It returns the pod identifiers whose maps on this node
-// may have changed. slice is the request being reconciled, if any, and sliceDeleted reports that
-// it is gone.
-func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx context.Context, parentCNPName string,
-	slice *EndpointRequest, sliceDeleted bool) ([]string, error) {
+// may have changed.
+func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx context.Context, parentCNPName string) ([]string, error) {
 	clusterPolicyEndpoints, err := r.getClusterPolicyEndpointsOfParentCNP(ctx, parentCNPName)
 	if err != nil {
 		return nil, err
 	}
 	names := lo.Map(clusterPolicyEndpoints, func(cpe policyk8sawsv1.ClusterPolicyEndpoint, _ int) string { return cpe.Name })
-	selected, localPods, liveSlices := r.selectedPods(clusterPolicyEndpoints)
+	selected, localPods := r.selectedPods(clusterPolicyEndpoints)
 
 	for podIdentifier := range selected {
 		utils.SetParentPolicyEndpoints(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex,
@@ -192,7 +187,6 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 	for _, podIdentifier := range stale {
 		utils.DeleteParentFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap,
 			&r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCNPName)
-		r.deleteCleanups.forgetParent(podIdentifier, parentCNPName)
 	}
 
 	var priorLocalPods map[string][]npatypes.Pod
@@ -204,25 +198,18 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 
 	log().Infof("ClusterNetworkPolicy %s: %d ClusterPolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		parentCNPName, len(clusterPolicyEndpoints), len(selected), len(localPods), len(stale))
-	priorLocalPods = withIdentifiers(priorLocalPods, recordedLocalIdentifiers(&r.sliceLocalIdentifiers, slice, liveSlices))
-	queued := identifiersToProgram(localPods, priorLocalPods)
-	r.deleteCleanups.record(parentCNPName, queued, sliceDeleted, localPods, selected)
-	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, liveSlices, localPods)
-	return queued, nil
+	return identifiersToProgram(localPods, priorLocalPods, stale, len(clusterPolicyEndpoints) == 0), nil
 }
 
-// selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, their
-// selected pods on this node by identifier, and the requests of the ClusterPolicyEndpoints
-// themselves.
+// selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, and
+// their selected pods on this node by identifier.
 func (r *ClusterPolicyEndpointsReconciler) selectedPods(clusterPolicyEndpoints []policyk8sawsv1.ClusterPolicyEndpoint) (map[string]bool,
-	map[string][]npatypes.Pod, []EndpointRequest) {
+	map[string][]npatypes.Pod) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
-	liveSlices := make([]EndpointRequest, 0, len(clusterPolicyEndpoints))
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range clusterPolicyEndpoints {
 		cpe := &clusterPolicyEndpoints[i]
-		liveSlices = append(liveSlices, requestFor(cpe, clusterPolicyEndpointParent))
 		for _, pod := range cpe.Spec.PodSelectorEndpoints {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 			selected[podIdentifier] = true
@@ -235,7 +222,7 @@ func (r *ClusterPolicyEndpointsReconciler) selectedPods(clusterPolicyEndpoints [
 	for podIdentifier, pods := range localPods {
 		localPods[podIdentifier] = uniquePods(pods)
 	}
-	return selected, localPods, liveSlices
+	return selected, localPods
 }
 
 // programIdentifier is stage 2 for one pod identifier. It brings the identifier's cluster-policy
@@ -262,27 +249,22 @@ func (r *ClusterPolicyEndpointsReconciler) programIdentifier(ctx context.Context
 // programIdentifierMaps reports whether it wrote the identifier's maps and how many of its pods
 // could not attach.
 func (r *ClusterPolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, podIdentifier string) (programmingPass, error) {
-	allRefs := r.clusterPolicyEndpointRefs(podIdentifier)
-	before := readDeletionRecords(&r.deleteCleanups, r.peer, podIdentifier)
-	parents := lo.Map(allRefs, func(ref utils.PolicyEndpointRef, _ int) string { return ref.Parent })
+	refs := r.clusterPolicyEndpointRefs(podIdentifier)
+	parents := lo.Map(refs, func(ref utils.PolicyEndpointRef, _ int) string { return ref.Parent })
 	attached, attachErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier,
 		localPodsOf(&r.clusterNetworkPolicyToLocalPodsMap, podIdentifier, parents))
-	if attached.createdContext {
-		programsCreated(&r.deleteCleanups, r.peer, podIdentifier, before)
+	// Programs this attach created have empty maps for both policy types. Queue the other
+	// programmer before writing, so that it writes its policies even if this pass then fails.
+	if attached.createdContext && r.queuePeer != nil {
+		r.queuePeer(podIdentifier)
 	}
 
 	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
-	// A slice-deletion record is kept for the retry when an attach failed, so that the retry's
-	// write still leaves its policy out.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping cluster policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		if attachErr == nil {
-			r.deleteCleanups.forget(podIdentifier)
-		}
 		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
-	refs := r.deleteCleanups.without(podIdentifier, allRefs)
 	clusterPolicyEndpoints, err := r.clusterPolicyEndpointsOf(ctx, refs)
 	if err != nil {
 		return programmingPass{}, errors.Join(attachErr, fmt.Errorf("get cluster policy endpoints for podIdentifier %s: %w", podIdentifier, err))
@@ -429,8 +411,6 @@ func (r *ClusterPolicyEndpointsReconciler) getClusterPolicyEndpointsOfParentCNP(
 func (r *ClusterPolicyEndpointsReconciler) DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx context.Context, podIdentifier string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
 
-	// The CNI ADD writes these rules, with every policy that selects the identifier.
-	r.deleteCleanups.forget(podIdentifier)
 	clusterPolicyEndpoints, err := r.clusterPolicyEndpointsOf(ctx, r.clusterPolicyEndpointRefs(podIdentifier))
 	if err != nil {
 		log().Errorf("Error deriving cluster firewall rules: %v", err)

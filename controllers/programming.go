@@ -7,7 +7,6 @@ import (
 	"time"
 
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
-	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/types"
@@ -63,41 +62,8 @@ const (
 // types are new then, and the other controller may have nothing queued for the identifier: one
 // whose policies select it only on other nodes does not queue it.
 func LinkProgrammers(pe *PolicyEndpointsReconciler, cpe *ClusterPolicyEndpointsReconciler) {
-	pe.peer = &programmerPeer{queue: cpe.programQueue.Add, deleteCleanups: &cpe.deleteCleanups}
-	cpe.peer = &programmerPeer{queue: pe.programQueue.Add, deleteCleanups: &pe.deleteCleanups}
-}
-
-// programmerPeer is the other controller's programmer, as LinkProgrammers links it.
-type programmerPeer struct {
-	queue          func(podIdentifier string)
-	deleteCleanups *deleteCleanups
-}
-
-// deletionRecords are both programmers' slice-deletion records for an identifier, read before an
-// attach that may create its programs.
-type deletionRecords struct {
-	own, peer *deleteCleanup
-}
-
-func readDeletionRecords(own *deleteCleanups, peer *programmerPeer, podIdentifier string) deletionRecords {
-	records := deletionRecords{own: own.current(podIdentifier)}
-	if peer != nil {
-		records.peer = peer.deleteCleanups.current(podIdentifier)
-	}
-	return records
-}
-
-// programsCreated handles an attach that created podIdentifier's programs, whose maps are new
-// and empty for both policy types. The deletion records read before the attach describe the
-// earlier programs, so it drops them, keeping any made since. It then queues the identifier on
-// the other programmer, which may have nothing queued for it, before this pass writes, so the
-// other programmer writes its policies even if this pass fails.
-func programsCreated(own *deleteCleanups, peer *programmerPeer, podIdentifier string, before deletionRecords) {
-	own.forgetIfCurrent(podIdentifier, before.own)
-	if peer != nil {
-		peer.deleteCleanups.forgetIfCurrent(podIdentifier, before.peer)
-		peer.queue(podIdentifier)
-	}
+	pe.queuePeer = cpe.programQueue.Add
+	cpe.queuePeer = pe.programQueue.Add
 }
 
 // newProgrammingQueue returns a stage-2 queue. It exists from construction, so adding to it never
@@ -126,10 +92,13 @@ func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.Priority
 
 // identifiersToProgram returns the identifiers a policy's reconcile must queue: the ones it
 // selects pods of on this node, and the ones whose pods here it selected before, so a pod it
-// stopped selecting is reprogrammed.
+// stopped selecting is reprogrammed. When the policy has no live slices left, it also returns
+// stale, every identifier the policy no longer selects: the policy is gone, and its rules reach
+// identifiers it selected only on other nodes through the shared maps, which nothing else
+// rewrites.
 //
-// An identifier the policy selects only on other nodes is not queued, even though the policy's
-// rules reach this node's replicas through the shared maps. Queueing it when the policy stops
+// While the policy has live slices, an identifier it selects only on other nodes is not queued,
+// even though the policy's rules reach this node's replicas through the shared maps. Queueing it when the policy stops
 // selecting it would reset a new pod here to the baseline in the interval during a rollout
 // when NPC has dropped the last old replica and not yet listed the new one, a pod that CNI ADD
 // programmed with the policy's rules. This node's rules for such an identifier change only
@@ -139,7 +108,7 @@ func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.Priority
 // finds none writes nothing. Leaving one out because it has no programs yet would race a pass
 // whose first attach is creating them, which then writes the rules it read before this
 // reconcile, with no later pass to rewrite them.
-func identifiersToProgram(localPods, priorLocalPods map[string][]npatypes.Pod) []string {
+func identifiersToProgram(localPods, priorLocalPods map[string][]npatypes.Pod, stale []string, noLiveSlices bool) []string {
 	podIdentifiers := make([]string, 0, len(localPods)+len(priorLocalPods))
 	for podIdentifier := range localPods {
 		podIdentifiers = append(podIdentifiers, podIdentifier)
@@ -149,8 +118,11 @@ func identifiersToProgram(localPods, priorLocalPods map[string][]npatypes.Pod) [
 			podIdentifiers = append(podIdentifiers, podIdentifier)
 		}
 	}
+	if noLiveSlices {
+		podIdentifiers = append(podIdentifiers, stale...)
+	}
 	slices.Sort(podIdentifiers)
-	return podIdentifiers
+	return slices.Compact(podIdentifiers)
 }
 
 func queueIdentifiers(queue priorityqueue.PriorityQueue[string], podIdentifiers []string) {
@@ -308,97 +280,4 @@ func (t *programmingLatencyTracker) observeE2E(latency time.Duration) {
 		return
 	}
 	t.histogram.Observe(latency.Seconds())
-}
-
-// deleteCleanups keeps the cleanup a slice deletion does. When a policy's slice goes away and
-// the policy no longer selects any of an identifier's pods on this node, the deletion writes the
-// identifier without that policy's rules, even where the policy still selects the identifier's
-// pods on other nodes. Any later write of the identifier includes the policy again. So each
-// identifier records the policy whose slice deletion last cleaned it up, until a later reconcile
-// queues it or a CNI ADD writes it, and a programming pass leaves that policy out. A record
-// belongs to the identifier's programs as they were when it was made: when a pass creates the
-// identifier's programs anew, it drops both programmers' records from before its attach.
-type deleteCleanups struct {
-	// pod identifier -> *deleteCleanup
-	byIdentifier sync.Map
-}
-
-// deleteCleanup is one record. Each record is a distinct value, so a pass can drop a record it
-// read earlier without dropping one made since.
-type deleteCleanup struct {
-	// parent is the policy left out.
-	parent string
-}
-
-// record updates the identifiers a reconcile of parent queued. If the reconcile was for a deleted
-// slice, the ones parent still selects somewhere but no longer selects any pods of on this node
-// leave parent out; every other queued identifier is written with all its policies. One parent
-// selects nowhere has no slices left to leave out.
-func (d *deleteCleanups) record(parent string, queued []string, sliceDeleted bool,
-	localPods map[string][]npatypes.Pod, selected map[string]bool) {
-	for _, podIdentifier := range queued {
-		if sliceDeleted && len(localPods[podIdentifier]) == 0 && selected[podIdentifier] {
-			d.byIdentifier.Store(podIdentifier, &deleteCleanup{parent: parent})
-		} else {
-			d.byIdentifier.Delete(podIdentifier)
-		}
-	}
-}
-
-// forget drops podIdentifier's record, once it is written with all its policies or has nothing
-// left on this node to program.
-func (d *deleteCleanups) forget(podIdentifier string) {
-	d.byIdentifier.Delete(podIdentifier)
-}
-
-// forgetParent drops parent's record for podIdentifier, once parent selects none of its pods.
-func (d *deleteCleanups) forgetParent(podIdentifier, parent string) {
-	if v, ok := d.byIdentifier.Load(podIdentifier); ok && v.(*deleteCleanup).parent == parent {
-		d.byIdentifier.CompareAndDelete(podIdentifier, v)
-	}
-}
-
-// without returns refs minus the slices of the policy podIdentifier leaves out, if any.
-func (d *deleteCleanups) without(podIdentifier string, refs []utils.PolicyEndpointRef) []utils.PolicyEndpointRef {
-	v, ok := d.byIdentifier.Load(podIdentifier)
-	if !ok {
-		return refs
-	}
-	parent := v.(*deleteCleanup).parent
-	return lo.Filter(refs, func(ref utils.PolicyEndpointRef, _ int) bool { return ref.Parent != parent })
-}
-
-// current returns podIdentifier's record, or nil if it has none.
-func (d *deleteCleanups) current(podIdentifier string) *deleteCleanup {
-	v, _ := d.byIdentifier.Load(podIdentifier)
-	record, _ := v.(*deleteCleanup)
-	return record
-}
-
-// forgetIfCurrent drops podIdentifier's record if it is still record.
-func (d *deleteCleanups) forgetIfCurrent(podIdentifier string, record *deleteCleanup) {
-	if record != nil {
-		d.byIdentifier.CompareAndDelete(podIdentifier, record)
-	}
-}
-
-// withIdentifiers returns priorLocalPods with an entry for each of podIdentifiers it lacks: the map
-// itself if it lacks none, and otherwise a copy, since the map is shared with the recorded state.
-func withIdentifiers(priorLocalPods map[string][]npatypes.Pod, podIdentifiers []string) map[string][]npatypes.Pod {
-	if !slices.ContainsFunc(podIdentifiers, func(podIdentifier string) bool {
-		_, ok := priorLocalPods[podIdentifier]
-		return !ok
-	}) {
-		return priorLocalPods
-	}
-	merged := make(map[string][]npatypes.Pod, len(priorLocalPods)+len(podIdentifiers))
-	for podIdentifier, pods := range priorLocalPods {
-		merged[podIdentifier] = pods
-	}
-	for _, podIdentifier := range podIdentifiers {
-		if _, ok := merged[podIdentifier]; !ok {
-			merged[podIdentifier] = nil
-		}
-	}
-	return merged
 }

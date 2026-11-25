@@ -3,9 +3,6 @@ package controllers
 import (
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
-	"sync"
 
 	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
@@ -75,56 +72,4 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 		log().Debugf("eBPF probes in place for pod: %s in namespace %s", pod.Name, pod.Namespace)
 	}
 	return outcome, attachErr
-}
-
-// recordedLocalIdentifiers returns the identifiers recorded for slice and for liveSlices. A
-// slice's record differs from its policy's last local set only if the slice was missing from the
-// policy's last reconcile: deleted since, or deleted and recreated under the same name, or moved
-// to another parent and back, before its own reconcile ran.
-func recordedLocalIdentifiers(records *sync.Map, slice *EndpointRequest, liveSlices []EndpointRequest) []string {
-	var podIdentifiers []string
-	// Every slice one reconcile recorded shares one []string, so each is read once.
-	seen := map[*string]bool{}
-	load := func(req EndpointRequest) {
-		v, ok := records.Load(req)
-		if !ok {
-			return
-		}
-		ids := v.([]string)
-		if len(ids) == 0 || seen[&ids[0]] {
-			return
-		}
-		seen[&ids[0]] = true
-		podIdentifiers = append(podIdentifiers, ids...)
-	}
-	if slice != nil {
-		load(*slice)
-	}
-	for _, live := range liveSlices {
-		load(live)
-	}
-	return podIdentifiers
-}
-
-// recordSliceLocalIdentifiers keeps, for every live slice of a policy, the identifiers the policy
-// selects pods of on this node, and forgets a deleted slice's entry once its deletion has been
-// reconciled. A slice's entry is the policy's whole local set as of the last reconcile that saw
-// the slice live, so the slice's deletion cleans up whatever the policy selected here then,
-// including pods only its siblings listed, and whether or not the slice's own reconcile ran.
-func recordSliceLocalIdentifiers(records *sync.Map, slice *EndpointRequest, sliceDeleted bool,
-	liveSlices []EndpointRequest, localPods map[string][]npatypes.Pod) {
-	if slice != nil && sliceDeleted {
-		records.Delete(*slice)
-	}
-	if len(localPods) == 0 {
-		for _, live := range liveSlices {
-			records.Delete(live)
-		}
-		return
-	}
-	// Shared by every entry, and never modified.
-	podIdentifiers := slices.Sorted(maps.Keys(localPods))
-	for _, live := range liveSlices {
-		records.Store(live, podIdentifiers)
-	}
 }
