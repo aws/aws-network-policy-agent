@@ -496,11 +496,16 @@ func IsMissingFilterError(error string) bool {
 }
 
 func IsNodeIP(nodeIP string, ipCidr string) bool {
-	ipAddr, _, _ := net.ParseCIDR(ipCidr)
-	if net.ParseIP(nodeIP).Equal(ipAddr) {
-		return true
+	ipAddr, ipNet, err := net.ParseCIDR(ipCidr)
+	if err != nil {
+		return false
 	}
-	return false
+	// Only a single-host entry (/32 or /128) can be the node IP itself;
+	// a wider CIDR whose network address equals the node IP is a range.
+	if ones, bits := ipNet.Mask.Size(); ones != bits {
+		return false
+	}
+	return net.ParseIP(nodeIP).Equal(ipAddr)
 }
 
 func IsNonHostCIDR(ipAddr string) bool {
