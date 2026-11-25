@@ -85,6 +85,19 @@ type ClusterPolicyEndpointSpec struct {
 
 	// Egress is the list of egress rules containing resolved network addresses
 	Egress []ClusterEndpointInfo `json:"egress,omitempty"`
+
+	// TargetGroup identifies the resolved-port group this ClusterPolicyEndpoint belongs to. Named
+	// ports resolve per pod, so when the subject pods disagree the controller emits one set of
+	// ClusterPolicyEndpoints per port set and applies each only to its own group's pods. A group
+	// spans namespaces, since the policy is cluster-scoped.
+	//
+	// Empty means ungrouped and applies to every subject pod of the parent policy, which is what
+	// agents did before this field existed. The value is an opaque short hash compared only for
+	// equality.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	TargetGroup string `json:"targetGroup,omitempty"`
 }
 
 // ClusterPolicyEndpointStatus defines the observed state of ClusterPolicyEndpoint
