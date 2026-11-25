@@ -60,7 +60,7 @@ The work this change removes grows with the identifiers on the node times the sl
 
 ### Non-Goals
 
-- **Changing what rules an identifier gets.** The rule computation, the shared maps per identifier, target groups (#800) and the slice-deletion cleanup behave as today.
+- **Changing what rules an identifier gets.** The rule computation, the shared maps per identifier, target groups (#800) and the slice-deletion cleanup behave as today, apart from the cases under Differences from Today.
 - **Matching pods to each policy's `podSelector`.** Replicas that share an identifier also share rules, as today.
 - **The upgrade window.** An upgrade that changes the BPF objects leaves policies unenforced for about 12 s on today's code too (`CleanupQdiscs`, then `DEFAULT_ALLOW` on the reloaded programs). That needs its own change.
 - **The CNI ADD path.** It still attaches a new pod and writes its rules itself.
@@ -87,8 +87,14 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 **Kept from today:**
 - **Target groups (#800).** A grouped PolicyEndpoint applies only to the pods its group lists, within its own policy. The filter is in the slice lookup that stage 2 and the CNI ADD path share.
-- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. Each stage-1 reconcile records the identifiers every live slice of the policy selects here, as today's per-slice selector entries do, so a slice's deletion finds them whichever slice was reconciled first, even if its own reconcile never ran. Cluster policies do the same.
+- **Slice-deletion cleanup.** When a slice is deleted and its policy no longer selects any of an identifier's pods on this node, the identifier is written without that policy, even where the policy still selects its pods on other nodes, until a later reconcile or CNI ADD writes it. Stage 1 records the policy to leave out, and stage 2 leaves it out. As with today's per-slice selector entries, each stage-1 reconcile records under every live slice the identifiers the policy selects here, and reads the records of its slice and of the policy's live slices. So a slice's deletion finds what the policy selected when the slice was last seen, whichever slice is reconciled first, and also when the slice's own reconcile never ran, or when the slice was deleted and recreated under the same name in between. Cluster policies do the same.
 - **Namespaces and host network.** A PolicyEndpoint applies only to pods in its own namespace, and skips host-network pods.
+
+**Differences from Today.** Found by replaying 6,000 random sequences of slice events, in random reconcile order, through today's code and this change, and comparing every identifier's maps after each reconcile:
+- **A live policy with no rules.** An identifier that a live PolicyEndpoint selects, but with no rules and no isolation, gets allow-all in both directions with policies applied, as today's programming path writes it. Today's cleanup path, run when a sibling slice changes, writes the baseline instead, which in strict mode is deny.
+- **Identifiers selected only on other nodes.** An identifier a policy selects only on other nodes is not queued, as today, so it gets that policy's rule changes only when something else rewrites it. Today keeps the names of deleted slices in each identifier's list until the policy stops selecting it, so a slice recreated under such a name can reach the identifier through another policy's write. Stage 1 lists only the slices the policy's last reconcile saw. In 6,000 replays, the maps after the last reconcile differed in 7, all of this kind.
+- **Order.** Stage 1 recomputes the whole policy from the informer cache on every reconcile, so an identifier can reach its new state a reconcile earlier or later than today. With every pod on this node, the maps after the last reconcile matched in every replay.
+- **Retries.** A failing identifier is retried on its own with backoff up to 30 s. Today the whole reconcile is retried, with controller-runtime's default backoff up to about 16 minutes. An identifier that can never attach is retried every 30 s.
 
 ### Interaction with Existing Features
 
@@ -98,9 +104,9 @@ The queue never hands an identifier to two workers at once. It processes an iden
 
 ### Observability
 
-- **Latency metrics.** `awsnodeagent_policy_setup_latency_ms` and `_teardown_latency_ms` keep their meaning: time from a PolicyEndpoint's reconcile until stage 2 has programmed every identifier it queued, retries included. The programming-latency histograms take one sample per change once all its identifiers are programmed.
-- **New controllers.** `policyendpoint-programmer` and `clusterpolicyendpoint-programmer` add controller-runtime queue and reconcile metrics, including `workqueue_depth` and `workqueue_retries_total`.
-- **Logs.** A failed stage-2 pass logs one error line that names the identifier.
+- **Latency metrics.** `awsnodeagent_policy_setup_latency_ms` and `_teardown_latency_ms` keep their meaning: time from a PolicyEndpoint's reconcile until stage 2 has programmed every identifier it queued, retries included. Each reconcile that queues work takes one sample, where today's setup latency took one per local identifier. The programming-latency histograms take one sample per change once all its identifiers are programmed.
+- **New controllers.** `policyendpoint-programmer` and `clusterpolicyendpoint-programmer` add controller-runtime queue and reconcile metrics, including `workqueue_depth` and `workqueue_retries_total`. Programming failures are counted in `controller_runtime_reconcile_errors_total` under these controllers, not under `policyendpoint` and `clusterpolicyendpoint`.
+- **Logs.** A failed stage-2 pass logs one agent error line that names the identifier, and controller-runtime logs the returned error, as it does for a failed reconcile today.
 
 ### Risks
 
