@@ -267,8 +267,8 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		cfg, direct, scheme := startAPIServer(t)
 		var r *PolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewPolicyEndpointsReconciler(c, fixtureNodeIP, bpf, false)
-			return r
+			r = newTestPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf, false)
+			return synchronousPipeline{r.reconcileAndProgram}
 		}, before)
 		return run, direct, r
 	}
@@ -289,7 +289,7 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		assert.Equal(t, refsOf(reuseBeta, x), got)
 		_, tracked := r.podIdentifierToPolicyEndpointMap.Load(oldPod)
 		assert.False(t, tracked, "the old pod must not stay tracked")
-		_, tracked = r.policyEndpointSelectorMap.Load(alphaReq)
+		_, tracked = r.networkPolicyToLocalPodsMap.Load(utils.GetNetworkPolicyIdentifier(reuseAlpha, envtestNamespace))
 		assert.False(t, tracked, "nothing may stay recorded under the old parent")
 		_, tracked = r.networkPolicyToPodIdentifierMap.Load(utils.GetNetworkPolicyIdentifier(reuseAlpha, envtestNamespace))
 		assert.False(t, tracked, "the old parent's snapshot must be dropped")
@@ -393,7 +393,7 @@ func TestPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		assert.Equal(t, []string{"192.168.90.3/32"}, cidrsOf(bpf.IngressByIdentifier[newPod]))
 		got, _ := r.podIdentifierToPolicyEndpointMap.Load(newPod)
 		assert.Equal(t, refsOf(reuseAlpha, x), got, "nothing may stay recorded under beta")
-		_, tracked := r.policyEndpointSelectorMap.Load(betaReq)
+		_, tracked := r.networkPolicyToLocalPodsMap.Load(utils.GetNetworkPolicyIdentifier(reuseBeta, envtestNamespace))
 		assert.False(t, tracked)
 	})
 }
@@ -410,8 +410,8 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
 		var r *ClusterPolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupCPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewClusterPolicyEndpointsReconciler(c, fixtureNodeIP, bpf)
-			return r
+			r = newTestClusterPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf)
+			return synchronousPipeline{r.reconcileAndProgram}
 		}, nil)
 		require.NoError(t, direct.Create(context.Background(), envtestCPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
 		require.NoError(t, direct.Create(context.Background(), envtestCPE(sibling, reuseBeta, "sib-aaa", "192.168.90.3/32", "10.1.1.3")))
@@ -430,7 +430,7 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		for _, id := range []string{newPod, sibPod} {
 			assert.ElementsMatch(t, []string{"Deny 192.168.90.2/32", "Deny 192.168.90.3/32"}, actionCIDRsOf(bpf.ClusterPolicyIngressByIdentifier[id]), id)
 		}
-		_, tracked := r.ClusterPolicyEndpointSelectorMap.Load(alphaReq)
+		_, tracked := r.clusterNetworkPolicyToLocalPodsMap.Load(reuseAlpha)
 		assert.False(t, tracked, "nothing may stay recorded under the old parent")
 		_, tracked = r.clusterNetworkPolicyToPodIdentifierMap.Load(reuseAlpha)
 		assert.False(t, tracked, "the old parent's snapshot must be dropped")
@@ -440,8 +440,8 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		bpf := &ebpf.MockBpfClient{}
 		var r *ClusterPolicyEndpointsReconciler
 		run := startAgent(t, cfg, scheme, setupCPEController, func(c client.Client) reconcile.TypedReconciler[EndpointRequest] {
-			r = NewClusterPolicyEndpointsReconciler(c, fixtureNodeIP, bpf)
-			return r
+			r = newTestClusterPolicyEndpointsReconciler(t, c, fixtureNodeIP, bpf)
+			return synchronousPipeline{r.reconcileAndProgram}
 		}, nil)
 		require.NoError(t, direct.Create(context.Background(), envtestCPE(x, reuseAlpha, "old-aaa", "192.168.90.1/32", "10.1.1.1")))
 		eventually(t, func() bool { return run.gate.succeeded(alphaReq) }, "alpha programmed")
@@ -459,7 +459,7 @@ func TestClusterPolicyEndpointNameReuse_Envtest(t *testing.T) {
 		assert.Empty(t, bpf.ClusterPolicyIngressByIdentifier[oldPod], "the old pod's Deny must be cleared")
 		assert.Equal(t, ebpf.DEFAULT_ALLOW, bpf.PodStateByIdentifier[ebpf.PodStateKey{PodIdentifier: oldPod, MapKey: ebpf.CLUSTER_POLICY_POD_STATE_MAP_KEY}])
 		assert.Equal(t, []string{"Deny 192.168.90.2/32"}, actionCIDRsOf(bpf.ClusterPolicyIngressByIdentifier[newPod]))
-		_, tracked := r.ClusterPolicyEndpointSelectorMap.Load(alphaReq)
+		_, tracked := r.clusterNetworkPolicyToLocalPodsMap.Load(reuseAlpha)
 		assert.False(t, tracked, "nothing may stay recorded under the old parent")
 		_, tracked = r.clusterNetworkPolicyToPodIdentifierMap.Load(reuseAlpha)
 		assert.False(t, tracked, "the old parent's snapshot must be dropped")

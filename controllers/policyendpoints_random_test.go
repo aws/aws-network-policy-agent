@@ -460,18 +460,17 @@ func runRandomizedPolicy(t *testing.T, seed int64) {
 	}
 	check("after drain")
 
-	// Nothing is tracked for PEs or parents that no longer exist.
-	fx.r.policyEndpointSelectorMap.Range(func(k, _ interface{}) bool {
-		key := k.(EndpointRequest)
-		if pe, ok := fx.store[key.Endpoint.Name]; !ok || pe.Spec.PolicyRef.Name != key.Parent {
-			t.Errorf("selector map still tracks deleted PE %s", k)
-		}
-		return true
-	})
+	// Nothing is tracked for parents that no longer exist.
 	parents := map[string]bool{}
 	for _, pe := range fx.store {
 		parents[pe.Spec.PolicyRef.Name+"/"+pe.Namespace] = true
 	}
+	fx.r.networkPolicyToLocalPodsMap.Range(func(k, _ interface{}) bool {
+		if !parents[k.(string)] {
+			t.Errorf("local pod map still tracks %s, which has no PEs", k)
+		}
+		return true
+	})
 	fx.r.networkPolicyToPodIdentifierMap.Range(func(k, _ interface{}) bool {
 		if !parents[k.(string)] {
 			t.Errorf("parent map still tracks %s, which has no PEs", k)

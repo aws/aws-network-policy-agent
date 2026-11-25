@@ -44,7 +44,9 @@ type ControllerConfig struct {
 	LogFileMaxSize int
 	// Count of rotated Network Policy Agent local log files
 	LogFileMaxBackups int
-	// MaxConcurrentReconciles specifies the max number of reconcile loops
+	// MaxConcurrentReconciles is accepted so that configurations that set it keep starting, but
+	// nothing reads it. Each policy controller programs pod identifiers' eBPF maps on one worker
+	// (programmingWorkerCount in controllers/programming.go).
 	MaxConcurrentReconciles int
 	// Enable Policy decision logs
 	EnablePolicyEventLogs bool
@@ -82,7 +84,7 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&cfg.LogFileMaxBackups, flagLogFileMaxBackups, defaultLogFileMaxBackups, ""+
 		"Set the controller maximum number of rotated log files to retain")
 	fs.IntVar(&cfg.MaxConcurrentReconciles, flagMaxConcurrentReconciles, defaultMaxConcurrentReconciles, ""+
-		"Maximum number of concurrent reconcile loops")
+		"Ignored: each policy controller programs eBPF maps on one worker")
 	fs.BoolVar(&cfg.EnablePolicyEventLogs, flagEnablePolicyEventLogs, false, "If enabled, policy decision logs will be collected & logged")
 	fs.BoolVar(&cfg.EnableCloudWatchLogs, flagEnableCloudWatchLogs, false, "If enabled, policy decision logs will be streamed to CloudWatch, requires \"enable-policy-event-logs=true\"")
 	fs.BoolVar(&cfg.EnableIPv6, flagEnableIPv6, false, "If enabled, Network Policy agent will operate in IPv6 mode")

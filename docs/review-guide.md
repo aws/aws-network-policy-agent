@@ -752,6 +752,8 @@ Blocking when: a failure that leaves rules, pod state or an attach wrong is logg
 - `cleanUpPolicyEndpoint` does the same: `:252`, `:261`. The CPE reconciler: `clusterpolicyendpoints_controller.go:222-237`.
 - `attachProbesForIdentifier` records each pod's attach failure and continues: `controllers/shared.go:54-77`.
 
+With the two-stage reconcile ([#838](https://github.com/aws/aws-network-policy-agent/pull/838), at `8c0be4f`), stage 2 returns them: `programIdentifierMaps` joins an identifier's attach and map-write failures and returns them, so the programming queue retries the identifier (`controllers/policyendpoints_controller.go:362-402`, `controllers/clusterpolicyendpoints_controller.go:264-295`).
+
 **Cites.** NPA 4bf96cf: `pkg/config/runtime_config.go:35` (`SyncPeriod`, no reader in `main.go`, `pkg/` or `controllers/`), `runtime_config.go:66-72` (`BuildRuntimeOptions`). controller-runtime v0.25.2: `pkg/internal/controller/controller.go:485-497` (rate-limited requeue on error; `TerminalError` is only counted), `:554-556` (`AddRateLimited`), `pkg/cache/cache.go:45` (`defaultSyncPeriod = 10 * time.Hour`), `:457`.
 
 **Check.** In a controller diff, follow every `log().Errorf` on a programming path to the `Reconcile` return value. Reject a new `return nil` after a failure that leaves state wrong. For a new loop, does one failure stop the remaining identifiers? It shouldn't. Does a test assert that the failure reaches `Reconcile`'s error?

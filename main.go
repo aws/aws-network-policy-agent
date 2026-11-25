@@ -139,6 +139,7 @@ func main() {
 			log.Errorf("unable to create controller ClusterPolicyEndpoints %v", err)
 			os.Exit(1)
 		}
+		controllers.LinkProgrammers(policyEndpointController, clusterPolicyEndpointController)
 
 		readyzPaths := []string{ebpf.CONNTRACK_MAP_PIN_PATH, ebpf.POLICY_EVENTS_MAP_PIN_PATH}
 		if err := mgr.AddReadyzCheck("bpf-maps", ebpf.NewGlobalMapsReadinessCheck(readyzPaths)); err != nil {

@@ -187,7 +187,7 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 		sliceParents: map[string]string{},
 	}
 	fx.client = mockClient
-	fx.r = NewClusterPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf)
+	fx.r = newTestClusterPolicyEndpointsReconciler(t, mockClient, fixtureNodeIP, fx.bpf)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.ClusterPolicyEndpointList{}), gomock.Any()).
@@ -309,8 +309,7 @@ func (fx *cpeFixture) parentIdentifiers(parent string) ([]string, bool) {
 }
 
 func (fx *cpeFixture) reconcile(name string) error {
-	cpe := fx.store[name]
-	return fx.r.reconcileClusterPolicyEndpoint(context.TODO(), &cpe)
+	return fx.reconcileUnder(name, fx.store[name].Spec.PolicyRef.Name)
 }
 
 // reconcileDeleted reconciles a slice that is gone from the API server, or, after
@@ -323,7 +322,7 @@ func (fx *cpeFixture) reconcileEvent(name string) error {
 }
 
 func (fx *cpeFixture) reconcileUnder(name, parent string) error {
-	return fx.r.reconcile(context.TODO(), cpeRequest(name, parent))
+	return fx.r.reconcileAndProgram(context.TODO(), cpeRequest(name, parent))
 }
 
 func cpeRequest(name, parent string) EndpointRequest {
@@ -424,7 +423,7 @@ func newPEFixture(t *testing.T) *peFixture {
 		sliceParents:    map[string]string{},
 	}
 	fx.client = mockClient
-	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
+	fx.r = newTestPolicyEndpointsReconciler(t, mockClient, fixtureNodeIP, fx.bpf, false)
 
 	mockClient.EXPECT().
 		List(gomock.Any(), gomock.AssignableToTypeOf(&policyk8sawsv1.PolicyEndpointList{}), gomock.Any()).
@@ -539,8 +538,7 @@ func (fx *peFixture) assertRulesCleared(podIdentifier string) {
 }
 
 func (fx *peFixture) reconcile(name string) error {
-	pe := fx.store[name]
-	return fx.r.reconcilePolicyEndpoint(context.TODO(), &pe)
+	return fx.reconcileUnder(name, fx.store[name].Spec.PolicyRef.Name)
 }
 
 func (fx *peFixture) reconcileDeleted(name string) error { return fx.reconcileEvent(name) }
@@ -551,7 +549,7 @@ func (fx *peFixture) reconcileEvent(name string) error {
 }
 
 func (fx *peFixture) reconcileUnder(name, parent string) error {
-	return fx.r.reconcile(context.TODO(), fx.request(name, parent))
+	return fx.r.reconcileAndProgram(context.TODO(), fx.request(name, parent))
 }
 
 func (fx *peFixture) request(name, parent string) EndpointRequest {

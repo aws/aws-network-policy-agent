@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -144,8 +145,8 @@ func buildPEs(namespace string, numPEs, endpointsPerPE, podsPerPE int) map[types
 }
 
 // BenchmarkPEReconcileReads measures allocations of the PolicyEndpoint read paths: listing
-// and fetching sibling PEs (deriveTargetPodsForParentNP) and deriving firewall rules for a
-// local pod (deriveIngressAndEgressFirewallRules).
+// sibling PEs and recording what they select (reconcileNetworkPolicy) and deriving firewall
+// rules for each local identifier as a programming pass does.
 //
 //	go test ./controllers/ -run '^$' -bench BenchmarkPEReconcileReads -benchmem
 func BenchmarkPEReconcileReads(b *testing.B) {
@@ -160,17 +161,16 @@ func BenchmarkPEReconcileReads(b *testing.B) {
 			name := fmt.Sprintf("pes=%d/endpoints=%d/pods=%d/%s", size.pes, size.endpoints, size.pods, mode.name)
 			b.Run(name, func(b *testing.B) {
 				reader := &cacheReader{pes: buildPEs("ns", size.pes, size.endpoints, size.pods), forceDeepCopy: mode.forceDeepCopy}
-				r := NewPolicyEndpointsReconciler(reader, benchNodeIP, nil, false)
+				r := newTestPolicyEndpointsReconciler(b, reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
 				ctx := context.Background()
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", "np-0")
-					if err != nil {
+					if _, err := r.reconcileNetworkPolicy(ctx, "ns", "np"); err != nil {
 						b.Fatal(err)
 					}
-					for podIdentifier := range podIdentifiers {
-						if _, _, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", "np-0", false); err != nil {
+					for _, podIdentifier := range r.localIdentifiers("ns", "np") {
+						if _, _, _, _, err := r.identifierFirewallRules(ctx, podIdentifier); err != nil {
 							b.Fatal(err)
 						}
 					}
@@ -181,7 +181,7 @@ func BenchmarkPEReconcileReads(b *testing.B) {
 }
 
 // TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices guards the UnsafeDisableDeepCopy read
-// in deriveIngressAndEgressFirewallRules: the rule processor appends to L4Info and Except,
+// in a programming pass's rule derivation: the rule processor appends to L4Info and Except,
 // which must not write into spare capacity of the Ports/Except slices owned by the informer
 // cache.
 func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
@@ -212,14 +212,15 @@ func TestDeriveFirewallRules_DoesNotWriteIntoCachedSlices(t *testing.T) {
 			pe.Spec.PodSelectorEndpoints = []policyk8sawsv1.PodEndpoint{{HostIP: benchNodeIP, PodIP: "172.16.0.1", Name: "pod", Namespace: "ns"}}
 
 			reader := &cacheReader{pes: map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{{Namespace: "ns", Name: pe.Name}: pe}}
-			r := NewPolicyEndpointsReconciler(reader, benchNodeIP, nil, false)
+			r := newTestPolicyEndpointsReconciler(t, reader, benchNodeIP, &ebpf.MockBpfClient{}, false)
 			ctx := context.Background()
 
-			_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", pe.Name)
+			_, err := r.reconcileNetworkPolicy(ctx, "ns", "np")
 			assert.NoError(t, err)
+			podIdentifiers := r.localIdentifiers("ns", "np")
 			assert.Len(t, podIdentifiers, 1)
-			for podIdentifier := range podIdentifiers {
-				ingressRules, egressRules, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", pe.Name, false)
+			for _, podIdentifier := range podIdentifiers {
+				ingressRules, egressRules, _, _, err := r.identifierFirewallRules(ctx, podIdentifier)
 				assert.NoError(t, err)
 				rules := ingressRules
 				if direction == "egress" {
@@ -284,15 +285,16 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 			snapshots[k] = pe.DeepCopy()
 		}
 
-		r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, nil, false)
+		r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
 		ctx := context.Background()
-		_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", "np-aaaa")
+		_, err := r.reconcileNetworkPolicy(ctx, "ns", "np")
 		assert.NoError(t, err)
+		podIdentifiers := r.localIdentifiers("ns", "np")
 		assert.Len(t, podIdentifiers, 1)
 		processor := fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false)
-		for podIdentifier := range podIdentifiers {
-			// Reconcile path.
-			ingressRules, egressRules, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", "np-aaaa", false)
+		for _, podIdentifier := range podIdentifiers {
+			// Programming path.
+			ingressRules, egressRules, _, _, err := r.identifierFirewallRules(ctx, podIdentifier)
 			assert.NoError(t, err)
 			assert.NotEmpty(t, ingressRules)
 			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
@@ -300,7 +302,7 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			// CNI RPC path.
-			ingressRules, egressRules, err = r.DeriveFireWallRulesPerPodIdentifier(podIdentifier, "ns")
+			ingressRules, egressRules, _, err = r.DeriveFireWallRulesPerPodIdentifier(podIdentifier, "ns")
 			assert.NoError(t, err)
 			for _, rules := range [][]fwrp.EbpfFirewallRules{ingressRules, egressRules} {
 				_, err = processor.ComputeMapEntriesFromEndpointRules(rules)
@@ -341,13 +343,14 @@ func TestFirewallRuleDerivation_LeavesCachedObjectsUnchanged(t *testing.T) {
 			snapshots[k] = cpe.DeepCopy()
 		}
 
-		r := NewClusterPolicyEndpointsReconciler(&cacheReader{cpes: cpes}, benchNodeIP, nil)
+		r := newTestClusterPolicyEndpointsReconciler(t, &cacheReader{cpes: cpes}, benchNodeIP, &ebpf.MockBpfClient{})
 		ctx := context.Background()
-		_, podIdentifiers, _, _, _, err := r.deriveTargetPodsForParentCNP(ctx, "cnp", "cnp-aaaa")
+		_, err := r.reconcileClusterNetworkPolicy(ctx, "cnp")
 		assert.NoError(t, err)
+		podIdentifiers := r.localIdentifiers("cnp")
 		assert.Len(t, podIdentifiers, 1)
 		processor := fwrp.NewFirewallRuleProcessor(benchNodeIP, "/32", false)
-		for podIdentifier := range podIdentifiers {
+		for _, podIdentifier := range podIdentifiers {
 			ingressRules, egressRules, err := r.DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx, podIdentifier)
 			assert.NoError(t, err)
 			assert.NotEmpty(t, ingressRules)

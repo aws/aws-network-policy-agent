@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	policyk8sawsv1 "github.com/aws/aws-network-policy-agent/api/v1alpha1"
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	fwrp "github.com/aws/aws-network-policy-agent/pkg/fwruleprocessor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,18 +48,12 @@ func tgPortsOf(t *testing.T, rules []fwrp.EbpfFirewallRules) []int32 {
 	return out
 }
 
-// deriveRules populates the podIdentifier map the way a reconcile does, then derives the rules
-// for one podIdentifier.
+// deriveRules records policy np the way its reconcile does, then derives the rules for one
+// podIdentifier the way a programming pass does.
 func deriveRules(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint,
-	trigger, podIdentifier string) []fwrp.EbpfFirewallRules {
+	podIdentifier string) []fwrp.EbpfFirewallRules {
 	t.Helper()
-	r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, nil, false)
-	ctx := context.Background()
-	_, _, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, "np", "ns", trigger)
-	require.NoError(t, err)
-	ingress, _, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", trigger, false)
-	require.NoError(t, err)
-	return ingress
+	return deriveRulesAcrossNPs(t, pes, []string{"np"}, podIdentifier)
 }
 
 func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
@@ -70,8 +65,8 @@ func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
 			{Namespace: "ns", Name: "np-aaaa"}: tgPE("np-aaaa", "g1", []policyk8sawsv1.PodEndpoint{podA}, 8080),
 			{Namespace: "ns", Name: "np-bbbb"}: tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podB}, 9090),
 		}
-		assert.Equal(t, []int32{8080}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
-		assert.Equal(t, []int32{9090}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pb@ns")))
+		assert.Equal(t, []int32{8080}, tgPortsOf(t, deriveRules(t, pes, "pa@ns")))
+		assert.Equal(t, []int32{9090}, tgPortsOf(t, deriveRules(t, pes, "pb@ns")))
 	})
 
 	t.Run("an ungrouped PolicyEndpoint applies to every pod", func(t *testing.T) {
@@ -80,8 +75,8 @@ func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
 			{Namespace: "ns", Name: "np-bbbb"}: tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podB}, 9090),
 			{Namespace: "ns", Name: "np-cccc"}: tgPE("np-cccc", "", []policyk8sawsv1.PodEndpoint{podA, podB}, 443),
 		}
-		assert.ElementsMatch(t, []int32{8080, 443}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
-		assert.ElementsMatch(t, []int32{9090, 443}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pb@ns")))
+		assert.ElementsMatch(t, []int32{8080, 443}, tgPortsOf(t, deriveRules(t, pes, "pa@ns")))
+		assert.ElementsMatch(t, []int32{9090, 443}, tgPortsOf(t, deriveRules(t, pes, "pb@ns")))
 	})
 
 	// An older controller sets no group, so every PolicyEndpoint of the policy applies to every
@@ -91,7 +86,7 @@ func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
 			{Namespace: "ns", Name: "np-aaaa"}: tgPE("np-aaaa", "", []policyk8sawsv1.PodEndpoint{podA, podB}, 8080),
 			{Namespace: "ns", Name: "np-bbbb"}: tgPE("np-bbbb", "", []policyk8sawsv1.PodEndpoint{podA, podB}, 9090),
 		}
-		assert.ElementsMatch(t, []int32{8080, 9090}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
+		assert.ElementsMatch(t, []int32{8080, 9090}, tgPortsOf(t, deriveRules(t, pes, "pa@ns")))
 	})
 
 	// A group whose pods the controller has moved elsewhere must not reach this pod, even while
@@ -102,11 +97,11 @@ func TestDeriveFirewallRules_TargetGroups(t *testing.T) {
 			{Namespace: "ns", Name: "np-bbbb"}: tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podA, podB}, 9090),
 		}
 		// podA is in both groups here, so it legitimately gets both.
-		assert.ElementsMatch(t, []int32{8080, 9090}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
+		assert.ElementsMatch(t, []int32{8080, 9090}, tgPortsOf(t, deriveRules(t, pes, "pa@ns")))
 
 		// Drop podA from g2: its rules must stop applying to podA.
 		pes[types.NamespacedName{Namespace: "ns", Name: "np-bbbb"}] = tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podB}, 9090)
-		assert.Equal(t, []int32{8080}, tgPortsOf(t, deriveRules(t, pes, "np-aaaa", "pa@ns")))
+		assert.Equal(t, []int32{8080}, tgPortsOf(t, deriveRules(t, pes, "pa@ns")))
 	})
 }
 
@@ -134,20 +129,26 @@ func tgPeerPortsOf(t *testing.T, rules []fwrp.EbpfFirewallRules) []string {
 	return out
 }
 
-// deriveRulesAcrossNPs registers every parent against one reconciler, the way a separate reconcile
-// of each policy would, then derives one podIdentifier from the accumulated map.
+// deriveRulesAcrossNPs records every parent against one reconciler, the way a separate reconcile
+// of each policy would, then derives one podIdentifier's rules the way a programming pass does.
 func deriveRulesAcrossNPs(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint,
 	parents []string, podIdentifier string) []fwrp.EbpfFirewallRules {
 	t.Helper()
-	r := NewPolicyEndpointsReconciler(&cacheReader{pes: pes}, benchNodeIP, nil, false)
-	ctx := context.Background()
-	for _, parent := range parents {
-		_, _, _, _, _, err := r.deriveTargetPodsForParentNP(ctx, parent, "ns", "")
-		require.NoError(t, err)
-	}
-	ingress, _, _, _, err := r.deriveIngressAndEgressFirewallRules(ctx, podIdentifier, "ns", "", false)
+	r := recordPolicies(t, pes, parents)
+	ingress, _, _, _, err := r.identifierFirewallRules(context.Background(), podIdentifier)
 	require.NoError(t, err)
 	return ingress
+}
+
+func recordPolicies(t *testing.T, pes map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint,
+	parents []string) *PolicyEndpointsReconciler {
+	t.Helper()
+	r := newTestPolicyEndpointsReconciler(t, &cacheReader{pes: pes}, benchNodeIP, &ebpf.MockBpfClient{}, false)
+	for _, parent := range parents {
+		_, err := r.reconcileNetworkPolicy(context.Background(), "ns", parent)
+		require.NoError(t, err)
+	}
+	return r
 }
 
 // A group key is a content hash of the resolved ports, so two policies selecting the same pods can
@@ -198,4 +199,20 @@ func TestDeriveFirewallRules_UngroupedPolicyEndpointWithoutPods(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.1.0.0/16:9090", "10.3.0.0/16:443"},
 		tgPeerPortsOf(t, deriveRulesAcrossNPs(t, pes, parents, "pb@ns")),
 		"the shared rule must reach podB too")
+}
+
+// The CNI ADD path derives a new pod's rules from the same PolicyEndpoints, so it applies the same
+// groups.
+func TestDeriveFireWallRulesPerPodIdentifier_TargetGroups(t *testing.T) {
+	podA := tgPod("pa-1", "172.16.0.1")
+	podB := tgPod("pb-1", "172.16.0.2")
+	pes := map[types.NamespacedName]*policyk8sawsv1.PolicyEndpoint{
+		{Namespace: "ns", Name: "np-aaaa"}: tgPE("np-aaaa", "g1", []policyk8sawsv1.PodEndpoint{podA}, 8080),
+		{Namespace: "ns", Name: "np-bbbb"}: tgPE("np-bbbb", "g2", []policyk8sawsv1.PodEndpoint{podB}, 9090),
+	}
+	r := recordPolicies(t, pes, []string{"np"})
+
+	ingress, _, _, err := r.DeriveFireWallRulesPerPodIdentifier("pa@ns", "ns")
+	require.NoError(t, err)
+	assert.Equal(t, []int32{8080}, tgPortsOf(t, ingress))
 }

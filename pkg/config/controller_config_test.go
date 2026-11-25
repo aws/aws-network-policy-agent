@@ -70,6 +70,14 @@ func TestPolicyEventLogsScopeFlagDefault(t *testing.T) {
 	assert.True(t, valid)
 }
 
+// The flag is ignored, but a configuration that sets it must still parse.
+func TestMaxConcurrentReconcilesFlagIsAccepted(t *testing.T) {
+	fs := pflag.NewFlagSet("agent", pflag.ContinueOnError)
+	var cfg ControllerConfig
+	cfg.BindFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--max-concurrent-reconciles=4"}))
+}
+
 func TestValidControllerFlagsPolicyEventLogsScope(t *testing.T) {
 	check := func(scope string) error {
 		cfg := ControllerConfig{ConntrackCacheTableSize: 512 * 1024, PolicyEventLogsScope: scope}

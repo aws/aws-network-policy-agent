@@ -116,7 +116,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 
 		if policiesAvailableInLocalCache {
 			//Derive Ingress and Egress Firewall Rules and Update the relevant eBPF maps
-			ingressRules, egressRules, _ :=
+			ingressRules, egressRules, state, _ :=
 				s.policyReconciler.DeriveFireWallRulesPerPodIdentifier(podIdentifier, in.K8S_POD_NAMESPACE)
 
 			err = s.policyReconciler.GeteBPFClient().UpdateEbpfMaps(podIdentifier, ingressRules, egressRules)
@@ -124,7 +124,7 @@ func (s *server) EnforceNpToPod(ctx context.Context, in *rpc.EnforceNpRequest) (
 				log().Errorf("Network Policy map update(s) failed for podIdentifier: %s, error: %v", podIdentifier, err)
 				return nil, err
 			}
-			podState = ebpf.POLICIES_APPLIED
+			podState = state
 		}
 
 		if clusterPolicyAvailableInLocalCache {

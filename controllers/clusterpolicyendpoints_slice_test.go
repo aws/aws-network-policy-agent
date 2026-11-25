@@ -327,8 +327,7 @@ func TestClusterPolicySlices_Updates(t *testing.T) {
 }
 
 // Node-scoped cleanup: whether a departing pod's identifier keeps its eBPF state depends
-// on what else still claims it, and each combination reaches a different branch of
-// cleanupClusterPolicyPod.
+// on what else still claims it, and each combination programs it differently.
 
 func TestClusterPolicySlices_NodeScopedCleanup(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
@@ -1309,13 +1308,14 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		fx.assertClusterPolicyRulesCleared(stuck)
 		fx.assertClusterPolicyRulesCleared(resident)
 
+		// The delete already took effect while it was in progress, so its completion has
+		// nothing left to program.
 		fx.deleteSlice("cnp-1-aaaaa")
 		fx.reset()
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
-		fx.assertClusterPolicyRulesCleared(stuck)
-		fx.assertClusterPolicyRulesCleared(resident)
-		_, tracked := fx.r.ClusterPolicyEndpointSelectorMap.Load(cpeRequest("cnp-1-aaaaa", "cnp-1"))
-		assert.False(t, tracked, "nothing is tracked for the deleted CPE")
+		assert.Empty(t, fx.bpf.ClusterPolicyIngressByIdentifier, "the completed delete changes nothing")
+		_, tracked := fx.r.clusterNetworkPolicyToLocalPodsMap.Load("cnp-1")
+		assert.False(t, tracked, "nothing is tracked for the deleted CNP")
 	})
 
 	t.Run("a CPE whose deletion is in progress is cleaned up once it is gone", func(t *testing.T) {
@@ -1330,12 +1330,14 @@ func TestClusterPolicySlices_FailureIsolation(t *testing.T) {
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = map[string]error{stuck: writeFailed}
 		require.ErrorIs(t, fx.reconcileDeleted("cnp-1-aaaaa"), writeFailed)
 
+		// resident was cleared by the failing pass; stuck is retried by the next one.
+		fx.assertClusterPolicyRulesCleared(resident)
 		fx.bpf.UpdateClusterPolicyEbpfMapsErrFor = nil
 		fx.deleteSlice("cnp-1-aaaaa")
 		fx.reset()
 		require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
 		fx.assertClusterPolicyRulesCleared(stuck)
-		fx.assertClusterPolicyRulesCleared(resident)
+		assert.NotContains(t, fx.bpf.ClusterPolicyIngressByIdentifier, resident, "a cleanup that succeeded is not repeated")
 	})
 
 	t.Run("a deleted slice's retry repeats only the cleanups that failed", func(t *testing.T) {
@@ -1457,7 +1459,6 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
 	t.Run("a policy re-sliced under new names retains only its current slices", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newCPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{deny("192.168.90.1/32")}
@@ -1481,7 +1482,6 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("the delete event for an already-replaced slice changes nothing", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newCPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{deny("192.168.90.1/32")}
