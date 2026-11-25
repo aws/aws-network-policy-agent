@@ -168,9 +168,9 @@ type PolicyEndpointsReconciler struct {
 
 	// Pod identifiers whose eBPF maps need programming
 	programQueue priorityqueue.PriorityQueue[string]
-	// queuePeer queues an identifier on the ClusterPolicyEndpoint programmer (LinkProgrammers).
-	// Nil when this reconciler runs alone.
-	queuePeer func(podIdentifier string)
+	// peer is the ClusterPolicyEndpoint programmer (LinkProgrammers). Nil when this reconciler
+	// runs alone.
+	peer *programmerPeer
 
 	//BPF Client instance
 	ebpfClient ebpf.BpfClient
@@ -360,7 +360,7 @@ func (r *PolicyEndpointsReconciler) programIdentifier(ctx context.Context, podId
 // programIdentifierMaps reports whether it wrote the identifier's maps and how many of its pods
 // could not attach.
 func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, podIdentifier string) (programmingPass, error) {
-	refs := r.deleteCleanups.without(podIdentifier, r.policyEndpointRefs(podIdentifier))
+	allRefs := r.policyEndpointRefs(podIdentifier)
 	namespace, ok := utils.GetPodNamespaceFromPodIdentifier(podIdentifier)
 	if !ok {
 		// Identifiers come from GetPodIdentifier, so this cannot happen; retrying cannot help.
@@ -368,15 +368,14 @@ func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, p
 		return programmingPass{}, nil
 	}
 
-	parents := lo.Map(refs, func(ref utils.PolicyEndpointRef, _ int) string {
+	before := readDeletionRecords(&r.deleteCleanups, r.peer, podIdentifier)
+	parents := lo.Map(allRefs, func(ref utils.PolicyEndpointRef, _ int) string {
 		return utils.GetNetworkPolicyIdentifier(ref.Parent, namespace)
 	})
 	attached, attachErr := attachProbesForIdentifier(r.ebpfClient, podIdentifier,
 		localPodsOf(&r.networkPolicyToLocalPodsMap, podIdentifier, parents))
-	// Programs this attach created have empty maps for both policy types. Queue the other
-	// programmer before writing, so that it writes its policies even if this pass then fails.
-	if attached.createdContext && r.queuePeer != nil {
-		r.queuePeer(podIdentifier)
+	if attached.createdContext {
+		programsCreated(&r.deleteCleanups, r.peer, podIdentifier, before)
 	}
 
 	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
@@ -390,6 +389,7 @@ func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, p
 		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
+	refs := r.deleteCleanups.without(podIdentifier, allRefs)
 	policyEndpoints, err := r.policyEndpointsOf(ctx, namespace, podIdentifier, refs)
 	if err != nil {
 		return programmingPass{}, errors.Join(attachErr, fmt.Errorf("get policy endpoints for podIdentifier %s: %w", podIdentifier, err))
