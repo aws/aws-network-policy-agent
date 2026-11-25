@@ -412,6 +412,43 @@ func TestClusterPolicySlices_RecreatedSliceRewritesWhatItsEarlierIncarnationSele
 	fx.assertClusterPolicyRulesCleared(api)
 }
 
+// A pass that finds no programs because an attach failed keeps the slice-deletion record for its
+// retry. db's programs are gone and np-2 selects db-1 here; the deletion pass's attach of db-1
+// fails, and the retry, once it attaches, must still leave np-1 out.
+func TestPolicySlices_SliceDeletionRecordSurvivesAFailedAttach(t *testing.T) {
+	np2 := sliceSpec{name: "np-2-aaaaa", parent: "np-2", pods: []podRef{localPod("db-1", "10.1.1.11")}, ingress: []ruleRef{allow(np2aCIDR)}}
+	fx, db := dbFixture(t, np2)
+	fx.detachContext(db)
+	attachFailed := errors.New("attach failed")
+	fx.bpf.AttacheBPFProbesErrFor = map[types.NamespacedName]error{{Name: "db-1", Namespace: fixtureNamespace}: attachFailed}
+	fx.deleteSlice("np-1-aaaaa")
+	require.ErrorIs(t, fx.reconcileDeleted("np-1-aaaaa"), attachFailed)
+
+	fx.bpf.AttacheBPFProbesErrFor = nil
+	require.NoError(t, fx.r.drainProgramming(context.TODO()))
+	assert.Equal(t, []string{np2aCIDR}, fx.ingressCIDRs(db), "the retry still leaves np-1 out")
+}
+
+func TestClusterPolicySlices_SliceDeletionRecordSurvivesAFailedAttach(t *testing.T) {
+	db := identifierOf("db-0")
+	fx := newCPEFixture(t)
+	fx.setSlices(
+		sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny(np1aCIDR)}},
+		sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 1, pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{deny(np1bCIDR)}},
+		sliceSpec{name: "cnp-2-aaaaa", parent: "cnp-2", priority: 1, pods: []podRef{localPod("db-1", "10.1.1.11")}, ingress: []ruleRef{deny(np2aCIDR)}},
+	)
+	fx.reconcileAll()
+	fx.detachContext(db)
+	attachFailed := errors.New("attach failed")
+	fx.bpf.AttacheBPFProbesErrFor = map[types.NamespacedName]error{{Name: "db-1", Namespace: fixtureNamespace}: attachFailed}
+	fx.deleteSlice("cnp-1-aaaaa")
+	require.ErrorIs(t, fx.reconcileDeleted("cnp-1-aaaaa"), attachFailed)
+
+	fx.bpf.AttacheBPFProbesErrFor = nil
+	require.NoError(t, fx.r.drainProgramming(context.TODO()))
+	assert.Equal(t, []string{np2aCIDR}, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[db]), "the retry still leaves cnp-1 out")
+}
+
 // Deleting a policy's last slices leaves nothing to leave out: the policy selects the
 // identifier nowhere, so no record is kept for it.
 func TestPolicySlices_LastSliceDeletionKeepsNoRecord(t *testing.T) {

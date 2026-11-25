@@ -372,9 +372,13 @@ func (r *PolicyEndpointsReconciler) programIdentifierMaps(ctx context.Context, p
 		localPodsOf(&r.networkPolicyToLocalPodsMap, podIdentifier, parents))
 
 	// The identifier's pods left the node, or none could attach yet: there is nothing to program.
+	// A slice-deletion record is kept for the retry when an attach failed, so that the retry's
+	// write still leaves its policy out.
 	if !r.ebpfClient.HasBPFContext(podIdentifier) {
 		log().Debugf("Skipping policy programming for podIdentifier %s: no eBPF context registered", podIdentifier)
-		r.deleteCleanups.forget(podIdentifier)
+		if attachErr == nil {
+			r.deleteCleanups.forget(podIdentifier)
+		}
 		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
