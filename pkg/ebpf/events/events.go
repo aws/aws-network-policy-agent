@@ -22,6 +22,7 @@ import (
 
 	cebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sys/unix"
 
@@ -38,6 +39,11 @@ var (
 	sequenceToken   = ""
 	EKS_CW_PATH     = "/aws/eks/"
 	NON_EKS_CW_PATH = "/aws/"
+
+	// policyEventsLog is set once in ConfigurePolicyEventsLogging. It writes
+	// DENY flow events at info level to DEFAULT_FLOW_LOG_LOCATION, independent
+	// of the agent's --log-level, so denied traffic is always visible.
+	policyEventsLog *zap.Logger
 )
 
 func log() logger.Logger {
@@ -99,6 +105,8 @@ func ConfigurePolicyEventsLogging(enableCloudWatchLogs bool, mapFD int, enableIP
 		log().Errorf("MapFD is invalid %d", mapFD)
 		return fmt.Errorf("Invalid Ringbuffer FD: %d", mapFD)
 	}
+
+	policyEventsLog = logger.NewFlowEventLogger()
 
 	// Consume the ring buffer with cilium/ebpf's pull-model reader.
 	// Duplicate the recovered map FD so cilium/ebpf owns its own descriptor,
@@ -366,7 +374,9 @@ func capturePolicyEvents(ctx context.Context, rd *ringbuf.Reader, ringMap *cebpf
 			tier := getTier(int(tierNum))
 
 			if isDenyVerdict {
-				flowLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
+				// Write DENY events to the dedicated policy events log at info level,
+				// so they always appear regardless of the agent's --log-level setting.
+				policyEventsLog.Info(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
 			} else {
 				flowLog.Debug(formatFlowLine(enableIPv6, srcIP, srcPort, destIP, destPort, protocol, verdict, direction, tier))
 			}

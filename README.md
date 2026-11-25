@@ -63,7 +63,7 @@ Type: Boolean
 
 Default: false
 
-Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent will log policy decision information for individual flows to a file on the local node (`/var/run/aws-routed-eni/network-policy-agent.log`).
+Network Policy Agent provides an option to stream policy decision logs to Cloudwatch. For EKS clusters, the policy logs will be located under `/aws/eks/<cluster-name>/cluster/` and for self-managed K8S clusters, the logs will be placed under `/aws/k8s-cluster/cluster/`. By default, Network Policy Agent writes policy flow events to a dedicated file on the local node (`/var/log/aws-routed-eni/network-policy-agent-flow.log`), separate from the agent diagnostic log (`/var/log/aws-routed-eni/network-policy-agent.log`).
 
 This feature requires to also enable the `enable-policy-event-logs` flag.
 
@@ -112,8 +112,13 @@ Type: String
 Default: debug
 
 Sets the logging verbosity for the Network Policy Agent. Valid options are: debug, info, warn, error.
-DENY flow logs are always logged, regardless of the log level.
-ACCEPT flow logs are logged only at debug level, and only if --enable-policy-event-logs is set to true. With `--policy-event-logs-scope=deny`, ACCEPT flow logs are not emitted at any log level.
+
+`--log-level` applies only to agent diagnostic messages in `network-policy-agent.log`. Policy flow events written to `network-policy-agent-flow.log` are unaffected:
+
+- DENY flow events are always written to `network-policy-agent-flow.log`, regardless of `--log-level`.
+- ACCEPT flow events are written to `network-policy-agent-flow.log` only at `--log-level=debug`, and only if `--enable-policy-event-logs=true`. With `--policy-event-logs-scope=deny`, ACCEPT events are not emitted at any log level.
+
+> **Upgrade note:** Prior to this change, flow events were written to `network-policy-agent.log`. If you tail or aggregate that file for DENY events, update your configuration to watch `network-policy-agent-flow.log` instead.
 
 #### `conntrack-cache-cleanup-period` (from v1.0.7+)
 

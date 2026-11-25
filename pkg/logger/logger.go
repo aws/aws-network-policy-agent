@@ -27,6 +27,7 @@ type Logger interface {
 const (
 	DEFAULT_LOG_LEVEL            = "info"
 	DEFAULT_LOG_LOCATION         = "/var/log/aws-routed-eni/network-policy-agent.log"
+	DEFAULT_FLOW_LOG_LOCATION    = "/var/log/aws-routed-eni/network-policy-agent-flow.log"
 	DEFAULT_LOG_FILE_MAX_SIZE    = 200
 	DEFAULT_LOG_FILE_MAX_BACKUPS = 8
 )
@@ -59,6 +60,21 @@ func GetControllerRuntimeLogger() logr.Logger {
 		LogFileMaxBackups: DEFAULT_LOG_FILE_MAX_BACKUPS,
 	}
 	return zapr.NewLogger(inputLogConfig.newZapLoggerForControllerRuntime())
+}
+
+// NewFlowEventLogger returns a *zap.Logger that always writes at info level to
+// DEFAULT_FLOW_LOG_LOCATION, independent of the agent's --log-level. Caller
+// annotation is disabled (consistent with GetFlowLogger) since flow lines are
+// preformatted strings where the caller field has no diagnostic value.
+// Use for customer-facing policy flow events that must always be visible.
+func NewFlowEventLogger() *zap.Logger {
+	cfg := &Configuration{
+		LogLevel:          "info",
+		LogLocation:       DEFAULT_FLOW_LOG_LOCATION,
+		LogFileMaxSize:    DEFAULT_LOG_FILE_MAX_SIZE,
+		LogFileMaxBackups: DEFAULT_LOG_FILE_MAX_BACKUPS,
+	}
+	return zap.New(cfg.buildZapCore(), zap.WithCaller(false))
 }
 
 // GetFlowLogger returns a plain zap logger that shares the default logger's
