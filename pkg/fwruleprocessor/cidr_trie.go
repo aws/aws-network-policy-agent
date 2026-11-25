@@ -93,6 +93,32 @@ func (t *cidrTrie) insert(cidrStr string) {
 	node.cidrKey = ipNet.String()
 }
 
+// containsIP reports whether any key in the trie contains ip, and how many
+// nodes it visited to find out. It stops at the first containing key, so it
+// visits at most one node per address bit however many keys the trie holds.
+func (t *cidrTrie) containsIP(ip net.IP) (found bool, visited int) {
+	ipBytes, isV6 := normalizeIP(ip)
+	if ipBytes == nil {
+		return false, 0
+	}
+	node := t.rootFor(isV6)
+	maxBits := len(ipBytes) * 8
+	for i := 0; ; i++ {
+		visited++
+		if node.cidrKey != "" {
+			return true, visited
+		}
+		if i == maxBits {
+			return false, visited
+		}
+		bit := (ipBytes[i/8] >> uint(7-(i%8))) & 1
+		if node.children[bit] == nil {
+			return false, visited
+		}
+		node = node.children[bit]
+	}
+}
+
 // findContainingKeys walks the trie from root to leaf along the bits of ip,
 // collecting all CIDR keys whose prefix contains the given address.
 // Returns results from shortest prefix (closest to root) to longest.
