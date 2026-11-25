@@ -186,6 +186,18 @@ func TestProgrammingLatencyTracker(t *testing.T) {
 		assert.Len(t, tracker.pending["stuck@ns"], maxPendingChangesPerIdentifier)
 	})
 
+	t.Run("a change dropped by the bound while a pass runs takes no sample", func(t *testing.T) {
+		tracker, histogram := newTestLatencyTracker()
+		tracker.track(triggeredAt, []string{"a@ns"})
+		landed := tracker.begin("a@ns")
+		for i := 0; i < maxPendingChangesPerIdentifier; i++ {
+			tracker.track(triggeredAt, []string{"a@ns"})
+		}
+		tracker.finish("a@ns", landed, true)
+		assert.Equal(t, uint64(0), histSampleCount(t, histogram), "the first change was dropped")
+		assert.Len(t, tracker.pending["a@ns"], maxPendingChangesPerIdentifier, "the newer changes wait for the next pass")
+	})
+
 	t.Run("negative latency (clock skew) is skipped", func(t *testing.T) {
 		tracker, histogram := newTestLatencyTracker()
 		tracker.track(time.Now().Add(time.Hour), []string{"a@ns"})

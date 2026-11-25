@@ -272,13 +272,17 @@ func (t *programmingLatencyTracker) begin(podIdentifier string) []*pendingChange
 	return slices.Clone(t.pending[podIdentifier])
 }
 
-// finish records that a successful pass for podIdentifier landed the changes begin returned.
+// finish records that a successful pass for podIdentifier landed the changes begin returned. A
+// change the bound dropped while the pass ran is left out: it takes no sample.
 func (t *programmingLatencyTracker) finish(podIdentifier string, landed []*pendingChange, wrote bool) {
 	if len(landed) == 0 {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	landed = slices.DeleteFunc(slices.Clone(landed), func(c *pendingChange) bool {
+		return !slices.Contains(t.pending[podIdentifier], c)
+	})
 	remaining := slices.DeleteFunc(t.pending[podIdentifier], func(c *pendingChange) bool {
 		return slices.Contains(landed, c)
 	})
