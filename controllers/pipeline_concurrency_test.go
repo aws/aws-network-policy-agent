@@ -187,8 +187,10 @@ func stateOf(bpf *ebpf.MockBpfClient, podIdentifier string) stressState {
 	return stressState{ingress: ingress, egress: egress, podState: state}
 }
 
-// The pods are attached up front, as their CNI ADDs would have left them, so programming
-// reaches every identifier only through stage 1's queueing.
+// The even workloads' pods are attached up front, as their CNI ADDs would have left them, so
+// programming reaches them only through stage 1's queueing. The odd workloads' pods are first
+// attached by a programming pass, which stage 1 can run alongside. That interleaving is rare
+// here; TestProgramIdentifier_DeselectionDuringFirstAttachIsRewritten forces it.
 func TestPipeline_ConcurrentProgrammingMatchesSequentialRebuild(t *testing.T) {
 	for seed := int64(1); seed <= stressSeeds; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -240,7 +242,7 @@ func runPipelineStress(t *testing.T, seed int64) {
 		}
 	}
 
-	for w := 0; w < stressWorkloads; w++ {
+	for w := 0; w < stressWorkloads; w += 2 {
 		for _, pod := range stressPods(w)[:2] {
 			_, err := bpf.AttacheBPFProbes(types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace},
 				utils.GetPodIdentifier(pod.Name, pod.Namespace), ebpf.INTERFACE_COUNT_UNKNOWN, true)

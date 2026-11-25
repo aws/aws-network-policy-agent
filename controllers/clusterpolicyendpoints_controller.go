@@ -203,8 +203,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 	log().Infof("ClusterNetworkPolicy %s: %d ClusterPolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		parentCNPName, len(clusterPolicyEndpoints), len(selected), len(localPods), len(stale))
 	priorLocalPods = withIdentifiers(priorLocalPods, recordedLocalIdentifiers(&r.sliceLocalIdentifiers, slice, liveSlices))
-	queued := identifiersToProgram(r.ebpfClient, localPods, priorLocalPods)
-	queued = r.programmingLatency.withPendingMeasurements(queued, priorLocalPods)
+	queued := identifiersToProgram(localPods, priorLocalPods)
 	r.deleteCleanups.record(parentCNPName, queued, sliceDeleted, localPods, selected)
 	recordSliceLocalIdentifiers(&r.sliceLocalIdentifiers, slice, sliceDeleted, liveSlices, localPods)
 	return queued, nil

@@ -440,6 +440,60 @@ func TestProgramIdentifier_RolloutIntervalIsWrittenOnlyByAPassInsideIt(t *testin
 	})
 }
 
+// A pass reads an identifier's refs, then attaches its first pod, which is when the identifier's
+// eBPF context appears. A reconcile that stops selecting the identifier while that attach runs
+// sees no selected pods here and no context yet. It must still queue the identifier, or the pass
+// writes the rules of the slice it read and nothing rewrites them. The slices carry no trigger
+// annotation, as for a policy that predates an agent restart, so no E2E sample holds the
+// identifier either.
+func TestProgramIdentifier_DeselectionDuringFirstAttachIsRewritten(t *testing.T) {
+	db := identifierOf("db-0")
+	selecting := []podRef{localPod("db-0", "10.1.1.10")}
+	deselected := []podRef{localPod("web-0", "10.1.1.20")}
+	// deselectDuringAttach runs reconcileAgain once, while db's first pod is attaching.
+	deselectDuringAttach := func(bpf *ebpf.MockBpfClient, reconcileAgain func()) {
+		done := false
+		bpf.BeforeAttach = func(_ types.NamespacedName, podIdentifier string) {
+			if podIdentifier == db && !done {
+				done = true
+				reconcileAgain()
+			}
+		}
+	}
+
+	t.Run("network policy", func(t *testing.T) {
+		fx := newPEFixture(t)
+		spec := sliceSpec{name: "np-1-aaaaa", parent: "np-1", pods: selecting, ingress: []ruleRef{allow("192.168.90.1/32")}}
+		fx.setSlices(spec)
+		stage1 := func() { require.NoError(t, fx.r.reconcile(context.TODO(), fx.request("np-1-aaaaa", "np-1"))) }
+		stage1()
+		require.False(t, fx.bpf.HasBPFContext(db))
+		deselectDuringAttach(fx.bpf, func() {
+			spec.pods = deselected
+			fx.setSlices(spec)
+			stage1()
+		})
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		fx.assertRulesCleared(db)
+	})
+
+	t.Run("cluster network policy", func(t *testing.T) {
+		fx := newCPEFixture(t)
+		spec := sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: selecting, ingress: []ruleRef{deny("192.168.90.1/32")}}
+		fx.setSlices(spec)
+		stage1 := func() { require.NoError(t, fx.r.reconcile(context.TODO(), cpeRequest("cnp-1-aaaaa", "cnp-1"))) }
+		stage1()
+		require.False(t, fx.bpf.HasBPFContext(db))
+		deselectDuringAttach(fx.bpf, func() {
+			spec.pods = deselected
+			fx.setSlices(spec)
+			stage1()
+		})
+		require.NoError(t, fx.r.drainProgramming(context.TODO()))
+		fx.assertClusterPolicyRulesCleared(db)
+	})
+}
+
 // A live PolicyEndpoint that selects a pod but carries no rules and no isolation still puts the
 // pod in the applied state with an allow-all entry in each direction. Only an identifier no live
 // PolicyEndpoint selects goes to the baseline, which in strict mode is deny.

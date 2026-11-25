@@ -68,6 +68,10 @@ type MockBpfClient struct {
 	attachedIdentifiers          map[string]bool
 	AllIdentifiersHaveBPFContext bool
 
+	// BeforeAttach, if set, runs at the start of every AttacheBPFProbes call, outside the mock's
+	// lock, so a test can change state while a programming pass is attaching.
+	BeforeAttach func(pod types.NamespacedName, podIdentifier string)
+
 	// Pods already deleted on the node. AttacheBPFProbes skips them, as production does;
 	// attaching any other pod registers its identifier's context.
 	DeletedPods map[types.NamespacedName]bool
@@ -146,6 +150,9 @@ func recordRules(dst *map[string][]fwrp.EbpfFirewallRules, podIdentifier string,
 }
 
 func (m *MockBpfClient) AttacheBPFProbes(pod types.NamespacedName, podIdentifier string, numInterfaces int, podConfirmedLive bool) (bool, error) {
+	if m.BeforeAttach != nil {
+		m.BeforeAttach(pod, podIdentifier)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.CallLog = append(m.CallLog, "AttacheBPFProbes")

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/aws/aws-network-policy-agent/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -94,25 +93,19 @@ func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.Priority
 // programmed with the policy's rules. This node's rules for such an identifier change only
 // when something else reprograms it.
 //
-// Only identifiers with programs on this node are queued, plus ones with selected pods here,
-// whose programming pass attaches them.
-func identifiersToProgram(ebpfClient ebpf.BpfClient, localPods, priorLocalPods map[string][]npatypes.Pod) []string {
-	queued := make(map[string]bool, len(localPods)+len(priorLocalPods))
-	var podIdentifiers []string
-	consider := func(podIdentifier string) {
-		if queued[podIdentifier] {
-			return
-		}
-		queued[podIdentifier] = true
-		if len(localPods[podIdentifier]) > 0 || ebpfClient.HasBPFContext(podIdentifier) {
-			podIdentifiers = append(podIdentifiers, podIdentifier)
-		}
-	}
+// Every such identifier is queued, whether or not it has programs on this node: a pass that
+// finds none writes nothing. Leaving one out because it has no programs yet would race a pass
+// whose first attach is creating them, which then writes the rules it read before this
+// reconcile, with no later pass to rewrite them.
+func identifiersToProgram(localPods, priorLocalPods map[string][]npatypes.Pod) []string {
+	podIdentifiers := make([]string, 0, len(localPods)+len(priorLocalPods))
 	for podIdentifier := range localPods {
-		consider(podIdentifier)
+		podIdentifiers = append(podIdentifiers, podIdentifier)
 	}
 	for podIdentifier := range priorLocalPods {
-		consider(podIdentifier)
+		if _, ok := localPods[podIdentifier]; !ok {
+			podIdentifiers = append(podIdentifiers, podIdentifier)
+		}
 	}
 	slices.Sort(podIdentifiers)
 	return podIdentifiers
@@ -315,25 +308,6 @@ func (d *deleteCleanups) without(podIdentifier string, refs []utils.PolicyEndpoi
 		return refs
 	}
 	return lo.Filter(refs, func(ref utils.PolicyEndpointRef, _ int) bool { return ref.Parent != parent.(string) })
-}
-
-// withPendingMeasurements adds to queued the identifiers among candidates that still hold pending
-// measurements. A pass for one with nothing left to program retires them; without that pass, an
-// identifier whose attach was skipped would hold them for good once its policies stop selecting it.
-func (t *programmingLatencyTracker) withPendingMeasurements(queued []string, candidates map[string][]npatypes.Pod) []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	in := make(map[string]bool, len(queued))
-	for _, podIdentifier := range queued {
-		in[podIdentifier] = true
-	}
-	for podIdentifier := range candidates {
-		if !in[podIdentifier] && len(t.pending[podIdentifier]) > 0 {
-			queued = append(queued, podIdentifier)
-		}
-	}
-	slices.Sort(queued)
-	return queued
 }
 
 // withIdentifiers returns priorLocalPods with an entry for each of podIdentifiers it lacks: the map
