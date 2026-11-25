@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-network-policy-agent/pkg/ebpf"
 	npatypes "github.com/aws/aws-network-policy-agent/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
@@ -90,31 +91,35 @@ func setupProgrammer(mgr ctrl.Manager, name string, queue priorityqueue.Priority
 	return err
 }
 
-// identifiersToProgram returns the identifiers a policy's reconcile must queue: the ones it
-// selects pods of on this node, and the ones whose pods here it selected before, so a pod it
-// stopped selecting is reprogrammed. When the policy has no live slices left, it also returns
-// stale, every identifier the policy no longer selects: the policy is gone, and its rules reach
-// identifiers it selected only on other nodes through the shared maps, which nothing else
-// rewrites.
+// identifiersToProgram returns the identifiers a policy's reconcile must queue:
+//   - The ones it selects pods of on this node, and the ones whose pods here it selected before,
+//     so a pod it stopped selecting is reprogrammed. These are queued whether or not they have
+//     programs here: a pass that finds none writes nothing, and leaving one out because it has no
+//     programs yet would race a pass whose first attach is creating them.
+//   - The ones it selects only on other nodes that have programs here, since its rules reach this
+//     node's replicas through the maps they share. A pass that is creating an identifier's
+//     programs while this reconcile runs reads the identifier's policies after its attach.
+//   - Once the policy has no live slices left, every identifier it no longer selects (stale): the
+//     policy is gone.
 //
-// While the policy has live slices, an identifier it selects only on other nodes is not queued,
-// even though the policy's rules reach this node's replicas through the shared maps. Queueing it when the policy stops
-// selecting it would reset a new pod here to the baseline in the interval during a rollout
-// when NPC has dropped the last old replica and not yet listed the new one, a pod that CNI ADD
-// programmed with the policy's rules. This node's rules for such an identifier change only
-// when something else reprograms it.
-//
-// Every such identifier is queued, whether or not it has programs on this node: a pass that
-// finds none writes nothing. Leaving one out because it has no programs yet would race a pass
-// whose first attach is creating them, which then writes the rules it read before this
-// reconcile, with no later pass to rewrite them.
-func identifiersToProgram(localPods, priorLocalPods map[string][]npatypes.Pod, stale []string, noLiveSlices bool) []string {
+// While the policy has live slices, an identifier it stops selecting altogether is queued only
+// if it had pods here. Queueing it otherwise would reset a new pod here to the baseline in the
+// interval during a rollout when NPC has dropped the last old replica and not yet listed the new
+// one, a pod that CNI ADD programmed with the policy's rules. This node's rules for such an
+// identifier change only when something else reprograms it.
+func identifiersToProgram(ebpfClient ebpf.BpfClient, selected map[string]bool, localPods, priorLocalPods map[string][]npatypes.Pod,
+	stale []string, noLiveSlices bool) []string {
 	podIdentifiers := make([]string, 0, len(localPods)+len(priorLocalPods))
 	for podIdentifier := range localPods {
 		podIdentifiers = append(podIdentifiers, podIdentifier)
 	}
 	for podIdentifier := range priorLocalPods {
 		if _, ok := localPods[podIdentifier]; !ok {
+			podIdentifiers = append(podIdentifiers, podIdentifier)
+		}
+	}
+	for podIdentifier := range selected {
+		if _, ok := localPods[podIdentifier]; !ok && ebpfClient.HasBPFContext(podIdentifier) {
 			podIdentifiers = append(podIdentifiers, podIdentifier)
 		}
 	}

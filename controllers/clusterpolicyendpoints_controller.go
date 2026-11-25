@@ -198,7 +198,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 
 	log().Infof("ClusterNetworkPolicy %s: %d ClusterPolicyEndpoint(s) select %d identifier(s), %d with pods on this node, %d no longer selected",
 		parentCNPName, len(clusterPolicyEndpoints), len(selected), len(localPods), len(stale))
-	return identifiersToProgram(localPods, priorLocalPods, stale, len(clusterPolicyEndpoints) == 0), nil
+	return identifiersToProgram(r.ebpfClient, selected, localPods, priorLocalPods, stale, len(clusterPolicyEndpoints) == 0), nil
 }
 
 // selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, and
@@ -265,6 +265,9 @@ func (r *ClusterPolicyEndpointsReconciler) programIdentifierMaps(ctx context.Con
 		return programmingPass{skipped: attached.skipped}, attachErr
 	}
 
+	// Read the identifier's policies again: a reconcile that recorded one while this pass was
+	// creating the identifier's programs found none and did not queue it.
+	refs = r.clusterPolicyEndpointRefs(podIdentifier)
 	clusterPolicyEndpoints, err := r.clusterPolicyEndpointsOf(ctx, refs)
 	if err != nil {
 		return programmingPass{}, errors.Join(attachErr, fmt.Errorf("get cluster policy endpoints for podIdentifier %s: %w", podIdentifier, err))
