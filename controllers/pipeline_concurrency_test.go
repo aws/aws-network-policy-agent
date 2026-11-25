@@ -84,13 +84,6 @@ func (s *stressSlice) object() *policyk8sawsv1.PolicyEndpoint {
 			if !s.members[w][i] {
 				continue
 			}
-			// A policy that selects a workload only on another node leaves the rules this
-			// node holds for it as they were when the policy stops selecting it, so the final
-			// state would depend on the order of events; only list a remote replica together
-			// with a local one of the same workload.
-			if i == 2 && !s.members[w][0] && !s.members[w][1] {
-				continue
-			}
 			pe.Spec.PodSelectorEndpoints = append(pe.Spec.PodSelectorEndpoints, pod)
 		}
 	}
