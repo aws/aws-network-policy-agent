@@ -214,24 +214,27 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterNetworkPolicy(ctx con
 	return queued, nil
 }
 
-// selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, and
-// their selected pods on this node by identifier.
+// selectedPods returns every pod identifier the ClusterPolicyEndpoints select on any node, their
+// selected pods on this node by identifier, and the identifiers each slice selects pods of on
+// this node, with an entry for every slice.
 func (r *ClusterPolicyEndpointsReconciler) selectedPods(clusterPolicyEndpoints []policyk8sawsv1.ClusterPolicyEndpoint) (map[string]bool,
-	map[string][]npatypes.Pod, map[string][]string) {
+	map[string][]npatypes.Pod, map[EndpointRequest][]string) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
-	localBySlice := make(map[string][]string)
+	localBySlice := make(map[EndpointRequest][]string, len(clusterPolicyEndpoints))
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range clusterPolicyEndpoints {
 		cpe := &clusterPolicyEndpoints[i]
+		slice := requestFor(cpe, clusterPolicyEndpointParent)
+		localBySlice[slice] = nil
 		for _, pod := range cpe.Spec.PodSelectorEndpoints {
 			podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 			selected[podIdentifier] = true
 			if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 				localPods[podIdentifier] = append(localPods[podIdentifier], npatypes.Pod{
 					NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
-				if !slices.Contains(localBySlice[cpe.Name], podIdentifier) {
-					localBySlice[cpe.Name] = append(localBySlice[cpe.Name], podIdentifier)
+				if !slices.Contains(localBySlice[slice], podIdentifier) {
+					localBySlice[slice] = append(localBySlice[slice], podIdentifier)
 				}
 			}
 		}

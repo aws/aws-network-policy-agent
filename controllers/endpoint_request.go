@@ -23,11 +23,16 @@ type EndpointRequest struct {
 	Parent   string
 }
 
+// requestFor is the request a watch event for obj enqueues.
+func requestFor[T client.Object](obj T, parentOf func(T) string) EndpointRequest {
+	return EndpointRequest{Endpoint: client.ObjectKeyFromObject(obj), Parent: parentOf(obj)}
+}
+
 // endpointEventHandler enqueues a slice under the parent each event carries. An update that
 // changes the parent, such as a delete and recreate folded together by a relist, enqueues both.
 func endpointEventHandler[T client.Object](parentOf func(T) string) handler.TypedEventHandler[T, EndpointRequest] {
 	enqueue := func(q workqueue.TypedRateLimitingInterface[EndpointRequest], obj T) {
-		q.Add(EndpointRequest{Endpoint: client.ObjectKeyFromObject(obj), Parent: parentOf(obj)})
+		q.Add(requestFor(obj, parentOf))
 	}
 	return handler.TypedFuncs[T, EndpointRequest]{
 		CreateFunc: func(_ context.Context, e event.TypedCreateEvent[T], q workqueue.TypedRateLimitingInterface[EndpointRequest]) {

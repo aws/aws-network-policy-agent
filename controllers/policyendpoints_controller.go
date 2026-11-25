@@ -144,8 +144,9 @@ type PolicyEndpointsReconciler struct {
 	programmingLatency       *programmingLatencyTracker
 	deleteCleanups           deleteCleanups
 	// sliceLocalIdentifiers holds, per live slice (EndpointRequest), the identifiers it selected
-	// pods of on this node at its last reconcile. A slice's deletion reads its own entry, so a
-	// sibling reconciled first, which rewrites the policy's local pods, can't hide what it selected.
+	// pods of on this node as of the last reconcile of its policy. A slice's deletion reads its
+	// own entry, so neither a sibling reconciled first, which rewrites the policy's local pods,
+	// nor a deletion before the slice's own first reconcile can hide what it selected.
 	sliceLocalIdentifiers sync.Map
 
 	// What each NetworkPolicy selects, as of its last reconcile. Only the PolicyEndpoint
@@ -277,16 +278,18 @@ func (r *PolicyEndpointsReconciler) reconcileNetworkPolicy(ctx context.Context, 
 
 // selectedPods returns every pod identifier the PolicyEndpoints select on any node, their
 // selected pods on this node by identifier, and the identifiers each slice selects pods of on
-// this node, by slice name. Host-network pods are skipped: they have no veth to
+// this node, with an entry for every slice. Host-network pods are skipped: they have no veth to
 // attach to.
 func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv1.PolicyEndpoint) (map[string]bool,
-	map[string][]npatypes.Pod, map[string][]string) {
+	map[string][]npatypes.Pod, map[EndpointRequest][]string) {
 	selected := make(map[string]bool)
 	localPods := make(map[string][]npatypes.Pod)
-	localBySlice := make(map[string][]string)
+	localBySlice := make(map[EndpointRequest][]string, len(policyEndpoints))
 	nodeIP := net.ParseIP(r.nodeIP)
 	for i := range policyEndpoints {
 		pe := &policyEndpoints[i]
+		slice := requestFor(pe, policyEndpointParent)
+		localBySlice[slice] = nil
 		ignored := 0
 		var firstIgnored types.NamespacedName
 		for _, pod := range pe.Spec.PodSelectorEndpoints {
@@ -308,8 +311,8 @@ func (r *PolicyEndpointsReconciler) selectedPods(policyEndpoints []policyk8sawsv
 			if nodeIP.Equal(net.ParseIP(string(pod.HostIP))) {
 				localPods[podIdentifier] = append(localPods[podIdentifier], npatypes.Pod{
 					NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
-				if !slices.Contains(localBySlice[pe.Name], podIdentifier) {
-					localBySlice[pe.Name] = append(localBySlice[pe.Name], podIdentifier)
+				if !slices.Contains(localBySlice[slice], podIdentifier) {
+					localBySlice[slice] = append(localBySlice[slice], podIdentifier)
 				}
 			}
 		}

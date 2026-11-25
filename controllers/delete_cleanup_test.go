@@ -228,6 +228,65 @@ func TestClusterPolicySlices_SliceDeletionCleanupSurvivesASiblingReconciledFirst
 	}
 }
 
+// A sibling's reconcile scans the whole policy, so it programs db with the policy's rules for
+// db-0 before np-1-aaaaa, which lists db-0, is ever reconciled. If np-1-aaaaa is then deleted
+// and a sibling reconciles first, the policy no longer records db-0 here, and np-1-aaaaa's
+// deletion has only what the first scan recorded for it to go on.
+func TestPolicySlices_SliceDeletionCleanupCoversASliceNeverReconciled(t *testing.T) {
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			fx := newPEFixture(t)
+			db := identifierOf("db-0")
+			fx.setSlices(np1a, np1b)
+			require.NoError(t, fx.reconcile("np-1-bbbbb"))
+			require.Contains(t, fx.ingressCIDRs(db), np1aCIDR, "the sibling programs the pods of a slice not yet reconciled")
+
+			fx.deleteSlice("np-1-aaaaa")
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("np-1-aaaaa"))
+				require.NoError(t, fx.reconcile("np-1-bbbbb"))
+			}
+			fx.assertRulesCleared(db)
+		})
+	}
+}
+
+func TestClusterPolicySlices_SliceDeletionCleanupCoversASliceNeverReconciled(t *testing.T) {
+	cnp1a := sliceSpec{name: "cnp-1-aaaaa", parent: "cnp-1", priority: 1, pods: []podRef{localPod("db-0", "10.1.1.10")}, ingress: []ruleRef{deny(np1aCIDR)}}
+	cnp1b := sliceSpec{name: "cnp-1-bbbbb", parent: "cnp-1", priority: 1, pods: []podRef{remotePod("db-2", "10.1.2.12")}, ingress: []ruleRef{deny(np1bCIDR)}}
+	for _, siblingFirst := range []bool{false, true} {
+		name := "deletion first"
+		if siblingFirst {
+			name = "sibling first"
+		}
+		t.Run(name, func(t *testing.T) {
+			fx := newCPEFixture(t)
+			db := identifierOf("db-0")
+			fx.setSlices(cnp1a, cnp1b)
+			require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+			require.Contains(t, cidrsOf(fx.bpf.ClusterPolicyIngressByIdentifier[db]), np1aCIDR,
+				"the sibling programs the pods of a slice not yet reconciled")
+
+			fx.deleteSlice("cnp-1-aaaaa")
+			if siblingFirst {
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+			} else {
+				require.NoError(t, fx.reconcileDeleted("cnp-1-aaaaa"))
+				require.NoError(t, fx.reconcile("cnp-1-bbbbb"))
+			}
+			fx.assertClusterPolicyRulesCleared(db)
+		})
+	}
+}
+
 // Deleting a policy's last slices leaves nothing to leave out: the policy selects the
 // identifier nowhere, so no record is kept for it.
 func TestPolicySlices_LastSliceDeletionKeepsNoRecord(t *testing.T) {

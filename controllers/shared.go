@@ -70,15 +70,21 @@ func attachProbesForIdentifier(ebpfClient ebpf.BpfClient, podIdentifier string,
 	return outcome, attachErr
 }
 
-// recordSliceLocalIdentifiers keeps, for a live slice, the identifiers it selects pods of on this
-// node, and forgets a deleted slice's entry once its deletion has been reconciled.
-func recordSliceLocalIdentifiers(records *sync.Map, slice *EndpointRequest, sliceDeleted bool, localBySlice map[string][]string) {
-	if slice == nil {
-		return
+// recordSliceLocalIdentifiers keeps, for every live slice of a policy, the identifiers it selects
+// pods of on this node, and forgets a deleted slice's entry once its deletion has been reconciled.
+// localBySlice has an entry for each live slice. A reconcile records its siblings too: it
+// programs the pods of every slice it scans, including one whose own reconcile has not run yet,
+// and that slice's deletion must still find them.
+func recordSliceLocalIdentifiers(records *sync.Map, slice *EndpointRequest, sliceDeleted bool,
+	localBySlice map[EndpointRequest][]string) {
+	if slice != nil && sliceDeleted {
+		records.Delete(*slice)
 	}
-	if ids := localBySlice[slice.Endpoint.Name]; !sliceDeleted && len(ids) > 0 {
-		records.Store(*slice, ids)
-		return
+	for live, podIdentifiers := range localBySlice {
+		if len(podIdentifiers) > 0 {
+			records.Store(live, podIdentifiers)
+		} else {
+			records.Delete(live)
+		}
 	}
-	records.Delete(*slice)
 }
