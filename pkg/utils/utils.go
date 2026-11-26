@@ -59,6 +59,16 @@ var NamespacedBPFMaps = []string{
 	TC_EGRESS_POD_STATE_MAP,
 }
 
+// NamespacedBPFMapsForDirection returns the maps expected in a loaded BPF
+// program for the given direction. Each program only defines its own
+// direction's maps.
+func NamespacedBPFMapsForDirection(direction string) []string {
+	if direction == "egress" {
+		return []string{TC_EGRESS_MAP, TC_CLUSTER_POLICY_EGRESS_MAP, TC_EGRESS_POD_STATE_MAP}
+	}
+	return []string{TC_INGRESS_MAP, TC_CLUSTER_POLICY_INGRESS_MAP, TC_INGRESS_POD_STATE_MAP}
+}
+
 func log() logger.Logger {
 	return logger.Get()
 }
@@ -250,6 +260,12 @@ func GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier string, direction s
 	}
 	pinPath := BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
 	return pinPath
+}
+
+// GetBPFMapPinPath returns the bpffs pin path for an individual map belonging
+// to a pod load. mapName is a key from NamespacedBPFMaps.
+func GetBPFMapPinPath(podIdentifier, mapName string) string {
+	return BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_" + mapName
 }
 
 func GetPolicyEndpointIdentifier(policyEndpointName, policyNamespace string) string {

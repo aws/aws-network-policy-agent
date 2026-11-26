@@ -40,6 +40,17 @@ import (
 	"unsafe"
 )
 
+// mapsForDirection returns a BpfData with the three maps required by
+// loadBPFProgram for the given direction.
+func mapsForDirection(direction string, progFD int) goelf.BpfData {
+	names := utils.NamespacedBPFMapsForDirection(direction)
+	maps := make(map[string]goebpfmaps.BpfMap, len(names))
+	for i, name := range names {
+		maps[name] = goebpfmaps.BpfMap{MapFD: uint32(100 + i)}
+	}
+	return goelf.BpfData{Program: goebpfprogs.BpfProgram{ProgFD: progFD}, Maps: maps}
+}
+
 func TestBpfClient_IsEBPFProbeAttached(t *testing.T) {
 	ingressProgFD, egressProgFD := 12, 13
 	type want struct {
@@ -136,54 +147,185 @@ func TestBpfClient_IsEBPFProbeAttached_NoCollisionAcrossPods(t *testing.T) {
 }
 
 func TestLoadBPFProgram(t *testing.T) {
-	pinPath := utils.GetBPFPinPathFromPodIdentifier("test-abcd", "ingress")
+	const podID = "test-abcd"
+	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podID, "ingress")
+	egressPinPath := utils.GetBPFPinPathFromPodIdentifier(podID, "egress")
+
+	ingressMaps := map[string]goebpfmaps.BpfMap{
+		utils.TC_INGRESS_MAP:                {MapFD: 100},
+		utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 102},
+		utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 104},
+	}
+	egressMaps := map[string]goebpfmaps.BpfMap{
+		utils.TC_EGRESS_MAP:                {MapFD: 200},
+		utils.TC_CLUSTER_POLICY_EGRESS_MAP: {MapFD: 202},
+		utils.TC_EGRESS_POD_STATE_MAP:      {MapFD: 204},
+	}
+
+	// dropMap returns a copy of maps with one entry removed.
+	dropMap := func(src map[string]goebpfmaps.BpfMap, drop string) map[string]goebpfmaps.BpfMap {
+		m := make(map[string]goebpfmaps.BpfMap, len(src))
+		for k, v := range src {
+			if k != drop {
+				m[k] = v
+			}
+		}
+		return m
+	}
+
+	// allDirectionMaps is both ingress and egress maps combined; used in
+	// "succeeds with all maps" cases to show that extra maps do not cause failures.
+	allDirectionMaps := make(map[string]goebpfmaps.BpfMap, len(ingressMaps)+len(egressMaps))
+	for k, v := range ingressMaps {
+		allDirectionMaps[k] = v
+	}
+	for k, v := range egressMaps {
+		allDirectionMaps[k] = v
+	}
 
 	tests := []struct {
 		name       string
-		loadReturn map[string]goelf.BpfData
+		direction  string
+		pinPath    string
+		maps       map[string]goebpfmaps.BpfMap
+		progFD     int
 		wantErr    bool
 		wantProgFD int
 	}{
+		// --- success cases ---
 		{
-			name: "success with associated maps",
-			loadReturn: map[string]goelf.BpfData{
-				pinPath: {
-					Program: goebpfprogs.BpfProgram{ProgFD: 7},
-					Maps: map[string]goebpfmaps.BpfMap{
-						utils.TC_INGRESS_MAP:           {MapFD: 100},
-						utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
-					},
-				},
-			},
+			name:       "ingress succeeds with all maps present",
+			direction:  "ingress",
+			pinPath:    ingressPinPath,
+			maps:       allDirectionMaps, // both directions present — must not cause failure
+			progFD:     7,
 			wantErr:    false,
 			wantProgFD: 7,
 		},
 		{
-			name: "program loaded but no associated maps",
-			loadReturn: map[string]goelf.BpfData{
-				pinPath: {
-					Program: goebpfprogs.BpfProgram{ProgFD: 7},
-					Maps:    map[string]goebpfmaps.BpfMap{},
-				},
-			},
+			name:       "ingress succeeds without egress maps present",
+			direction:  "ingress",
+			pinPath:    ingressPinPath,
+			maps:       ingressMaps, // only ingress maps — must not cause failure
+			progFD:     7,
+			wantErr:    false,
+			wantProgFD: 7,
+		},
+		{
+			name:       "egress succeeds with all maps present",
+			direction:  "egress",
+			pinPath:    egressPinPath,
+			maps:       allDirectionMaps, // both directions present — must not cause failure
+			progFD:     7,
+			wantErr:    false,
+			wantProgFD: 7,
+		},
+		{
+			name:       "egress succeeds without ingress maps present",
+			direction:  "egress",
+			pinPath:    egressPinPath,
+			maps:       egressMaps, // only egress maps — must not cause failure
+			progFD:     7,
+			wantErr:    false,
+			wantProgFD: 7,
+		},
+		// --- ingress missing-map cases ---
+		{
+			name:      "ingress missing ingress_map",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps:      dropMap(ingressMaps, utils.TC_INGRESS_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		{
+			name:      "ingress missing cp_ingress_map",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps:      dropMap(ingressMaps, utils.TC_CLUSTER_POLICY_INGRESS_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		{
+			name:      "ingress missing ingress_pod_state_map",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps:      dropMap(ingressMaps, utils.TC_INGRESS_POD_STATE_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		// --- egress missing-map cases ---
+		{
+			name:      "egress missing egress_map",
+			direction: "egress",
+			pinPath:   egressPinPath,
+			maps:      dropMap(egressMaps, utils.TC_EGRESS_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		{
+			name:      "egress missing cp_egress_map",
+			direction: "egress",
+			pinPath:   egressPinPath,
+			maps:      dropMap(egressMaps, utils.TC_CLUSTER_POLICY_EGRESS_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		{
+			name:      "egress missing egress_pod_state_map",
+			direction: "egress",
+			pinPath:   egressPinPath,
+			maps:      dropMap(egressMaps, utils.TC_EGRESS_POD_STATE_MAP),
+			progFD:    7,
+			wantErr:   true,
+		},
+		// --- zero-FD map entry (key present but SDK set MapFD to 0) ---
+		{
+			name:      "ingress map key present with zero FD",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps: func() map[string]goebpfmaps.BpfMap {
+				m := make(map[string]goebpfmaps.BpfMap, len(ingressMaps))
+				for k, v := range ingressMaps {
+					m[k] = v
+				}
+				m[utils.TC_INGRESS_MAP] = goebpfmaps.BpfMap{MapFD: 0}
+				return m
+			}(),
+			progFD:  7,
 			wantErr: true,
 		},
 		{
-			name: "program loaded with invalid FD",
-			loadReturn: map[string]goelf.BpfData{
-				pinPath: {
-					Program: goebpfprogs.BpfProgram{ProgFD: 0},
-					Maps: map[string]goebpfmaps.BpfMap{
-						utils.TC_INGRESS_MAP: {MapFD: 100},
-					},
-				},
-			},
+			name:      "egress map key present with zero FD",
+			direction: "egress",
+			pinPath:   egressPinPath,
+			maps: func() map[string]goebpfmaps.BpfMap {
+				m := make(map[string]goebpfmaps.BpfMap, len(egressMaps))
+				for k, v := range egressMaps {
+					m[k] = v
+				}
+				m[utils.TC_EGRESS_MAP] = goebpfmaps.BpfMap{MapFD: 0}
+				return m
+			}(),
+			progFD:  7,
 			wantErr: true,
 		},
+		// --- pre-existing guards ---
 		{
-			name:       "no program data at pinPath",
-			loadReturn: map[string]goelf.BpfData{},
-			wantErr:    true,
+			name:      "program loaded but no associated maps",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps:      map[string]goebpfmaps.BpfMap{},
+			progFD:    7,
+			wantErr:   true,
+		},
+		{
+			name:      "program loaded with invalid FD",
+			direction: "ingress",
+			pinPath:   ingressPinPath,
+			maps:      ingressMaps,
+			progFD:    0,
+			wantErr:   true,
 		},
 	}
 
@@ -192,16 +334,22 @@ func TestLoadBPFProgram(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			recordBPFFS(t) // don't close the fake FDs below
+			recordBPFFS(t)
 			mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-			testBpfClient := &bpfClient{
-				bpfSDKClient: mockBpfClient,
+			testBpfClient := &bpfClient{bpfSDKClient: mockBpfClient}
+
+			loadReturn := map[string]goelf.BpfData{
+				tt.pinPath: {
+					Program: goebpfprogs.BpfProgram{ProgFD: tt.progFD},
+					Maps:    tt.maps,
+				},
 			}
 
-			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
-				tt.loadReturn, map[string]goebpfmaps.BpfMap{}, nil).Times(1)
+			mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), podID).Return(
+				loadReturn, map[string]goebpfmaps.BpfMap{}, nil,
+			).Times(1)
 
-			_, gotProgFD, gotErr := testBpfClient.loadBPFProgram("handle_ingress", "ingress", "test-abcd")
+			_, gotProgFD, gotErr := testBpfClient.loadBPFProgram("handle_"+tt.direction, tt.direction, podID)
 			if tt.wantErr {
 				assert.Error(t, gotErr)
 			} else {
@@ -210,6 +358,59 @@ func TestLoadBPFProgram(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadBPFProgram_RetryAfterPartialLoad verifies that a second load for the
+// same pod identifier succeeds after the first load returned a partial map set.
+// closeLoadedObjects must unpin the failed load's objects so they do not leak
+// or get recovered into a live context on restart.
+func TestLoadBPFProgram_RetryAfterPartialLoad(t *testing.T) {
+	const podID = "retry-pod"
+	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podID, "ingress")
+
+	partialMaps := map[string]goebpfmaps.BpfMap{
+		utils.TC_INGRESS_MAP:                {MapFD: 100},
+		utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 102},
+		// TC_INGRESS_POD_STATE_MAP absent — triggers the missing-map error
+	}
+	fullMaps := map[string]goebpfmaps.BpfMap{
+		utils.TC_INGRESS_MAP:                {MapFD: 110},
+		utils.TC_CLUSTER_POLICY_INGRESS_MAP: {MapFD: 112},
+		utils.TC_INGRESS_POD_STATE_MAP:      {MapFD: 114},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	bpffs := recordBPFFS(t)
+	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	testBpfClient := &bpfClient{bpfSDKClient: mockBpfClient}
+
+	gomock.InOrder(
+		// First call: partial map set — loadBPFProgram must clean up and return error.
+		mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), podID).Return(
+			map[string]goelf.BpfData{ingressPinPath: {Program: goebpfprogs.BpfProgram{ProgFD: 7}, Maps: partialMaps}},
+			map[string]goebpfmaps.BpfMap{}, nil,
+		),
+		// Second call: complete map set — must succeed.
+		mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), podID).Return(
+			map[string]goelf.BpfData{ingressPinPath: {Program: goebpfprogs.BpfProgram{ProgFD: 9}, Maps: fullMaps}},
+			map[string]goebpfmaps.BpfMap{}, nil,
+		),
+	)
+
+	// First load: expect error.
+	_, _, err := testBpfClient.loadBPFProgram("handle_ingress", "ingress", podID)
+	assert.Error(t, err, "first load with partial maps must fail")
+
+	// The failed load must have unpinned the program it created.
+	assert.Contains(t, bpffs.unpinned, ingressPinPath,
+		"closeLoadedObjects must unpin the program pin after a partial-map failure")
+
+	// Second load: must succeed on the same pod identifier.
+	_, gotFD, err := testBpfClient.loadBPFProgram("handle_ingress", "ingress", podID)
+	assert.NoError(t, err, "second load after cleanup must succeed")
+	assert.Equal(t, 9, gotFD)
 }
 
 func TestBpfClient_UpdateEbpfMaps(t *testing.T) {
@@ -877,31 +1078,19 @@ func TestBpfClient_AttacheBPFProbes_MultipleInterfacesFlow(t *testing.T) {
 	mockTCClient.EXPECT().TCEgressReplace("mockedveth1", gomock.Any(), gomock.Any()).Times(1)
 
 	mockBpfClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
+	ingressMaps := mapsForDirection("ingress", 10)
+	ingressMaps.Maps[utils.TC_INGRESS_MAP] = goebpfmaps.BpfMap{MapFD: 100}
+	ingressMaps.Maps[utils.TC_INGRESS_POD_STATE_MAP] = goebpfmaps.BpfMap{MapFD: 101}
 	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
-		map[string]goelf.BpfData{
-			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_ingress": {
-				Program: goebpfprogs.BpfProgram{ProgFD: 10},
-				Maps: map[string]goebpfmaps.BpfMap{
-					utils.TC_INGRESS_MAP:           {MapFD: 100},
-					utils.TC_INGRESS_POD_STATE_MAP: {MapFD: 101},
-				},
-			},
-		},
-		map[string]goebpfmaps.BpfMap{},
-		nil,
+		map[string]goelf.BpfData{"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_ingress": ingressMaps},
+		map[string]goebpfmaps.BpfMap{}, nil,
 	).Times(1)
+	egressMaps := mapsForDirection("egress", 11)
+	egressMaps.Maps[utils.TC_EGRESS_MAP] = goebpfmaps.BpfMap{MapFD: 110}
+	egressMaps.Maps[utils.TC_EGRESS_POD_STATE_MAP] = goebpfmaps.BpfMap{MapFD: 111}
 	mockBpfClient.EXPECT().LoadBpfFile(gomock.Any(), gomock.Any()).Return(
-		map[string]goelf.BpfData{
-			"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_egress": {
-				Program: goebpfprogs.BpfProgram{ProgFD: 11},
-				Maps: map[string]goebpfmaps.BpfMap{
-					utils.TC_EGRESS_MAP:           {MapFD: 110},
-					utils.TC_EGRESS_POD_STATE_MAP: {MapFD: 111},
-				},
-			},
-		},
-		map[string]goebpfmaps.BpfMap{},
-		nil,
+		map[string]goelf.BpfData{"/sys/fs/bpf/globals/aws/programs/multi-nic-pod-default_handle_egress": egressMaps},
+		map[string]goebpfmaps.BpfMap{}, nil,
 	).Times(1)
 
 	testBpfClient := &bpfClient{
@@ -1441,16 +1630,10 @@ func TestBpfClient_AttacheBPFProbes_ReportsFreshLoadAfterLastPodDeleted(t *testi
 
 	ingressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "ingress")
 	egressPinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
-	loaded := func(pinPath string, progFD int) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{pinPath: {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
-		}}
-	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	gomock.InOrder(
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded(ingressPinPath, 7), nil, nil),
-		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(loaded(egressPinPath, 9), nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(map[string]goelf.BpfData{ingressPinPath: mapsForDirection("ingress", 7)}, nil, nil),
+		mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(map[string]goelf.BpfData{egressPinPath: mapsForDirection("egress", 9)}, nil, nil),
 	)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 	mockTCClient.EXPECT().TCEgressReplace(gomock.Any(), 7, gomock.Any()).Return(nil)
@@ -1528,15 +1711,14 @@ func TestBpfClient_ReAttachEbpfProbes_ReleasesPodIdentifierLocks(t *testing.T) {
 
 	notAMap := disposableFD(t)
 	defer syscall.Close(notAMap)
-	loaded := func(pinPath string, progFD int, podStateMap string) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{pinPath: {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{podStateMap: {MapFD: uint32(notAMap)}},
-		}}
+	loaded := func(direction, pinPath string, progFD int, podStateMap string) map[string]goelf.BpfData {
+		d := mapsForDirection(direction, progFD)
+		d.Maps[podStateMap] = goebpfmaps.BpfMap{MapFD: uint32(notAMap)}
+		return map[string]goelf.BpfData{pinPath: d}
 	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
-	mockSDKClient.EXPECT().LoadBpfFile(client.ingressBinary, podIdentifier).Return(loaded(ingressPinPath, 7, utils.TC_INGRESS_POD_STATE_MAP), nil, nil)
-	mockSDKClient.EXPECT().LoadBpfFile(client.egressBinary, podIdentifier).Return(loaded(egressPinPath, 9, utils.TC_EGRESS_POD_STATE_MAP), nil, nil)
+	mockSDKClient.EXPECT().LoadBpfFile(client.ingressBinary, podIdentifier).Return(loaded("ingress", ingressPinPath, 7, utils.TC_INGRESS_POD_STATE_MAP), nil, nil)
+	mockSDKClient.EXPECT().LoadBpfFile(client.egressBinary, podIdentifier).Return(loaded("egress", egressPinPath, 9, utils.TC_EGRESS_POD_STATE_MAP), nil, nil)
 	mockTCClient := mock_tc.NewMockBpfTc(ctrl)
 	mockTCClient.EXPECT().TCEgressReplace("eni1", 7, gomock.Any()).Return(nil)
 	mockTCClient.EXPECT().TCIngressReplace("eni1", 9, gomock.Any()).Return(nil)
@@ -1578,10 +1760,7 @@ func TestBpfClient_AttacheBPFProbes_ConfirmedLiveAttachSurvivesConcurrentDelete(
 	podKey := utils.GetPodNamespacedName(pod.Name, pod.Namespace)
 	podIdentifier := utils.GetPodIdentifier(pod.Name, pod.Namespace)
 	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
-		}}
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): mapsForDirection(direction, progFD)}
 	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	gomock.InOrder(
@@ -1628,10 +1807,7 @@ func TestBpfClient_AttacheBPFProbes_OnlyTheLoadingAttachIsFirstPod(t *testing.T)
 	defer ctrl.Finish()
 	podIdentifier := utils.GetPodIdentifier("app-b", "ns")
 	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
-		}}
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): mapsForDirection(direction, progFD)}
 	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	gomock.InOrder(
@@ -1672,10 +1848,7 @@ func TestBpfClient_AttacheBPFProbes_FirstPodDecidedAfterConcurrentDelete(t *test
 	seedLastPodOfIdentifier(t, client, podIdentifier, utils.GetPodNamespacedName(oldPod.Name, oldPod.Namespace), 100, 101)
 
 	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
-		}}
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): mapsForDirection(direction, progFD)}
 	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	gomock.InOrder(
@@ -1720,10 +1893,7 @@ func TestBpfClient_AttacheBPFProbes_ConcurrentSiblingsLoadProgramsOnce(t *testin
 	defer ctrl.Finish()
 	podIdentifier := utils.GetPodIdentifier("app-b", "ns")
 	loaded := func(direction string, progFD int) map[string]goelf.BpfData {
-		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
-			Program: goebpfprogs.BpfProgram{ProgFD: progFD},
-			Maps:    map[string]goebpfmaps.BpfMap{"m": {MapID: uint32(progFD)}},
-		}}
+		return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): mapsForDirection(direction, progFD)}
 	}
 	mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 	gomock.InOrder(
@@ -1989,13 +2159,11 @@ func recordBPFFS(t *testing.T) *bpffsRecorder {
 
 // unloadPins is in the order deleteBPFProgramAndMaps unpins.
 func unloadPins(podIdentifier, direction string) []string {
-	mapPinPath, clusterPolicyMapPinPath := utils.GetBPFMapPinPathFromPodIdentifier(podIdentifier, direction)
-	return []string{
-		utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction),
-		mapPinPath,
-		utils.GetPodStateBPFMapPinPathFromPodIdentifier(podIdentifier, direction),
-		clusterPolicyMapPinPath,
+	pins := []string{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction)}
+	for _, name := range utils.NamespacedBPFMapsForDirection(direction) {
+		pins = append(pins, utils.GetBPFMapPinPath(podIdentifier, name))
 	}
+	return pins
 }
 
 func concat(lists ...[]string) []string {
@@ -2021,12 +2189,20 @@ func loadedProgram(t *testing.T, podIdentifier, direction string) (map[string]go
 	if direction == "egress" {
 		mapName, podStateMapName, clusterPolicyMapName = utils.TC_EGRESS_MAP, utils.TC_EGRESS_POD_STATE_MAP, utils.TC_CLUSTER_POLICY_EGRESS_MAP
 	}
+	// Include all maps required by loadBPFProgram; only the direction-specific ones have meaningful FDs.
+	otherMapName, otherPodStateMapName, otherClusterPolicyMapName := utils.TC_EGRESS_MAP, utils.TC_EGRESS_POD_STATE_MAP, utils.TC_CLUSTER_POLICY_EGRESS_MAP
+	if direction == "egress" {
+		otherMapName, otherPodStateMapName, otherClusterPolicyMapName = utils.TC_INGRESS_MAP, utils.TC_INGRESS_POD_STATE_MAP, utils.TC_CLUSTER_POLICY_INGRESS_MAP
+	}
 	return map[string]goelf.BpfData{utils.GetBPFPinPathFromPodIdentifier(podIdentifier, direction): {
 		Program: goebpfprogs.BpfProgram{ProgFD: progFD},
 		Maps: map[string]goebpfmaps.BpfMap{
-			mapName:              {MapID: uint32(progFD), MapFD: testMapFD},
-			podStateMapName:      {MapFD: testPodStateMapFD},
-			clusterPolicyMapName: {MapFD: testClusterPolicyMapFD},
+			mapName:                   {MapID: uint32(progFD), MapFD: testMapFD},
+			podStateMapName:           {MapFD: testPodStateMapFD},
+			clusterPolicyMapName:      {MapFD: testClusterPolicyMapFD},
+			otherMapName:              {},
+			otherPodStateMapName:      {},
+			otherClusterPolicyMapName: {},
 		},
 	}}, progFD
 }
@@ -2124,7 +2300,7 @@ func TestBpfClient_AttacheBPFProbes_EgressAttachFailureUnloadsBoth(t *testing.T)
 	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, false)
 	assert.ErrorContains(t, err, "Link not found")
 	assert.False(t, client.HasBPFContext(podIdentifier))
-	assert.Equal(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
+	assert.ElementsMatch(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
 	assertUnpinnedMapFDs(t, bpffs, podIdentifier, "ingress")
 	assertUnpinnedMapFDs(t, bpffs, podIdentifier, "egress")
 	assertNotRegistered(t, client, pod)
@@ -2154,7 +2330,7 @@ func TestBpfClient_AttacheBPFProbes_IngressAttachFailureUnloadsBoth(t *testing.T
 	_, err := client.AttacheBPFProbes(pod, podIdentifier, INTERFACE_COUNT_DEFAULT, false)
 	assert.ErrorContains(t, err, "Link not found")
 	assert.False(t, client.HasBPFContext(podIdentifier))
-	assert.Equal(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
+	assert.ElementsMatch(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
 	assertNotRegistered(t, client, pod)
 }
 
@@ -2556,36 +2732,92 @@ func TestBpfClient_ReAttachEbpfProbes_FailedAttachUnloads(t *testing.T) {
 	}
 }
 
-// A failed load closes the FDs it returned but unpins nothing: the identifier's
-// pin paths may still hold the programs a running pod uses.
-// Only unpins routed through unpinProgram and unpinMap are recorded.
-func TestBpfClient_loadBPFProgram_FailureKeepsPins(t *testing.T) {
+// A failed load unpins and closes the objects it created so that a retry for
+// the same pod identifier starts from a clean slate.
+func TestBpfClient_loadBPFProgram_FailureUnpins(t *testing.T) {
 	podIdentifier := "test-abcd"
 	pinPath := utils.GetBPFPinPathFromPodIdentifier(podIdentifier, "egress")
-	loadedMaps := map[string]goebpfmaps.BpfMap{"egress_map": {MapFD: 21}, "egress_pod_state_map": {MapFD: 22}}
+	mapPinPrefix := utils.BPF_MAPS_PIN_PATH_DIRECTORY + podIdentifier + "_"
+	// loadedMaps returned by the SDK on a successful-but-partial call.
+	loadedMaps := map[string]goebpfmaps.BpfMap{
+		"egress_map":           {MapFD: 21},
+		"egress_pod_state_map": {MapFD: 22},
+	}
 	tests := map[string]struct {
-		loadReturn map[string]goelf.BpfData
-		loadMaps   map[string]goebpfmaps.BpfMap
-		loadErr    error
-		wantClosed []int
+		loadReturn   map[string]goelf.BpfData
+		loadMaps     map[string]goebpfmaps.BpfMap
+		loadErr      error
+		wantUnpinned []string
+		wantClosed   []int // FDs closed only when unpin itself fails
 	}{
-		"load error":         {loadErr: errors.New("failed to load progs")},
-		"no program data":    {loadReturn: map[string]goelf.BpfData{}, loadMaps: loadedMaps, wantClosed: []int{21, 22}},
-		"invalid program FD": {loadReturn: map[string]goelf.BpfData{pinPath: {Maps: map[string]goebpfmaps.BpfMap{"m": {}}}}, loadMaps: loadedMaps, wantClosed: []int{21, 22}},
-		"no maps":            {loadReturn: map[string]goelf.BpfData{pinPath: {Program: goebpfprogs.BpfProgram{ProgFD: 7}}}, loadMaps: loadedMaps, wantClosed: []int{7, 21, 22}},
+		// SDK-level error: closeLoadedObjects is not called, nothing to unpin.
+		"load error": {loadErr: errors.New("failed to load progs")},
+		// No program data at pin path: only the maps in loadedMaps are unpinned.
+		"no program data": {
+			loadReturn:   map[string]goelf.BpfData{},
+			loadMaps:     loadedMaps,
+			wantUnpinned: []string{mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+		},
+		// Invalid program FD (0): program is skipped, maps in loadedMaps are unpinned.
+		"invalid program FD": {
+			loadReturn:   map[string]goelf.BpfData{pinPath: {Maps: map[string]goebpfmaps.BpfMap{"m": {}}}},
+			loadMaps:     loadedMaps,
+			wantUnpinned: []string{mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+		},
+		// No maps in BpfData: program pin is removed, maps in loadedMaps are unpinned.
+		"no maps": {
+			loadReturn:   map[string]goelf.BpfData{pinPath: {Program: goebpfprogs.BpfProgram{ProgFD: 7}}},
+			loadMaps:     loadedMaps,
+			wantUnpinned: []string{pinPath, mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+		},
+		// Missing-map failure with non-empty loadedMaps: the new per-map check
+		// triggers closeLoadedObjects with the maps the SDK placed in loadedMaps.
+		"missing map failure with loaded maps": {
+			loadReturn: map[string]goelf.BpfData{pinPath: {
+				Program: goebpfprogs.BpfProgram{ProgFD: 7},
+				Maps: map[string]goebpfmaps.BpfMap{
+					"egress_map":    {MapFD: 31},
+					"cp_egress_map": {MapFD: 32},
+					// egress_pod_state_map absent — triggers missing-map error
+				},
+			}},
+			loadMaps:     loadedMaps, // SDK also populated loadedMaps
+			wantUnpinned: []string{pinPath, mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+		},
+		// SDK zeroes ProgFD/MapFD before returning an error (unlink succeeded, close
+		// failed). closeLoadedObjects must use the captured FD, not the now-zeroed
+		// struct field, so closeFD receives the original value and not 0.
+		"prog unpin zeroes FD then fails close": {
+			loadReturn:   map[string]goelf.BpfData{pinPath: {Program: goebpfprogs.BpfProgram{ProgFD: 7}}},
+			loadMaps:     loadedMaps,
+			wantUnpinned: []string{pinPath, mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+			wantClosed:   []int{7}, // must be 7, not 0
+		},
+		"map unpin zeroes FD then fails close": {
+			loadReturn:   map[string]goelf.BpfData{},
+			loadMaps:     loadedMaps,
+			wantUnpinned: []string{mapPinPrefix + "egress_map", mapPinPrefix + "egress_pod_state_map"},
+			wantClosed:   []int{21}, // must be 21 (egress_map's FD), not 0
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			bpffs := recordBPFFS(t)
+			switch name {
+			case "prog unpin zeroes FD then fails close":
+				bpffs.closeErrPath = pinPath
+			case "map unpin zeroes FD then fails close":
+				bpffs.closeErrPath = mapPinPrefix + "egress_map"
+			}
 			mockSDKClient := mock_bpfclient.NewMockBpfSDKClient(ctrl)
 			mockSDKClient.EXPECT().LoadBpfFile(gomock.Any(), podIdentifier).Return(tt.loadReturn, tt.loadMaps, tt.loadErr)
 			client := &bpfClient{bpfSDKClient: mockSDKClient}
 
 			_, _, err := client.loadBPFProgram("egress.bpf.o", "egress", podIdentifier)
 			assert.Error(t, err)
-			assert.Empty(t, bpffs.unpinned, "the identifier's pins may belong to a live program")
+			assert.ElementsMatch(t, tt.wantUnpinned, bpffs.unpinned)
 			assert.ElementsMatch(t, tt.wantClosed, bpffs.closed)
 		})
 	}
@@ -2621,7 +2853,7 @@ func TestBpfClient_AttacheBPFProbes_SecondInterfaceAttachFailureUnloads(t *testi
 	_, err := client.AttacheBPFProbes(pod, podIdentifier, 2, true)
 	assert.ErrorContains(t, err, "Link not found")
 	assert.False(t, client.HasBPFContext(podIdentifier))
-	assert.Equal(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
+	assert.ElementsMatch(t, concat(unloadPins(podIdentifier, "ingress"), unloadPins(podIdentifier, "egress")), bpffs.unpinned)
 	assertNotRegistered(t, client, pod)
 }
 
