@@ -394,7 +394,7 @@ func (f *FirewallRuleProcessor) ComputeClusterPolicyMapEntriesFromEndpointRules(
 
 		// If this current rule doesn't have any port/protocol, the rule is not specific to any port/protocol
 		if len(rule.L4Info) == 0 {
-			log().Info("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
+			log().Debug("cluster policy endpoint rule processsing: No rule for port so adding catch all ports")
 			cidrL4Rules[cidr] = append(cidrL4Rules[cidr], utils.L4Rule{
 				Action:   rule.Action,
 				Priority: rule.Priority,
