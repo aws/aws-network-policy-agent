@@ -371,6 +371,16 @@ int handle_ingress(struct __sk_buff *skb)
 			return BPF_OK;
 		}
 
+		// The L4 pointers above are at a fixed 20-byte offset, which is only
+		// where the L4 header is when the IP header carries no options. With
+		// options (ihl > 5) that offset is still inside the IP header, so the
+		// values read there are not this packet's ports. Reject instead of
+		// parsing at a variable offset, which the verifier dislikes: pod
+		// traffic does not use IPv4 options.
+		if (ip->ihl != HEADER_LEN_WORDS(sizeof(struct iphdr))) {
+			return BPF_DROP;
+		}
+
 		switch (ip->protocol) {
 			case IPPROTO_TCP:
 				if (data + sizeof(*ip) + sizeof(*l4_tcp_hdr) > data_end) {
@@ -393,6 +403,18 @@ int handle_ingress(struct __sk_buff *skb)
 				l4_src_port = (((((unsigned short)(l4_sctp_hdr->source) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->source) & 0xFF00) >> 8));
 				l4_dst_port = (((((unsigned short)(l4_sctp_hdr->dest) & 0xFF)) << 8) | (((unsigned short)(l4_sctp_hdr->dest) & 0xFF00) >> 8));
 				break;
+		}
+
+		// Only the first fragment of a datagram carries the L4 header, so for a
+		// fragment with a non-zero offset the bytes the switch just read are
+		// payload, not ports. Discard what they produced. Ports of 0 match only
+		// a rule that applies to any port, so the fragment is still delivered
+		// wherever policy allows the peer on any port, as it is today.
+		// Dropping it instead would lose the whole datagram, since the receiver
+		// cannot reassemble without it.
+		if (bpf_ntohs(ip->frag_off) & IPV4_FRAG_OFFSET_MASK) {
+			l4_src_port = 0;
+			l4_dst_port = 0;
 		}
 
 		trie_key.prefix_len = 32;
