@@ -203,6 +203,7 @@ func (s *server) DeletePodNp(ctx context.Context, in *rpc.DeleteNpRequest) (*rpc
 		log().Errorf("Failed to delete BPF probes for pod: %s namespace: %s, error: %v", in.K8S_POD_NAME, in.K8S_POD_NAMESPACE, err)
 		return &rpc.DeleteNpReply{Success: false}, err
 	}
+	s.policyReconciler.GeteBPFClient().DeregisterPodIP(pod)
 
 	resp := rpc.DeleteNpReply{
 		Success: true,

@@ -182,6 +182,10 @@ type BpfClient interface {
 	GetNetworkPolicyMode() string
 	CreatePodStateEbpfEntryIfNotExists(podIdentifier string, key int, state int) error
 	HasBPFContext(podIdentifier string) bool
+	// RegisterPodIP records a pod's primary IP for drop-metric attribution.
+	RegisterPodIP(ip string, pod types.NamespacedName)
+	// DeregisterPodIP removes a pod's primary IP from the drop-metric registry.
+	DeregisterPodIP(pod types.NamespacedName)
 }
 
 type BPFContext struct {
@@ -207,7 +211,7 @@ func policyEventDatapathScope(denyOnly, acceptConsumed bool) (uint32, string) {
 
 func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
 	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, networkPolicyMode string, isMultiNICEnabled bool, logLevel string,
-	enableTCPResetOnDeny bool, policyEventsDenyOnly bool) (*bpfClient, error) {
+	enableTCPResetOnDeny bool, policyEventsDenyOnly bool, enablePodDropLabels bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
 
 	ebpfClient := &bpfClient{
@@ -226,6 +230,7 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		clusterPolicyIngressInMemoryMap: new(sync.Map),
 		clusterPolicyEgressInMemoryMap:  new(sync.Map),
 		deletedPods:                     new(sync.Map),
+		podIPs:                          newPodIPRegistry(),
 	}
 	ingressBinary, egressBinary, eventsBinary,
 		cliBinary, hostMask := TC_INGRESS_BINARY, TC_EGRESS_BINARY, EVENTS_BINARY, EKS_CLI_BINARY, IPv4_HOST_MASK
@@ -409,7 +414,11 @@ func NewBpfClient(ctx context.Context, nodeIP string, enablePolicyEventLogs, ena
 		// scrape time on the existing controller-runtime registry; no new
 		// listener.
 		registerRingbufDropMetrics(dropCountMap)
-		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, policyEventsDenyOnly)
+		var podResolver events.PodResolver
+		if enablePodDropLabels {
+			podResolver = ebpfClient
+		}
+		err = events.ConfigurePolicyEventsLogging(enableCloudWatchLogs, eventBufferFD, enableIPv6, policyEventsDenyOnly, podResolver)
 		if err != nil {
 			log().Errorf("unable to initialize event buffer for Policy event exiting..error: %v", err)
 			sdkAPIErr.WithLabelValues("ConfigurePolicyEventsLogging").Inc()
@@ -507,6 +516,8 @@ type bpfClient struct {
 	clusterPolicyEgressInMemoryMap *sync.Map
 	// This is in-memory map to track recently deleted pods (key: podNamespacedName, value: time added to map)
 	deletedPods *sync.Map
+	// podIPs is the bidirectional pod-IP registry used for drop-metric attribution.
+	podIPs *podIPRegistry
 }
 
 // resolveGlobalMap prefers the map from a fresh events-binary load, else the
@@ -1913,6 +1924,26 @@ func (l *bpfClient) startDeletedPodsCleanupRoutine(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// RegisterPodIP records pod's primary IP for drop-metric attribution.
+// Called by the controller when eBPF probes are attached for a pod whose IP
+// is known (PE reconcile path). The CNI ADD path does not carry a pod IP, so
+// attribution for newly-started pods becomes available after the first PE
+// reconcile, which typically completes within a few seconds.
+func (l *bpfClient) RegisterPodIP(ip string, pod types.NamespacedName) {
+	l.podIPs.register(ip, pod)
+}
+
+// DeregisterPodIP removes a pod's IP registration on deletion.
+func (l *bpfClient) DeregisterPodIP(pod types.NamespacedName) {
+	l.podIPs.deregister(pod)
+}
+
+// ResolveIP implements events.PodResolver. It is called on the ring-buffer
+// hot path and must return quickly.
+func (l *bpfClient) ResolveIP(addr string) (namespace, name string) {
+	return l.podIPs.resolve(addr)
 }
 
 func (l *bpfClient) cleanupDeletedPodsIfNeeded() {

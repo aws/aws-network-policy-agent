@@ -32,6 +32,7 @@ const (
 	flagEnableTCPResetOnDeny           = "enable-tcp-reset-on-deny"
 	flagPolicyEventLogsScope           = "policy-event-logs-scope"
 	defaultPolicyEventLogsScope        = "all"
+	flagEnablePodDropLabels            = "enable-pod-drop-labels"
 )
 
 // ControllerConfig contains the controller configuration
@@ -70,6 +71,10 @@ type ControllerConfig struct {
 	EnableTCPResetOnDeny bool
 	// PolicyEventLogsScope is the raw --policy-event-logs-scope value ("all" or "deny")
 	PolicyEventLogsScope string
+	// EnablePodDropLabels adds pod_namespace and pod_name labels to drop
+	// metrics. Pod name is high-cardinality; this is off by default.
+	// Requires enable-policy-event-logs=true.
+	EnablePodDropLabels bool
 }
 
 func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
@@ -95,6 +100,9 @@ func (cfg *ControllerConfig) BindFlags(fs *pflag.FlagSet) {
 		"Which policy verdicts produce policy events: \"all\" (ACCEPT and DENY) or \"deny\" (DENY only; ACCEPT events "+
 		"are not emitted by the datapath, so no ACCEPT flow lines or CloudWatch events). Any other value makes the agent exit at startup. "+
 		"Requires enable-policy-event-logs=true.")
+	fs.BoolVar(&cfg.EnablePodDropLabels, flagEnablePodDropLabels, false, ""+
+		"If enabled, drop metrics carry pod_namespace and pod_name labels. "+
+		"Requires enable-policy-event-logs=true. Pod name is high-cardinality; enable only when needed")
 	fs.IntVar(&cfg.ConntrackCacheCleanupPeriod, flagConntrackCacheCleanupPeriod, defaultConntrackCacheCleanupPeriod, ""+
 		"Cleanup interval for network policy agent conntrack cache")
 	fs.IntVar(&cfg.ConntrackCacheTableSize, flagConntrackCacheTableSize, defaultConntrackCacheTableSize, ""+
