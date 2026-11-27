@@ -19,19 +19,20 @@ Each controller runs one worker on `(slice, parent)` requests. Each reconcile re
 
 The work this change removes grows with the identifiers on the node times the slice events that select them. It is large only when a cluster-wide policy makes every pod change an event for every identifier.
 
-**On EKS, with real eBPF** (at `8fd1a15`, before the follow-up commits in #838). `awslbc-loadtest`: 29.5k pods in 100 namespaces with 12 NetworkPolicies each, none with peers outside its namespace; 3 real Bottlerocket nodes, kernel 6.12. Figures are the time from an agent restart until every identifier is programmed, where given, and agent CPU per node; 2 runs each:
+**On EKS, with real eBPF** (`main` at `43371aa` against #838 at `41ccc99`). `awslbc-loadtest`: 29.5k pods in 100 namespaces with 12 NetworkPolicies each, none with peers outside its namespace; 3 real Bottlerocket nodes, kernel 6.12. Figures are the time from an agent restart until every identifier is programmed, where given, and agent CPU per node, per round for the churn scenarios; 2 runs each, with 3 churn rounds per run:
 
 | Identifiers per node (touched) | Scenario | Cluster-wide policy | Today | This change |
 |---|---|---|---|---|
-| 92–94 (all) | Agent restart, until every identifier is programmed | none | 50–52 s, 38 CPU-s | 44 s, 34 CPU-s |
-| 92–94 (all) | Agent restart, until every identifier is programmed | one ClusterNetworkPolicy selecting all pods | 141–142 s, 152 CPU-s | 29–31 s, 42 CPU-s |
-| 54–60 (25–30) | 90 pods replaced in 30 namespaces | none | 17–18 CPU-s | 17–18 CPU-s |
-| 54–60 (25–30) | 90 pods replaced in 30 namespaces | one ClusterNetworkPolicy selecting all pods | 42–45 CPU-s | 18–20 CPU-s |
-| 92–94 (63–68) | 196 pods replaced in 98 namespaces | one ClusterNetworkPolicy selecting all pods | 110–116 CPU-s | 42–43 CPU-s |
+| 92–94 (all) | Agent restart, until every identifier is programmed | none | 45–50 s, 38 CPU-s | 44–45 s, 34 CPU-s |
+| 92–94 (all) | Agent restart, until every identifier is programmed | one ClusterNetworkPolicy selecting all pods | 137–143 s, 153 CPU-s | 32–33 s, 42–43 CPU-s |
+| 54–60 (25–30) | 90 pods replaced in 30 namespaces | none | 17–19 CPU-s | 18–19 CPU-s |
+| 54–60 (25–30) | 90 pods replaced in 30 namespaces | one ClusterNetworkPolicy selecting all pods | 40–42 CPU-s | 21 CPU-s |
+| 92–94 (63–68) | 196 pods replaced in 98 namespaces | one ClusterNetworkPolicy selecting all pods | 99–106 CPU-s | 41–43 CPU-s |
 
-- **Latency.** With the cluster-wide policy, cluster-policy programming p50 drops from at most 1 s to at most 0.25 s.
-- **Convergence.** A churn round takes 75–150 s to converge on both, set by the pod rollout.
-- **Kernel work.** Kernel-visible map writes are about the same on both; the saving is recomputation.
+- **Latency.** With the cluster-wide policy, cluster-policy programming p50 drops from at most 1 s to at most 0.25 s, and p99 from at most 2 s to at most 1 s. Network-policy programming is at most 0.25 s at p50 and p99 on both, apart from one 196-pod round of this change at 0.5 s p99.
+- **Convergence.** A 90-pod round converges in 59–87 s on both, with or without the cluster-wide policy, so the pod rollout sets it. A 196-pod round converges in 108–114 s today; with this change, five of six rounds took 108–114 s and one 125 s.
+- **Kernel work.** Map writes per churn round are about the same on both; the saving is recomputation. After a restart, this change writes 0.7–0.8k map entries per node, against 3.1k today without the cluster-wide policy and 41k with it.
+- **Memory.** Agent resident memory per node during churn is within about 15 MB on both. Sampled 30 s after programming settles following a restart, it is higher with this change: 182–193 MB against 149–156 MB without the cluster-wide policy, and 231–237 MB against 182–184 MB with it. `8fd1a15` measured the same. The cause is not yet known.
 
 **With a harness** (on the 2026-11-24 revision of #838, before the follow-up commits). It runs the agent's controllers and rule computation against a fake BPF client, so there are no kernel calls. It is modelled on `awslbc-loadtest`: 29.5k pods in 100 namespaces with 12 policies each. In 2 namespaces, one of those policies allows ingress from every pod. Figures are the median of 3 runs, wall time and agent CPU of one burst on the agent's node:
 
@@ -138,6 +139,7 @@ How the cases differ, now and today:
 ### Open Items
 
 - **Startup reconstruction (follow-up, inherited from today).** While stage 1 reconciles the initial list after a restart, a pass writes the policies recorded so far, and so does a CNI ADD. Each later policy's reconcile queues the identifiers it selects that have programs here, so an identifier has its full set once every policy selecting it has been reconciled. Two gaps remain, and both leave stale rules only on identifiers that no current policy selects, on any node. The rules of policies deleted while the agent was down stay on such identifiers. And a deselection the agent has not written when it stops, whether a slice deletion or an update that stops selecting an identifier, is lost, since stopping drops both queues and the restarted agent does not know the earlier selection. Today such a change is lost if its reconcile has not started; here it can also be lost after stage 1 has recorded it, while it waits in stage 2. After a restart, each policy's first reconcile queues the identifiers it selects that have programs here, recovered from their pins, so an identifier that any current policy selects is rewritten from the current slices. Today it is rewritten only if a policy selects one of its pods on this node. The follow-up builds both controllers' state from the synced caches before either stage 2 starts, then queues every identifier with programs on the node, which needs a way to list them, and has a CNI ADD that creates an identifier's programs queue both stage 2s.
+- **Memory after a restart.** On EKS, agent resident memory after a restart is higher than today by about 35 MB per node without a cluster-wide policy and 50 MB with one (see Motivation). The cause is not yet known.
 - **Attach rollback.** Detach filters on attach rollback.
 - **Debounce.** A stage-2 debounce.
 - **Unit tests.** Default-deny, cluster-policy stress and strict-mode unit tests.
